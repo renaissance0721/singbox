@@ -8,6 +8,7 @@
 
 - 初始公开版本发布
 - 面向 Linux VPS 的 `install.sh` 一键安装入口
+- 安装完成后自动打开管理面板，并注册全局命令 `sbox`
 - 一键安装 `sing-box` 与常用依赖
 - 基于 `whiptail` 的终端交互式管理面板
 - `Shadowsocks 2022`、`VLESS + Reality`、`Hysteria2` 三协议初始化

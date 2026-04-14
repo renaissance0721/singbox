@@ -5,9 +5,9 @@ set -Eeuo pipefail
 REPO_OWNER="${REPO_OWNER:-renaissance0721}"
 REPO_NAME="${REPO_NAME:-singbox}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
-TARGET_PATH="${TARGET_PATH:-/usr/local/bin/singbox-manager}"
+TARGET_PATH="${TARGET_PATH:-/usr/local/bin/sbox}"
+LEGACY_PATH="/usr/local/bin/singbox-manager"
 INDEX_URL="${INDEX_URL:-https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/index.sh}"
-RUN_AFTER_INSTALL=1
 SERVER_ADDRESS="${SINGBOX_SERVER_ADDRESS:-${SERVER_ADDRESS:-}}"
 
 log() {
@@ -41,10 +41,19 @@ download_script() {
   fi
 }
 
+attach_tty() {
+  if [[ -t 0 && -t 1 ]]; then
+    return 0
+  fi
+
+  [[ -r /dev/tty && -w /dev/tty ]] || return 1
+  exec </dev/tty >/dev/tty 2>&1
+}
+
 usage() {
   cat <<EOF
 用法:
-  bash install.sh [--server-address <domain-or-ip>] [--skip-run] [--target <path>]
+  bash install.sh [--server-address <domain-or-ip>]
 
 示例:
   bash install.sh
@@ -54,8 +63,6 @@ usage() {
 
 参数:
   --server-address  指定节点对外地址，适合非交互安装
-  --skip-run        仅安装管理脚本，不立即执行 quick-install
-  --target          指定安装路径，默认 ${TARGET_PATH}
   -h, --help        查看帮助
 EOF
 }
@@ -65,15 +72,6 @@ while (( $# > 0 )); do
     --server-address)
       [[ $# -ge 2 ]] || die "--server-address 需要一个值。"
       SERVER_ADDRESS="$2"
-      shift 2
-      ;;
-    --skip-run)
-      RUN_AFTER_INSTALL=0
-      shift
-      ;;
-    --target)
-      [[ $# -ge 2 ]] || die "--target 需要一个值。"
-      TARGET_PATH="$2"
       shift 2
       ;;
     -h|--help)
@@ -90,31 +88,30 @@ require_linux
 require_root
 
 mkdir -p "$(dirname "$TARGET_PATH")"
+rm -f "$LEGACY_PATH" 2>/dev/null || true
 download_script >"$TARGET_PATH"
 chmod 755 "$TARGET_PATH"
 
 log "管理脚本已安装到 $TARGET_PATH"
 
-if (( RUN_AFTER_INSTALL )); then
-  if [[ -n "$SERVER_ADDRESS" ]]; then
-    export SINGBOX_SERVER_ADDRESS="$SERVER_ADDRESS"
-    log "将使用指定节点地址: $SERVER_ADDRESS"
-  else
-    log "未显式指定节点地址，将尝试自动探测公网 IP。"
-  fi
+if [[ -n "$SERVER_ADDRESS" ]]; then
+  export SINGBOX_SERVER_ADDRESS="$SERVER_ADDRESS"
+  log "将使用指定节点地址: $SERVER_ADDRESS"
+else
+  log "未显式指定节点地址，将尝试自动探测公网 IP。"
+fi
 
-  exec "$TARGET_PATH" quick-install
+"$TARGET_PATH" quick-install
+
+printf '\n安装完成，正在打开 sbox 管理面板...\n\n'
+
+if attach_tty; then
+  exec "$TARGET_PATH"
 fi
 
 cat <<EOF
+安装已完成，但当前未检测到可交互终端。
 
-已完成安装。你现在可以使用以下命令：
-
-  sudo $TARGET_PATH
-  sudo $TARGET_PATH quick-install
-  sudo $TARGET_PATH show
-
-如果需要非交互初始化，可执行：
-
-  sudo SINGBOX_SERVER_ADDRESS=your.domain.com $TARGET_PATH quick-install
+请手动执行以下命令重新打开面板：
+  sbox
 EOF

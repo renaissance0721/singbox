@@ -9,16 +9,18 @@
 # 许可证: MIT
 #
 # 使用方法:
-#   bash index.sh               启动可视化管理面板
-#   bash index.sh quick-install 使用默认参数进行一键初始化
-#   bash index.sh add-client    进入新增客户端流程
-#   bash index.sh remove-client 进入删除客户端流程
-#   bash index.sh show          查看客户端信息
-#   SINGBOX_SERVER_ADDRESS=your.domain bash index.sh quick-install
+#   sbox                        启动可视化管理面板
+#   sbox quick-install          使用默认参数进行一键初始化
+#   sbox add-client             进入新增客户端流程
+#   sbox remove-client          进入删除客户端流程
+#   sbox show                   查看客户端信息
+#   SINGBOX_SERVER_ADDRESS=your.domain sbox quick-install
 #
 
 set -Eeuo pipefail
 
+ORIGINAL_ARGS=("$@")
+SELF_PATH="${BASH_SOURCE[0]}"
 SCRIPT_VERSION="0.1.0"
 SCRIPT_NAME="${0##*/}"
 APP_TITLE="Sing-box 一键安装与管理面板"
@@ -32,6 +34,14 @@ TMP_DIR="${TMP_DIR:-/tmp}"
 
 HAS_WHIPTAIL=0
 PKG_MANAGER=""
+
+if [[ "$SELF_PATH" != /* ]]; then
+  if resolved_path="$(command -v "$SELF_PATH" 2>/dev/null)"; then
+    SELF_PATH="$resolved_path"
+  elif [[ -f "$SELF_PATH" ]]; then
+    SELF_PATH="$(cd "$(dirname "$SELF_PATH")" && pwd)/$(basename "$SELF_PATH")"
+  fi
+fi
 
 init_ui() {
   if command -v whiptail >/dev/null 2>&1 && [[ -t 0 && -t 1 ]]; then
@@ -63,7 +73,15 @@ is_interactive() {
 }
 
 require_root() {
-  [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "请使用 root 或 sudo 运行此脚本。"
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    return 0
+  fi
+
+  if have_cmd sudo; then
+    exec sudo -E bash "$SELF_PATH" "${ORIGINAL_ARGS[@]}"
+  fi
+
+  die "请使用 root 运行此脚本，或先安装 sudo。"
 }
 
 require_linux() {
@@ -1361,15 +1379,15 @@ version() {
 usage() {
   cat <<EOF
 用法:
-  bash $SCRIPT_NAME                启动终端可视化管理面板
-  bash $SCRIPT_NAME quick-install  使用默认参数进行一键初始化
-  bash $SCRIPT_NAME add-client     进入新增客户端流程
-  bash $SCRIPT_NAME remove-client  进入删除客户端流程
-  bash $SCRIPT_NAME apply          重新生成配置并重载服务
-  bash $SCRIPT_NAME show           查看客户端信息
-  bash $SCRIPT_NAME overview       查看当前概览
-  bash $SCRIPT_NAME status         查看服务状态
-  bash $SCRIPT_NAME --version      查看脚本版本
+  $SCRIPT_NAME                启动终端可视化管理面板
+  $SCRIPT_NAME quick-install  使用默认参数进行一键初始化
+  $SCRIPT_NAME add-client     进入新增客户端流程
+  $SCRIPT_NAME remove-client  进入删除客户端流程
+  $SCRIPT_NAME apply          重新生成配置并重载服务
+  $SCRIPT_NAME show           查看客户端信息
+  $SCRIPT_NAME overview       查看当前概览
+  $SCRIPT_NAME status         查看服务状态
+  $SCRIPT_NAME --version      查看脚本版本
 
 说明:
   1. 面板优先使用 whiptail；在非交互环境下会自动回退为命令行提示。

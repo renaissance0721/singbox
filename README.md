@@ -25,6 +25,26 @@
 
 ## 快速开始
 
+### 一键安装到 Linux VPS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | sudo bash
+```
+
+如果你想显式指定节点域名或公网 IP：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | sudo bash -s -- --server-address your.domain.com
+```
+
+安装完成后可直接使用：
+
+```bash
+sudo singbox-manager
+sudo singbox-manager show
+sudo singbox-manager status
+```
+
 ### 方式一：克隆仓库
 
 ```bash
@@ -50,6 +70,9 @@ sudo bash index.sh
 # 使用默认参数完成三协议初始化
 sudo bash index.sh quick-install
 
+# 非交互方式指定节点地址
+sudo SINGBOX_SERVER_ADDRESS=your.domain.com bash index.sh quick-install
+
 # 新增或删除客户端
 sudo bash index.sh add-client
 sudo bash index.sh remove-client
@@ -66,7 +89,7 @@ sudo bash index.sh apply
 ## 使用流程
 
 1. 首次运行时执行 `quick-install`，或直接进入面板选择“一键安装 / 初始化三协议”。
-2. 设置节点对外地址，建议填写最终给客户端使用的域名或公网 IP。
+2. 设置节点对外地址，建议填写最终给客户端使用的域名或公网 IP；在非交互场景下可通过 `SINGBOX_SERVER_ADDRESS` 传入。
 3. 按需启用并调整 `Shadowsocks 2022`、`VLESS + Reality`、`Hysteria2`。
 4. 通过“新增客户端”或 `add-client` 创建用户。
 5. 通过“查看客户端信息”或 `show` 导出连接参数。

@@ -14,6 +14,7 @@
 #   bash index.sh add-client    进入新增客户端流程
 #   bash index.sh remove-client 进入删除客户端流程
 #   bash index.sh show          查看客户端信息
+#   SINGBOX_SERVER_ADDRESS=your.domain bash index.sh quick-install
 #
 
 set -Eeuo pipefail
@@ -55,6 +56,10 @@ die() {
 
 have_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+is_interactive() {
+  [[ -t 0 && -t 1 ]]
 }
 
 require_root() {
@@ -377,17 +382,23 @@ state_jq() {
 }
 
 set_server_address_if_empty() {
-  local current detected desired
+  local current detected desired preset
   current="$(state_get '.meta.server_address')"
 
   if [[ -n "$current" && "$current" != "null" ]]; then
     return 0
   fi
 
+  preset="${SINGBOX_SERVER_ADDRESS:-${SERVER_ADDRESS:-}}"
   detected="$(detect_public_address)"
-  desired="$(ui_input "服务器地址" "请输入节点对外地址（域名或 IP）" "$detected")" || return 1
+  desired="${preset:-$detected}"
+
+  if is_interactive; then
+    desired="$(ui_input "服务器地址" "请输入节点对外地址（域名或 IP）" "$desired")" || return 1
+  fi
+
   desired="${desired// /}"
-  [[ -n "$desired" ]] || die "服务器地址不能为空。"
+  [[ -n "$desired" ]] || die "服务器地址不能为空。请在交互环境下运行，或通过环境变量 SINGBOX_SERVER_ADDRESS 指定。"
 
   state_jq --arg addr "$desired" --arg ts "$(utc_now)" \
     '.meta.server_address = $addr | .meta.updated_at = $ts'
@@ -1364,6 +1375,7 @@ usage() {
   1. 面板优先使用 whiptail；在非交互环境下会自动回退为命令行提示。
   2. Hysteria2 默认使用自签名证书，客户端侧需要允许 insecure 或后续替换为正式证书。
   3. 已内置 Shadowsocks 2022、VLESS + Reality、Hysteria2 的多用户配置生成逻辑。
+  4. 非交互初始化可通过 SINGBOX_SERVER_ADDRESS=your.domain 指定节点地址。
 EOF
 }
 

@@ -20,7 +20,9 @@ jobs:
           sudo apt-get install -y shellcheck
 
       - name: Bash syntax check
-        run: bash -n index.sh
+        run: |
+          bash -n index.sh
+          bash -n install.sh
 
       - name: ShellCheck
-        run: shellcheck index.sh
+        run: shellcheck index.sh install.sh

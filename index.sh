@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 #
-# Sing-box VPS Manager
-# A Shell script for installing and managing sing-box on Linux VPS.
-# Supports Shadowsocks 2022, VLESS + Reality and Hysteria2.
+# Sing-box 一键安装与管理面板
+# 用于在 Linux VPS 上快速安装和管理 sing-box 的 Shell 脚本
+# 支持 Shadowsocks 2022、VLESS + Reality 和 Hysteria2
 #
-# Author: renaissance0721
-# Version: 0.1.0
-# License: MIT
+# 作者: renaissance0721
+# 版本: 0.1.0
+# 许可证: MIT
 #
-# Usage:
-#   sbox                        Open the management panel
-#   sbox quick-install          Run one-click installation
-#   sbox add-client             Open add-client flow
-#   sbox remove-client          Open remove-client flow
-#   sbox show                   Show exported client info
+# 使用方法:
+#   sbox                        打开管理面板
+#   sbox quick-install          一键安装并初始化
+#   sbox add-client             打开新增客户端流程
+#   sbox remove-client          打开删除客户端流程
+#   sbox show                   查看客户端信息
 #   SINGBOX_SERVER_ADDRESS=your.domain sbox quick-install
 #
 
@@ -23,7 +23,7 @@ ORIGINAL_ARGS=("$@")
 SELF_PATH="${BASH_SOURCE[0]}"
 SCRIPT_VERSION="0.1.0"
 SCRIPT_NAME="${0##*/}"
-APP_TITLE="Sing-box VPS Manager"
+APP_TITLE="Sing-box 管理面板"
 STATE_DIR="${STATE_DIR:-/etc/sing-box-manager}"
 STATE_FILE="${STATE_FILE:-$STATE_DIR/state.json}"
 BACKUP_DIR="${BACKUP_DIR:-$STATE_DIR/backups}"
@@ -43,12 +43,63 @@ if [[ "$SELF_PATH" != /* ]]; then
   fi
 fi
 
+setup_terminal_env() {
+  local locale_candidate=""
+
+  if ! is_interactive; then
+    return 0
+  fi
+
+  if [[ -z "${TERM:-}" || "${TERM:-}" == "dumb" ]]; then
+    export TERM="xterm-256color"
+  fi
+
+  if have_cmd locale; then
+    while IFS= read -r locale_candidate; do
+      case "$locale_candidate" in
+        zh_CN.UTF-8|zh_CN.utf8)
+          export LANG="$locale_candidate"
+          export LC_CTYPE="$locale_candidate"
+          return 0
+          ;;
+      esac
+    done < <(locale -a 2>/dev/null || true)
+
+    while IFS= read -r locale_candidate; do
+      case "$locale_candidate" in
+        C.UTF-8|C.utf8|en_US.UTF-8|en_US.utf8)
+          export LANG="$locale_candidate"
+          export LC_CTYPE="$locale_candidate"
+          return 0
+          ;;
+      esac
+    done < <(locale -a 2>/dev/null || true)
+  fi
+}
+
 init_ui() {
   if command -v whiptail >/dev/null 2>&1 && [[ -t 0 && -t 1 ]]; then
     HAS_WHIPTAIL=1
   else
     HAS_WHIPTAIL=0
   fi
+}
+
+ensure_ui_backend() {
+  if ! is_interactive; then
+    init_ui
+    return 0
+  fi
+
+  init_ui
+  if (( HAS_WHIPTAIL )); then
+    return 0
+  fi
+
+  install_dependencies
+  init_ui
+
+  (( HAS_WHIPTAIL )) || die "未检测到 whiptail，无法启用方向键菜单，请手动安装后重试。"
 }
 
 log() {
@@ -81,11 +132,11 @@ require_root() {
     exec sudo -E bash "$SELF_PATH" "${ORIGINAL_ARGS[@]}"
   fi
 
-  die "Please run this script as root, or install sudo first."
+  die "请使用 root 运行此脚本，或先安装 sudo。"
 }
 
 require_linux() {
-  [[ "$(uname -s)" == "Linux" ]] || die "This script only supports Linux VPS."
+  [[ "$(uname -s)" == "Linux" ]] || die "该脚本仅支持 Linux VPS。"
 }
 
 utc_now() {
@@ -176,17 +227,17 @@ ui_menu() {
       shift 2
     done
     local choice
-    read -r -p "Select: " choice
+    read -r -p "请选择: " choice
     printf '%s\n' "$choice"
   fi
 }
 
 ui_protocol_menu() {
-  ui_menu "$APP_TITLE" "Select a protocol" \
+  ui_menu "$APP_TITLE" "请选择需要操作的协议" \
     "1" "Shadowsocks 2022" \
     "2" "VLESS + Reality" \
     "3" "Hysteria2" \
-    "0" "Back"
+    "0" "返回"
 }
 
 detect_pkg_manager() {
@@ -218,7 +269,7 @@ install_dependencies() {
       yum install -y curl jq openssl ca-certificates newt util-linux iproute
       ;;
     *)
-      die "Unsupported package manager. Please install curl, jq, openssl, whiptail and uuidgen manually."
+      die "暂不支持自动安装依赖，请手动安装 curl、jq、openssl、whiptail、uuidgen 后再运行。"
       ;;
   esac
 
@@ -227,9 +278,9 @@ install_dependencies() {
 
 install_sing_box() {
   if have_cmd sing-box; then
-    log "sing-box is already installed. Skipping installation."
+    log "检测到 sing-box 已安装，跳过安装步骤。"
   else
-    log "Installing sing-box from the official installer..."
+    log "开始通过官方安装脚本安装 sing-box..."
     curl -fsSL https://sing-box.app/install.sh | sh
   fi
 
@@ -246,11 +297,11 @@ restart_sing_box() {
   if service_exists; then
     systemctl enable sing-box >/dev/null 2>&1 || true
     if ! systemctl restart sing-box; then
-      ui_show_text "sing-box Start Failed" "$(journalctl -u sing-box -n 30 --no-pager 2>/dev/null || echo 'Unable to read sing-box logs.')"
+      ui_show_text "sing-box 启动失败" "$(journalctl -u sing-box -n 30 --no-pager 2>/dev/null || echo '无法读取 sing-box 日志。')"
       return 1
     fi
   else
-    warn "sing-box systemd service was not found. Please start sing-box manually."
+    warn "未检测到 sing-box systemd 服务，请手动启动 sing-box。"
   fi
 }
 
@@ -319,7 +370,7 @@ generate_reality_keypair() {
   private_key="$(printf '%s\n' "$output" | awk -F': ' '/PrivateKey/ {print $2; exit}')"
   public_key="$(printf '%s\n' "$output" | awk -F': ' '/PublicKey/ {print $2; exit}')"
 
-  [[ -n "$private_key" && -n "$public_key" ]] || die "Unable to generate the Reality key pair. Make sure sing-box is installed correctly."
+  [[ -n "$private_key" && -n "$public_key" ]] || die "无法生成 Reality 密钥对，请确认 sing-box 已正确安装。"
 
   printf '%s\t%s\n' "$private_key" "$public_key"
 }
@@ -412,11 +463,11 @@ set_server_address_if_empty() {
   desired="${preset:-$detected}"
 
   if is_interactive; then
-    desired="$(ui_input "Server Address" "Enter the public domain or IP for this node" "$desired")" || return 1
+    desired="$(ui_input "服务器地址" "请输入节点对外地址（域名或 IP）" "$desired")" || return 1
   fi
 
   desired="${desired// /}"
-  [[ -n "$desired" ]] || die "Server address cannot be empty. Run in interactive mode or set SINGBOX_SERVER_ADDRESS."
+  [[ -n "$desired" ]] || die "服务器地址不能为空。请在交互环境下运行，或通过环境变量 SINGBOX_SERVER_ADDRESS 指定。"
 
   state_jq --arg addr "$desired" --arg ts "$(utc_now)" \
     '.meta.server_address = $addr | .meta.updated_at = $ts'
@@ -433,7 +484,7 @@ prompt_nonempty() {
     value="${value#"${value%%[![:space:]]*}"}"
     value="${value%"${value##*[![:space:]]}"}"
     [[ -n "$value" ]] && break
-    ui_msg "Input cannot be empty. Please try again."
+    ui_msg "输入不能为空，请重新输入。"
   done
 
   printf '%s\n' "$value"
@@ -450,11 +501,11 @@ prompt_number() {
   while true; do
     value="$(ui_input "$title" "$text" "$default_value")" || return 1
     [[ "$value" =~ ^[0-9]+$ ]] || {
-      ui_msg "Please enter a number."
+      ui_msg "请输入数字。"
       continue
     }
     (( value >= min_value && value <= max_value )) || {
-      ui_msg "Please enter a number between ${min_value} and ${max_value}."
+      ui_msg "请输入 ${min_value}-${max_value} 范围内的数字。"
       continue
     }
     printf '%s\n' "$value"
@@ -510,14 +561,14 @@ select_protocol_user() {
   done < <(jq -r ".protocols.${protocol}.users[]?.name" "$STATE_FILE")
 
   if (( ${#users[@]} == 0 )); then
-    ui_msg "No clients are available for this protocol."
+    ui_msg "当前协议下没有可选择的客户端。"
     return 1
   fi
 
   for selected_index in "${!users[@]}"; do
     options+=("$((selected_index + 1))" "${users[$selected_index]}")
   done
-  options+=("0" "Back")
+  options+=("0" "返回")
 
   choice="$(ui_menu "$title" "$prompt" "${options[@]}")" || return 1
   [[ "$choice" == "0" ]] && return 1
@@ -535,7 +586,7 @@ ensure_hysteria_cert() {
   key_path="$(state_get '.protocols.hysteria2.key_path')"
 
   [[ -n "$server_name" && "$server_name" != "null" ]] || server_name="$(state_get '.meta.server_address')"
-  [[ -n "$server_name" && "$server_name" != "null" ]] || die "Hysteria2 certificate generation requires a valid server address."
+  [[ -n "$server_name" && "$server_name" != "null" ]] || die "Hysteria2 证书需要一个有效的服务器地址。"
 
   mkdir -p "$(dirname "$cert_path")" "$(dirname "$key_path")"
 
@@ -679,26 +730,26 @@ validate_state() {
   hy2_enabled="$(state_get '.protocols.hysteria2.enabled')"
 
   if [[ "$ss_enabled" == "true" ]]; then
-    [[ "$(state_get '.protocols.shadowsocks.users | length')" -gt 0 ]] || errors+=$'Shadowsocks requires at least one client.\n'
-    [[ -n "$(state_get '.protocols.shadowsocks.server_password')" ]] || errors+=$'Shadowsocks server password cannot be empty.\n'
+    [[ "$(state_get '.protocols.shadowsocks.users | length')" -gt 0 ]] || errors+=$'Shadowsocks 至少需要一个客户端。\n'
+    [[ -n "$(state_get '.protocols.shadowsocks.server_password')" ]] || errors+=$'Shadowsocks 服务端密码不能为空。\n'
   fi
 
   if [[ "$vless_enabled" == "true" ]]; then
-    [[ "$(state_get '.protocols.vless_reality.users | length')" -gt 0 ]] || errors+=$'VLESS + Reality requires at least one client.\n'
-    [[ -n "$(state_get '.protocols.vless_reality.private_key')" ]] || errors+=$'VLESS + Reality private_key cannot be empty.\n'
-    [[ -n "$(state_get '.protocols.vless_reality.public_key')" ]] || errors+=$'VLESS + Reality public_key cannot be empty.\n'
-    [[ -n "$(state_get '.protocols.vless_reality.short_id')" ]] || errors+=$'VLESS + Reality short_id cannot be empty.\n'
+    [[ "$(state_get '.protocols.vless_reality.users | length')" -gt 0 ]] || errors+=$'VLESS + Reality 至少需要一个客户端。\n'
+    [[ -n "$(state_get '.protocols.vless_reality.private_key')" ]] || errors+=$'VLESS + Reality 私钥不能为空。\n'
+    [[ -n "$(state_get '.protocols.vless_reality.public_key')" ]] || errors+=$'VLESS + Reality 公钥不能为空。\n'
+    [[ -n "$(state_get '.protocols.vless_reality.short_id')" ]] || errors+=$'VLESS + Reality short_id 不能为空。\n'
   fi
 
   if [[ "$hy2_enabled" == "true" ]]; then
     ensure_hysteria_cert
-    [[ "$(state_get '.protocols.hysteria2.users | length')" -gt 0 ]] || errors+=$'Hysteria2 requires at least one client.\n'
-    [[ -f "$(state_get '.protocols.hysteria2.cert_path')" ]] || errors+=$'Hysteria2 certificate file does not exist.\n'
-    [[ -f "$(state_get '.protocols.hysteria2.key_path')" ]] || errors+=$'Hysteria2 key file does not exist.\n'
+    [[ "$(state_get '.protocols.hysteria2.users | length')" -gt 0 ]] || errors+=$'Hysteria2 至少需要一个客户端。\n'
+    [[ -f "$(state_get '.protocols.hysteria2.cert_path')" ]] || errors+=$'Hysteria2 证书文件不存在。\n'
+    [[ -f "$(state_get '.protocols.hysteria2.key_path')" ]] || errors+=$'Hysteria2 私钥文件不存在。\n'
   fi
 
   if [[ -n "$errors" ]]; then
-    ui_show_text "Validation Failed" "$errors"
+    ui_show_text "配置校验失败" "$errors"
     return 1
   fi
 
@@ -912,7 +963,7 @@ apply_config() {
 
   if [[ "$enabled_count" -eq 0 ]]; then
     stop_sing_box
-    ui_msg "No protocols are enabled. sing-box has been stopped."
+    ui_msg "当前没有启用任何协议，sing-box 服务已停止。"
     return 0
   fi
 
@@ -924,7 +975,7 @@ apply_config() {
   if have_cmd sing-box; then
     if ! check_output="$(sing-box check -c "$tmp_config" 2>&1)"; then
       rm -f "$tmp_config"
-      ui_show_text "sing-box Config Check Failed" "$check_output"
+      ui_show_text "sing-box 配置检查失败" "$check_output"
       return 1
     fi
   fi
@@ -937,7 +988,7 @@ apply_config() {
   apply_firewall_rules
   restart_sing_box || return 1
 
-  ui_msg "Config written to $CONFIG_FILE. Service reloaded and client info exported to $CLIENT_DIR."
+  ui_msg "配置已写入 $CONFIG_FILE，服务已重载。客户端信息已导出到 $CLIENT_DIR。"
 }
 
 quick_install() {
@@ -957,11 +1008,11 @@ quick_install() {
 configure_server_address() {
   local current desired
   current="$(state_get '.meta.server_address')"
-  desired="$(prompt_nonempty "Server Address" "Enter the public domain or IP for this node" "$current")" || return 1
+  desired="$(prompt_nonempty "服务器地址" "请输入节点对外地址（域名或 IP）" "$current")" || return 1
   state_jq --arg addr "$desired" --arg ts "$(utc_now)" '.meta.server_address = $addr | .meta.updated_at = $ts'
 
   if [[ "$(state_get '.protocols.hysteria2.enabled')" == "true" ]]; then
-    if ui_yesno "Also update the Hysteria2 certificate hostname and regenerate the self-signed certificate?"; then
+    if ui_yesno "是否同步更新 Hysteria2 的证书域名并重新生成自签名证书？"; then
       state_jq --arg addr "$desired" --arg ts "$(utc_now)" \
         '.protocols.hysteria2.tls_server_name = $addr | .meta.updated_at = $ts'
       rm -f "$(state_get '.protocols.hysteria2.cert_path')" "$(state_get '.protocols.hysteria2.key_path')" 2>/dev/null || true
@@ -975,17 +1026,17 @@ configure_server_address() {
 configure_shadowsocks() {
   local current_port port regenerate_password server_password
 
-  if ! ui_yesno "Enable or keep Shadowsocks 2022 enabled? Choosing No will disable this protocol."; then
+  if ! ui_yesno "是否启用或保持启用 Shadowsocks 2022？选择“否”将停用该协议。"; then
     state_jq --arg ts "$(utc_now)" '.protocols.shadowsocks.enabled = false | .meta.updated_at = $ts'
     apply_config
     return 0
   fi
 
   current_port="$(state_get '.protocols.shadowsocks.port')"
-  port="$(prompt_number "Shadowsocks Port" "Enter the Shadowsocks listen port" "$current_port" 1 65535)" || return 1
+  port="$(prompt_number "Shadowsocks 端口" "请输入 Shadowsocks 监听端口" "$current_port" 1 65535)" || return 1
 
   regenerate_password="false"
-  if ui_yesno "Regenerate the Shadowsocks server master password?"; then
+  if ui_yesno "是否重新生成 Shadowsocks 服务端主密码？"; then
     regenerate_password="true"
   fi
 
@@ -1015,7 +1066,7 @@ configure_shadowsocks() {
 configure_vless_reality() {
   local current_port port current_sni sni current_handshake_port handshake_port keypair private_key public_key short_id
 
-  if ! ui_yesno "Enable or keep VLESS + Reality enabled? Choosing No will disable this protocol."; then
+  if ! ui_yesno "是否启用或保持启用 VLESS + Reality？选择“否”将停用该协议。"; then
     state_jq --arg ts "$(utc_now)" '.protocols.vless_reality.enabled = false | .meta.updated_at = $ts'
     apply_config
     return 0
@@ -1025,15 +1076,15 @@ configure_vless_reality() {
   current_sni="$(state_get '.protocols.vless_reality.server_name')"
   current_handshake_port="$(state_get '.protocols.vless_reality.handshake_port')"
 
-  port="$(prompt_number "VLESS Port" "Enter the VLESS + Reality listen port" "$current_port" 1 65535)" || return 1
-  sni="$(prompt_nonempty "Reality SNI" "Enter the Reality fallback domain, for example www.cloudflare.com" "$current_sni")" || return 1
-  handshake_port="$(prompt_number "Reality Handshake Port" "Enter the Reality fallback site port" "$current_handshake_port" 1 65535)" || return 1
+  port="$(prompt_number "VLESS 端口" "请输入 VLESS + Reality 监听端口" "$current_port" 1 65535)" || return 1
+  sni="$(prompt_nonempty "Reality SNI" "请输入 Reality 伪装域名（例如 www.cloudflare.com）" "$current_sni")" || return 1
+  handshake_port="$(prompt_number "Reality 握手端口" "请输入 Reality 伪装站点端口" "$current_handshake_port" 1 65535)" || return 1
 
   private_key="$(state_get '.protocols.vless_reality.private_key')"
   public_key="$(state_get '.protocols.vless_reality.public_key')"
   short_id="$(state_get '.protocols.vless_reality.short_id')"
 
-  if ui_yesno "Regenerate the Reality key pair and short_id?"; then
+  if ui_yesno "是否重新生成 Reality 密钥和 short_id？"; then
     keypair="$(generate_reality_keypair)"
     private_key="${keypair%%$'\t'*}"
     public_key="${keypair##*$'\t'}"
@@ -1074,7 +1125,7 @@ configure_hysteria2() {
   local current_port current_up current_down current_sni current_masquerade
   local port up_mbps down_mbps tls_server_name masquerade obfs_password
 
-  if ! ui_yesno "Enable or keep Hysteria2 enabled? Choosing No will disable this protocol."; then
+  if ! ui_yesno "是否启用或保持启用 Hysteria2？选择“否”将停用该协议。"; then
     state_jq --arg ts "$(utc_now)" '.protocols.hysteria2.enabled = false | .meta.updated_at = $ts'
     apply_config
     return 0
@@ -1086,14 +1137,14 @@ configure_hysteria2() {
   current_sni="$(state_get '.protocols.hysteria2.tls_server_name')"
   current_masquerade="$(state_get '.protocols.hysteria2.masquerade')"
 
-  port="$(prompt_number "Hysteria2 Port" "Enter the Hysteria2 listen port (UDP)" "$current_port" 1 65535)" || return 1
-  up_mbps="$(prompt_number "Upload Bandwidth" "Enter the upload bandwidth in Mbps" "$current_up" 1 100000)" || return 1
-  down_mbps="$(prompt_number "Download Bandwidth" "Enter the download bandwidth in Mbps" "$current_down" 1 100000)" || return 1
-  tls_server_name="$(prompt_nonempty "TLS Server Name" "Enter the Hysteria2 certificate domain or IP" "$current_sni")" || return 1
-  masquerade="$(prompt_nonempty "Masquerade" "Enter the masquerade URL used for failed authentication" "$current_masquerade")" || return 1
+  port="$(prompt_number "Hysteria2 端口" "请输入 Hysteria2 监听端口（UDP）" "$current_port" 1 65535)" || return 1
+  up_mbps="$(prompt_number "上行带宽" "请输入上行 Mbps" "$current_up" 1 100000)" || return 1
+  down_mbps="$(prompt_number "下行带宽" "请输入下行 Mbps" "$current_down" 1 100000)" || return 1
+  tls_server_name="$(prompt_nonempty "TLS Server Name" "请输入 Hysteria2 证书域名或 IP" "$current_sni")" || return 1
+  masquerade="$(prompt_nonempty "Masquerade" "请输入认证失败时伪装地址" "$current_masquerade")" || return 1
 
   obfs_password="$(state_get '.protocols.hysteria2.obfs_password')"
-  if ui_yesno "Regenerate the Hysteria2 Salamander obfs password?"; then
+  if ui_yesno "是否重新生成 Hysteria2 的 Salamander 混淆密码？"; then
     obfs_password="$(generate_password)"
   fi
   if [[ -z "$obfs_password" || "$obfs_password" == "null" ]]; then
@@ -1112,7 +1163,7 @@ configure_hysteria2() {
     .meta.updated_at = $ts
   '
 
-  if ui_yesno "Regenerate the Hysteria2 self-signed certificate?"; then
+  if ui_yesno "是否重新生成 Hysteria2 自签名证书？"; then
     rm -f "$(state_get '.protocols.hysteria2.cert_path')" "$(state_get '.protocols.hysteria2.key_path')" 2>/dev/null || true
   fi
   ensure_hysteria_cert
@@ -1131,13 +1182,13 @@ add_client() {
   case "$protocol_choice" in
     1)
       [[ "$(state_get '.protocols.shadowsocks.enabled')" == "true" ]] || {
-        ui_msg "Shadowsocks is not enabled yet. Configure it first."
+        ui_msg "Shadowsocks 当前未启用，请先完成协议配置。"
         return 1
       }
       while true; do
-        name="$(prompt_nonempty "Add Client" "Enter the Shadowsocks client name" "ss-client-$(date +%H%M%S)")" || return 1
+        name="$(prompt_nonempty "新增客户端" "请输入 Shadowsocks 客户端名称" "ss-client-$(date +%H%M%S)")" || return 1
         if user_exists "shadowsocks" "$name"; then
-          ui_msg "That client name already exists. Please choose another one."
+          ui_msg "该客户端名称已存在，请换一个名称。"
           continue
         fi
         break
@@ -1148,13 +1199,13 @@ add_client() {
       ;;
     2)
       [[ "$(state_get '.protocols.vless_reality.enabled')" == "true" ]] || {
-        ui_msg "VLESS + Reality is not enabled yet. Configure it first."
+        ui_msg "VLESS + Reality 当前未启用，请先完成协议配置。"
         return 1
       }
       while true; do
-        name="$(prompt_nonempty "Add Client" "Enter the VLESS client name" "vless-client-$(date +%H%M%S)")" || return 1
+        name="$(prompt_nonempty "新增客户端" "请输入 VLESS 客户端名称" "vless-client-$(date +%H%M%S)")" || return 1
         if user_exists "vless_reality" "$name"; then
-          ui_msg "That client name already exists. Please choose another one."
+          ui_msg "该客户端名称已存在，请换一个名称。"
           continue
         fi
         break
@@ -1165,13 +1216,13 @@ add_client() {
       ;;
     3)
       [[ "$(state_get '.protocols.hysteria2.enabled')" == "true" ]] || {
-        ui_msg "Hysteria2 is not enabled yet. Configure it first."
+        ui_msg "Hysteria2 当前未启用，请先完成协议配置。"
         return 1
       }
       while true; do
-        name="$(prompt_nonempty "Add Client" "Enter the Hysteria2 client name" "hy2-client-$(date +%H%M%S)")" || return 1
+        name="$(prompt_nonempty "新增客户端" "请输入 Hysteria2 客户端名称" "hy2-client-$(date +%H%M%S)")" || return 1
         if user_exists "hysteria2" "$name"; then
-          ui_msg "That client name already exists. Please choose another one."
+          ui_msg "该客户端名称已存在，请换一个名称。"
           continue
         fi
         break
@@ -1209,23 +1260,23 @@ remove_client() {
   esac
 
   [[ "$(state_get ".protocols.${protocol_key}.enabled")" == "true" ]] || {
-    ui_msg "${protocol_label} is not enabled yet. Configure it first."
+    ui_msg "${protocol_label} 当前未启用，请先完成协议配置。"
     return 1
   }
 
   user_count="$(state_get ".protocols.${protocol_key}.users | length")"
   if [[ "$user_count" -eq 0 ]]; then
-    ui_msg "No ${protocol_label} client is available to remove."
+    ui_msg "${protocol_label} 当前没有可删除的客户端。"
     return 1
   fi
 
   if [[ "$user_count" -eq 1 ]]; then
-    ui_msg "${protocol_label} only has one client left. Add another client or disable the protocol first."
+    ui_msg "${protocol_label} 当前仅剩 1 个客户端。请先新增客户端，或停用该协议后再删除。"
     return 1
   fi
 
-  user_name="$(select_protocol_user "$protocol_key" "Remove Client" "Select the ${protocol_label} client to remove")" || return 1
-  ui_yesno "Remove client ${user_name}?" || return 0
+  user_name="$(select_protocol_user "$protocol_key" "删除客户端" "请选择要删除的 ${protocol_label} 客户端")" || return 1
+  ui_yesno "确认删除客户端 ${user_name} 吗？" || return 0
 
   remove_protocol_user "$protocol_key" "$user_name"
   apply_config
@@ -1235,11 +1286,11 @@ show_client_info() {
   write_client_exports
 
   if [[ ! -s "$CLIENT_DIR/all-clients.txt" ]]; then
-    ui_msg "No client information is available yet."
+    ui_msg "当前还没有可展示的客户端信息。"
     return 0
   fi
 
-  ui_show_text "Client Info" "$(cat "$CLIENT_DIR/all-clients.txt")"
+  ui_show_text "客户端信息" "$(cat "$CLIENT_DIR/all-clients.txt")"
 }
 
 show_overview() {
@@ -1258,11 +1309,11 @@ show_overview() {
 
   overview=$(
     cat <<EOF
-Script Version: $SCRIPT_VERSION
-Server Address: ${server_address:-not set}
-sing-box Status: $service_status
-Config File: $CONFIG_FILE
-Client Export Dir: $CLIENT_DIR
+脚本版本: $SCRIPT_VERSION
+节点地址: ${server_address:-未设置}
+sing-box 状态: $service_status
+配置文件: $CONFIG_FILE
+客户端导出目录: $CLIENT_DIR
 
 [Shadowsocks 2022]
 enabled = $(state_get '.protocols.shadowsocks.enabled')
@@ -1286,7 +1337,7 @@ users = $hy2_users
 EOF
   )
 
-  ui_show_text "Overview" "$overview"
+  ui_show_text "当前概览" "$overview"
 }
 
 show_service_status() {
@@ -1295,24 +1346,24 @@ show_service_status() {
   if have_cmd sing-box; then
     text+="sing-box version: $(sing-box version 2>/dev/null | head -n 1)\n"
   else
-    text+="sing-box version: not installed\n"
+    text+="sing-box version: 未安装\n"
   fi
 
   if service_exists; then
     text+="service active: $(systemctl is-active sing-box 2>/dev/null)\n"
     text+="service enabled: $(systemctl is-enabled sing-box 2>/dev/null)\n"
-    text+="\nRecent logs:\n"
+    text+="\n最近日志:\n"
     text+="$(journalctl -u sing-box -n 20 --no-pager 2>/dev/null || true)"
   else
-    text+="sing-box systemd service was not found."
+    text+="未检测到 sing-box systemd 服务。"
   fi
 
-  ui_show_text "Service Status" "$(printf '%b' "$text")"
+  ui_show_text "服务状态" "$(printf '%b' "$text")"
 }
 
 uninstall_sbox() {
   local uninstall_text
-  uninstall_text=$'This will:\n- stop and disable sing-box\n- remove the sing-box package if installed\n- delete /etc/sing-box and /etc/sing-box-manager\n- remove the sbox command\n\nContinue?'
+  uninstall_text=$'这将执行以下操作：\n- 停止并禁用 sing-box\n- 卸载 sing-box 软件包（如果存在）\n- 删除 /etc/sing-box 和 /etc/sing-box-manager\n- 删除 sbox 命令\n\n是否继续？'
 
   ui_yesno "$uninstall_text" || return 0
 
@@ -1347,9 +1398,9 @@ uninstall_sbox() {
   fi
 
   if is_interactive; then
-    ui_msg "Uninstall completed."
+    ui_msg "卸载完成。"
   else
-    printf 'Uninstall completed.\n'
+    printf '卸载完成。\n'
   fi
 
   exit 0
@@ -1359,20 +1410,20 @@ main_menu() {
   local choice
 
   while true; do
-    choice="$(ui_menu "$APP_TITLE" "Select an action" \
-      "1" "Quick Install / Initialize All Protocols" \
-      "2" "Set Server Address" \
-      "3" "Configure Shadowsocks 2022" \
-      "4" "Configure VLESS + Reality" \
-      "5" "Configure Hysteria2" \
-      "6" "Add Client" \
-      "7" "Remove Client" \
-      "8" "Show Client Info" \
-      "9" "Apply Config and Reload Service" \
-      "10" "Show Overview" \
-      "11" "Show Service Status" \
-      "12" "Uninstall" \
-      "0" "Exit")" || break
+    choice="$(ui_menu "$APP_TITLE" "请选择要执行的操作" \
+      "1" "一键安装 / 初始化三协议" \
+      "2" "设置节点对外地址" \
+      "3" "配置 Shadowsocks 2022" \
+      "4" "配置 VLESS + Reality" \
+      "5" "配置 Hysteria2" \
+      "6" "新增客户端" \
+      "7" "删除客户端" \
+      "8" "查看客户端信息" \
+      "9" "重新生成配置并重载服务" \
+      "10" "查看当前概览" \
+      "11" "查看服务状态" \
+      "12" "卸载" \
+      "0" "退出")" || break
 
     case "$choice" in
       1)
@@ -1415,7 +1466,7 @@ main_menu() {
         break
         ;;
       *)
-        ui_msg "Invalid option. Please try again."
+        ui_msg "无效选项，请重新选择。"
         ;;
     esac
   done
@@ -1427,26 +1478,27 @@ version() {
 
 usage() {
   cat <<EOF
-Usage:
-  $SCRIPT_NAME                Open the management panel
-  $SCRIPT_NAME quick-install  Run one-click installation
-  $SCRIPT_NAME add-client     Open add-client flow
-  $SCRIPT_NAME remove-client  Open remove-client flow
-  $SCRIPT_NAME apply          Rebuild config and reload service
-  $SCRIPT_NAME show           Show exported client info
-  $SCRIPT_NAME overview       Show current overview
-  $SCRIPT_NAME status         Show service status
-  $SCRIPT_NAME uninstall      Uninstall sing-box and sbox
-  $SCRIPT_NAME --version      Show script version
+用法:
+  $SCRIPT_NAME                打开管理面板
+  $SCRIPT_NAME quick-install  一键安装并初始化
+  $SCRIPT_NAME add-client     打开新增客户端流程
+  $SCRIPT_NAME remove-client  打开删除客户端流程
+  $SCRIPT_NAME apply          重新生成配置并重载服务
+  $SCRIPT_NAME show           查看客户端信息
+  $SCRIPT_NAME overview       查看当前概览
+  $SCRIPT_NAME status         查看服务状态
+  $SCRIPT_NAME uninstall      卸载 sing-box 和 sbox
+  $SCRIPT_NAME --version      查看脚本版本
 
-Notes:
-  1. The panel prefers whiptail and falls back to plain CLI prompts if needed.
-  2. Hysteria2 uses a self-signed certificate by default.
-  3. Non-interactive installation can use SINGBOX_SERVER_ADDRESS=your.domain.
+说明:
+  1. 面板优先使用 whiptail，确保可以使用方向键选择。
+  2. Hysteria2 默认使用自签名证书。
+  3. 非交互安装可通过 SINGBOX_SERVER_ADDRESS=your.domain 指定节点地址。
 EOF
 }
 
 main() {
+  setup_terminal_env
   init_ui
 
   case "${1:-panel}" in
@@ -1474,6 +1526,7 @@ main() {
     add-client)
       require_linux
       require_root
+      ensure_ui_backend
       ensure_dirs
       init_state_file
       add_client
@@ -1481,6 +1534,7 @@ main() {
     remove-client)
       require_linux
       require_root
+      ensure_ui_backend
       ensure_dirs
       init_state_file
       remove_client
@@ -1513,6 +1567,7 @@ main() {
     panel|"")
       require_linux
       require_root
+      ensure_ui_backend
       ensure_dirs
       init_state_file
       main_menu

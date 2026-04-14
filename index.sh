@@ -470,6 +470,50 @@ set_node_name_if_empty() {
     '.meta.node_name = $node_name | .meta.updated_at = $ts'
 }
 
+prompt_node_name_for_protocol() {
+  local current desired
+  current="$(state_get '.meta.node_name')"
+  desired="$(ui_input "节点名称" "请输入该协议在客户端中显示的节点名称" "${current:-我的节点}")" || return 1
+  desired="${desired//[$'\r\n']}"
+  [[ -n "$desired" ]] || die "节点名称不能为空。"
+
+  state_jq --arg node_name "$desired" --arg ts "$(utc_now)" \
+    '.meta.node_name = $node_name | .meta.updated_at = $ts'
+}
+
+migrate_legacy_auto_init_state() {
+  local should_reset
+
+  should_reset="$(
+    jq -r '
+      (.meta.node_name == "" or .meta.node_name == null)
+      and (.protocols.shadowsocks.enabled == true)
+      and (.protocols.vless_reality.enabled == true)
+      and (.protocols.hysteria2.enabled == true)
+      and ((.protocols.shadowsocks.users | length) == 1 and .protocols.shadowsocks.users[0].name == "ss-client-1")
+      and ((.protocols.vless_reality.users | length) == 1 and .protocols.vless_reality.users[0].name == "vless-client-1")
+      and ((.protocols.hysteria2.users | length) == 1 and .protocols.hysteria2.users[0].name == "hy2-client-1")
+    ' "$STATE_FILE" 2>/dev/null || echo false
+  )"
+
+  [[ "$should_reset" == "true" ]] || return 0
+
+  state_jq --arg ts "$(utc_now)" '
+    .protocols.shadowsocks.enabled = false |
+    .protocols.shadowsocks.users = [] |
+    .protocols.shadowsocks.server_password = "" |
+    .protocols.vless_reality.enabled = false |
+    .protocols.vless_reality.users = [] |
+    .protocols.vless_reality.private_key = "" |
+    .protocols.vless_reality.public_key = "" |
+    .protocols.vless_reality.short_id = "" |
+    .protocols.hysteria2.enabled = false |
+    .protocols.hysteria2.users = [] |
+    .protocols.hysteria2.obfs_password = "" |
+    .meta.updated_at = $ts
+  '
+}
+
 set_server_address_if_empty() {
   local current detected desired preset
   current="$(state_get '.meta.server_address')"
@@ -953,7 +997,7 @@ reality.public_key = $vless_public_key
 reality.short_id = $vless_short_id
 transport = tcp
 EOF
-      link="vless://${uuid}@${host}:${vless_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(uri_encode "$vless_server_name")&fp=chrome&pbk=$(uri_encode "$vless_public_key")&sid=$(uri_encode "$vless_short_id")&type=tcp&headerType=none#$(uri_encode "${node_name}-VLESS-${name}")"
+      link="vless://${uuid}@${host}:${vless_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(uri_encode "$vless_server_name")&fp=chrome&pbk=$(uri_encode "$vless_public_key")&sid=$(uri_encode "$vless_short_id")&spx=%2F&alpn=h2&type=tcp&headerType=none#$(uri_encode "${node_name}-VLESS-${name}")"
       printf '%s\n' "$link" >>"$links_file"
       cat "$CLIENT_DIR/vless-reality/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
@@ -1033,6 +1077,7 @@ quick_install() {
   install_dependencies
   install_sing_box
   init_state_file
+  migrate_legacy_auto_init_state
   set_node_name_if_empty
   set_server_address_if_empty
   ui_msg "基础环境安装完成，请继续在面板中按需启用并配置协议。"
@@ -1068,13 +1113,13 @@ configure_node_name() {
 configure_shadowsocks() {
   local current_port port regenerate_password server_password
 
-  set_node_name_if_empty
-
   if ! ui_yesno "是否启用或保持启用 Shadowsocks 2022？选择“否”将停用该协议。"; then
     state_jq --arg ts "$(utc_now)" '.protocols.shadowsocks.enabled = false | .meta.updated_at = $ts'
     apply_config
     return 0
   fi
+
+  prompt_node_name_for_protocol
 
   current_port="$(state_get '.protocols.shadowsocks.port')"
   port="$(prompt_number "Shadowsocks 端口" "请输入 Shadowsocks 监听端口" "$current_port" 1 65535)" || return 1
@@ -1110,13 +1155,13 @@ configure_shadowsocks() {
 configure_vless_reality() {
   local current_port port current_sni sni current_handshake_port handshake_port keypair private_key public_key short_id
 
-  set_node_name_if_empty
-
   if ! ui_yesno "是否启用或保持启用 VLESS + Reality？选择“否”将停用该协议。"; then
     state_jq --arg ts "$(utc_now)" '.protocols.vless_reality.enabled = false | .meta.updated_at = $ts'
     apply_config
     return 0
   fi
+
+  prompt_node_name_for_protocol
 
   current_port="$(state_get '.protocols.vless_reality.port')"
   current_sni="$(state_get '.protocols.vless_reality.server_name')"
@@ -1171,13 +1216,13 @@ configure_hysteria2() {
   local current_port current_up current_down current_sni current_masquerade
   local port up_mbps down_mbps tls_server_name masquerade obfs_password
 
-  set_node_name_if_empty
-
   if ! ui_yesno "是否启用或保持启用 Hysteria2？选择“否”将停用该协议。"; then
     state_jq --arg ts "$(utc_now)" '.protocols.hysteria2.enabled = false | .meta.updated_at = $ts'
     apply_config
     return 0
   fi
+
+  prompt_node_name_for_protocol
 
   current_port="$(state_get '.protocols.hysteria2.port')"
   current_up="$(state_get '.protocols.hysteria2.up_mbps')"
@@ -1225,7 +1270,6 @@ configure_hysteria2() {
 
 add_client() {
   local protocol_choice name value
-  set_node_name_if_empty
   protocol_choice="$(ui_protocol_menu)" || return 1
 
   case "$protocol_choice" in

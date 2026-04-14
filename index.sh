@@ -383,6 +383,10 @@ generate_hex() {
   openssl rand -hex "$bytes" | tr -d '\n'
 }
 
+generate_vless_port() {
+  printf '%s\n' "$((10000 + RANDOM % 50001))"
+}
+
 generate_base64_bytes() {
   local length=${1:-32}
   if have_cmd sing-box; then
@@ -414,8 +418,9 @@ init_state_file() {
     return 0
   fi
 
-  local now
+  local now vless_default_port
   now="$(utc_now)"
+  vless_default_port="$(generate_vless_port)"
 
   cat >"$STATE_FILE" <<EOF
 {
@@ -441,9 +446,9 @@ init_state_file() {
     "vless_reality": {
       "enabled": false,
       "listen": "0.0.0.0",
-      "port": 443,
-      "server_name": "www.cloudflare.com",
-      "handshake_server": "www.cloudflare.com",
+      "port": $vless_default_port,
+      "server_name": "www.tesla.com",
+      "handshake_server": "www.tesla.com",
       "handshake_port": 443,
       "private_key": "",
       "public_key": "",
@@ -794,12 +799,22 @@ ensure_ss_defaults() {
 }
 
 ensure_vless_defaults() {
-  local private_key public_key short_id user_count keypair listen_addr
+  local private_key public_key short_id user_count keypair listen_addr vless_port vless_sni
   private_key="$(state_get '.protocols.vless_reality.private_key')"
   public_key="$(state_get '.protocols.vless_reality.public_key')"
   short_id="$(state_get '.protocols.vless_reality.short_id')"
   user_count="$(state_get '.protocols.vless_reality.users | length')"
   listen_addr="$(default_listen_address)"
+  vless_port="$(state_get '.protocols.vless_reality.port')"
+  vless_sni="$(state_get '.protocols.vless_reality.server_name')"
+
+  if [[ -z "$vless_port" || "$vless_port" == "null" || "$vless_port" == "443" ]]; then
+    vless_port="$(generate_vless_port)"
+  fi
+
+  if [[ -z "$vless_sni" || "$vless_sni" == "null" || "$vless_sni" == "www.cloudflare.com" ]]; then
+    vless_sni="www.tesla.com"
+  fi
 
   if [[ -z "$private_key" || "$private_key" == "null" || -z "$public_key" || "$public_key" == "null" ]]; then
     keypair="$(generate_reality_keypair)"
@@ -811,11 +826,11 @@ ensure_vless_defaults() {
     short_id="$(generate_hex 8)"
   fi
 
-  state_jq --arg private_key "$private_key" --arg public_key "$public_key" --arg short_id "$short_id" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
+  state_jq --argjson vless_port "$vless_port" --arg vless_sni "$vless_sni" --arg private_key "$private_key" --arg public_key "$public_key" --arg short_id "$short_id" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
     .protocols.vless_reality.enabled = true |
     .protocols.vless_reality.listen = $listen_addr |
-    .protocols.vless_reality.port = (.protocols.vless_reality.port // 443) |
-    .protocols.vless_reality.server_name = (if .protocols.vless_reality.server_name == "" then "www.cloudflare.com" else .protocols.vless_reality.server_name end) |
+    .protocols.vless_reality.port = $vless_port |
+    .protocols.vless_reality.server_name = $vless_sni |
     .protocols.vless_reality.handshake_server = (if .protocols.vless_reality.handshake_server == "" then .protocols.vless_reality.server_name else .protocols.vless_reality.handshake_server end) |
     .protocols.vless_reality.handshake_port = (.protocols.vless_reality.handshake_port // 443) |
     .protocols.vless_reality.private_key = $private_key |
@@ -1250,6 +1265,13 @@ configure_vless_reality() {
   current_port="$(state_get '.protocols.vless_reality.port')"
   current_sni="$(state_get '.protocols.vless_reality.server_name')"
   current_handshake_port="$(state_get '.protocols.vless_reality.handshake_port')"
+
+  if [[ -z "$current_port" || "$current_port" == "null" || "$current_port" == "443" ]]; then
+    current_port="$(generate_vless_port)"
+  fi
+  if [[ -z "$current_sni" || "$current_sni" == "null" || "$current_sni" == "www.cloudflare.com" ]]; then
+    current_sni="www.tesla.com"
+  fi
 
   port="$(prompt_number "VLESS 端口" "请输入 VLESS + Reality 监听端口" "$current_port" 1 65535)" || return 1
   sni="$(prompt_nonempty "Reality SNI" "请输入第三方 Reality 伪装域名（例如 www.cloudflare.com，不能填写本机 IP 或节点域名）" "$current_sni")" || return 1

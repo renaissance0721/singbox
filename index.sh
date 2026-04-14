@@ -78,28 +78,11 @@ setup_terminal_env() {
 }
 
 init_ui() {
-  if command -v whiptail >/dev/null 2>&1 && [[ -t 0 && -t 1 ]]; then
-    HAS_WHIPTAIL=1
-  else
-    HAS_WHIPTAIL=0
-  fi
+  HAS_WHIPTAIL=0
 }
 
 ensure_ui_backend() {
-  if ! is_interactive; then
-    init_ui
-    return 0
-  fi
-
   init_ui
-  if (( HAS_WHIPTAIL )); then
-    return 0
-  fi
-
-  install_dependencies
-  init_ui
-
-  (( HAS_WHIPTAIL )) || die "未检测到 whiptail，无法启用方向键菜单，请手动安装后重试。"
 }
 
 log() {
@@ -218,18 +201,14 @@ ui_menu() {
   local text=$2
   shift 2
 
-  if (( HAS_WHIPTAIL )); then
-    whiptail --title "$title" --menu "$text" 22 86 12 "$@" 3>&1 1>&2 2>&3
-  else
-    printf '\n[%s]\n%s\n' "$title" "$text"
-    while (( $# >= 2 )); do
-      printf '  %s) %s\n' "$1" "$2"
-      shift 2
-    done
-    local choice
-    read -r -p "请选择: " choice
-    printf '%s\n' "$choice"
-  fi
+  printf '\n[%s]\n%s\n' "$title" "$text"
+  while (( $# >= 2 )); do
+    printf '  %s) %s\n' "$1" "$2"
+    shift 2
+  done
+  local choice
+  read -r -p "您要进行的操作是: " choice
+  printf '%s\n' "$choice"
 }
 
 ui_protocol_menu() {
@@ -1491,7 +1470,7 @@ usage() {
   $SCRIPT_NAME --version      查看脚本版本
 
 说明:
-  1. 面板优先使用 whiptail，确保可以使用方向键选择。
+  1. 面板使用纯命令行数字输入，不依赖方向键。
   2. Hysteria2 默认使用自签名证书。
   3. 非交互安装可通过 SINGBOX_SERVER_ADDRESS=your.domain 指定节点地址。
 EOF

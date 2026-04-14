@@ -271,13 +271,54 @@ install_sing_box() {
 
   curl -fsSL https://sing-box.app/install.sh | sh
 
-  if have_cmd systemctl; then
+  ensure_sing_box_service
+
+  if has_systemd; then
     systemctl enable sing-box >/dev/null 2>&1 || true
   fi
 }
 
+has_systemd() {
+  have_cmd systemctl && [[ -d /run/systemd/system ]]
+}
+
 service_exists() {
-  have_cmd systemctl && systemctl list-unit-files 2>/dev/null | grep -q '^sing-box\.service'
+  has_systemd || return 1
+
+  systemctl cat sing-box >/dev/null 2>&1 && return 0
+  systemctl list-unit-files sing-box.service --no-legend 2>/dev/null | grep -q '^sing-box\.service' && return 0
+  [[ -f /etc/systemd/system/sing-box.service || -f /lib/systemd/system/sing-box.service || -f /usr/lib/systemd/system/sing-box.service ]]
+}
+
+ensure_sing_box_service() {
+  local sing_box_bin
+
+  has_systemd || return 0
+  service_exists && return 0
+
+  sing_box_bin="$(command -v sing-box 2>/dev/null || true)"
+  [[ -n "$sing_box_bin" ]] || return 0
+
+  cat >/etc/systemd/system/sing-box.service <<EOF
+[Unit]
+Description=sing-box service
+Documentation=https://sing-box.sagernet.org
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${sing_box_bin} run -c ${CONFIG_FILE}
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
 restart_sing_box() {
@@ -1512,7 +1553,13 @@ show_service_status() {
     text+="\n最近日志:\n"
     text+="$(journalctl -u sing-box -n 20 --no-pager 2>/dev/null || true)"
   else
-    text+="未检测到 sing-box systemd 服务。"
+    if has_systemd; then
+      text+="未检测到 sing-box systemd 服务。\n"
+      text+="可尝试执行：sbox quick-install\n"
+      text+="如果 sing-box 已安装，脚本会自动补建 sing-box.service。"
+    else
+      text+="当前系统未检测到可用的 systemd 环境。"
+    fi
   fi
 
   ui_show_text "服务状态" "$(printf '%b' "$text")"

@@ -1,8 +1,25 @@
 #!/usr/bin/env bash
+#
+# Sing-box 一键安装与管理面板
+# 用于在 Linux VPS 上快速安装和配置 Sing-box 的 Shell 脚本
+# 支持 Shadowsocks 2022、VLESS + Reality 和 Hysteria2 协议
+#
+# 作者: renaissance0721
+# 版本: 0.1.0
+# 许可证: MIT
+#
+# 使用方法:
+#   bash index.sh               启动可视化管理面板
+#   bash index.sh quick-install 使用默认参数进行一键初始化
+#   bash index.sh add-client    进入新增客户端流程
+#   bash index.sh remove-client 进入删除客户端流程
+#   bash index.sh show          查看客户端信息
+#
 
 set -Eeuo pipefail
 
 SCRIPT_VERSION="0.1.0"
+SCRIPT_NAME="${0##*/}"
 APP_TITLE="Sing-box 一键安装与管理面板"
 STATE_DIR="${STATE_DIR:-/etc/sing-box-manager}"
 STATE_FILE="${STATE_FILE:-$STATE_DIR/state.json}"
@@ -441,6 +458,45 @@ append_hy2_user() {
   local password=$2
   state_jq --arg name "$name" --arg password "$password" --arg ts "$(utc_now)" \
     '.protocols.hysteria2.users += [{name: $name, password: $password}] | .meta.updated_at = $ts'
+}
+
+remove_protocol_user() {
+  local protocol=$1
+  local name=$2
+  state_jq --arg name "$name" --arg ts "$(utc_now)" \
+    ".protocols.${protocol}.users |= map(select(.name != \$name)) | .meta.updated_at = \$ts"
+}
+
+select_protocol_user() {
+  local protocol=$1
+  local title=$2
+  local prompt=$3
+  local choice selected_index name
+  local -a users=()
+  local -a options=()
+
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    users+=("$name")
+  done < <(jq -r ".protocols.${protocol}.users[]?.name" "$STATE_FILE")
+
+  if (( ${#users[@]} == 0 )); then
+    ui_msg "当前协议下没有可选择的客户端。"
+    return 1
+  fi
+
+  for selected_index in "${!users[@]}"; do
+    options+=("$((selected_index + 1))" "${users[$selected_index]}")
+  done
+  options+=("0" "返回")
+
+  choice="$(ui_menu "$title" "$prompt" "${options[@]}")" || return 1
+  [[ "$choice" == "0" ]] && return 1
+  [[ "$choice" =~ ^[0-9]+$ ]] || return 1
+
+  selected_index=$((choice - 1))
+  (( selected_index >= 0 && selected_index < ${#users[@]} )) || return 1
+  printf '%s\n' "${users[$selected_index]}"
 }
 
 ensure_hysteria_cert() {
@@ -1101,6 +1157,51 @@ add_client() {
   esac
 }
 
+remove_client() {
+  local protocol_choice protocol_key protocol_label user_name user_count
+  protocol_choice="$(ui_protocol_menu)" || return 1
+
+  case "$protocol_choice" in
+    1)
+      protocol_key="shadowsocks"
+      protocol_label="Shadowsocks 2022"
+      ;;
+    2)
+      protocol_key="vless_reality"
+      protocol_label="VLESS + Reality"
+      ;;
+    3)
+      protocol_key="hysteria2"
+      protocol_label="Hysteria2"
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  [[ "$(state_get ".protocols.${protocol_key}.enabled")" == "true" ]] || {
+    ui_msg "${protocol_label} 当前未启用，请先完成协议配置。"
+    return 1
+  }
+
+  user_count="$(state_get ".protocols.${protocol_key}.users | length")"
+  if [[ "$user_count" -eq 0 ]]; then
+    ui_msg "${protocol_label} 当前没有可删除的客户端。"
+    return 1
+  fi
+
+  if [[ "$user_count" -eq 1 ]]; then
+    ui_msg "${protocol_label} 当前仅剩 1 个客户端。请先新增客户端，或停用该协议后再删除。"
+    return 1
+  fi
+
+  user_name="$(select_protocol_user "$protocol_key" "删除客户端" "请选择要删除的 ${protocol_label} 客户端")" || return 1
+  ui_yesno "确认删除客户端 ${user_name} 吗？" || return 0
+
+  remove_protocol_user "$protocol_key" "$user_name"
+  apply_config
+}
+
 show_client_info() {
   write_client_exports
 
@@ -1191,10 +1292,11 @@ main_menu() {
       "4" "配置 VLESS + Reality" \
       "5" "配置 Hysteria2" \
       "6" "新增客户端" \
-      "7" "查看客户端信息" \
-      "8" "重新生成配置并重载服务" \
-      "9" "查看当前概览" \
-      "10" "查看服务状态" \
+      "7" "删除客户端" \
+      "8" "查看客户端信息" \
+      "9" "重新生成配置并重载服务" \
+      "10" "查看当前概览" \
+      "11" "查看服务状态" \
       "0" "退出")" || break
 
     case "$choice" in
@@ -1217,15 +1319,18 @@ main_menu() {
         add_client
         ;;
       7)
-        show_client_info
+        remove_client
         ;;
       8)
-        apply_config
+        show_client_info
         ;;
       9)
-        show_overview
+        apply_config
         ;;
       10)
+        show_overview
+        ;;
+      11)
         show_service_status
         ;;
       0)
@@ -1238,18 +1343,27 @@ main_menu() {
   done
 }
 
+version() {
+  printf '%s %s\n' "$APP_TITLE" "$SCRIPT_VERSION"
+}
+
 usage() {
   cat <<EOF
 用法:
-  bash index.sh               启动终端可视化管理面板
-  bash index.sh quick-install 依赖默认参数进行一键初始化
-  bash index.sh apply         重新生成配置并重载服务
-  bash index.sh show          查看客户端信息
+  bash $SCRIPT_NAME                启动终端可视化管理面板
+  bash $SCRIPT_NAME quick-install  使用默认参数进行一键初始化
+  bash $SCRIPT_NAME add-client     进入新增客户端流程
+  bash $SCRIPT_NAME remove-client  进入删除客户端流程
+  bash $SCRIPT_NAME apply          重新生成配置并重载服务
+  bash $SCRIPT_NAME show           查看客户端信息
+  bash $SCRIPT_NAME overview       查看当前概览
+  bash $SCRIPT_NAME status         查看服务状态
+  bash $SCRIPT_NAME --version      查看脚本版本
 
 说明:
-  1. 这是第一版脚手架，面板为终端可视化面板（whiptail）。
-  2. Hysteria2 初版默认使用自签名证书，客户端侧需要允许 insecure 或后续替换为正式证书。
-  3. 已内置 Shadowsocks 2022 多用户、VLESS + Reality 多用户、Hysteria2 多用户的基本配置生成逻辑。
+  1. 面板优先使用 whiptail；在非交互环境下会自动回退为命令行提示。
+  2. Hysteria2 默认使用自签名证书，客户端侧需要允许 insecure 或后续替换为正式证书。
+  3. 已内置 Shadowsocks 2022、VLESS + Reality、Hysteria2 的多用户配置生成逻辑。
 EOF
 }
 
@@ -1277,6 +1391,37 @@ main() {
       ensure_dirs
       init_state_file
       show_client_info
+      ;;
+    add-client)
+      require_linux
+      require_root
+      ensure_dirs
+      init_state_file
+      add_client
+      ;;
+    remove-client)
+      require_linux
+      require_root
+      ensure_dirs
+      init_state_file
+      remove_client
+      ;;
+    overview)
+      require_linux
+      require_root
+      ensure_dirs
+      init_state_file
+      show_overview
+      ;;
+    status)
+      require_linux
+      require_root
+      ensure_dirs
+      init_state_file
+      show_service_status
+      ;;
+    version|-v|--version)
+      version
       ;;
     help|-h|--help)
       usage

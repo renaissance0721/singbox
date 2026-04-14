@@ -1,0 +1,47 @@
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.bak
+
+# Logs
+*.log
+logs/
+
+# Backups (if any local copies)
+backups/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Node.js (if any)
+node_modules/
+npm-debug.log*
+
+# Python (if any)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# Sing-box specific
+/etc/sing-box/
+/etc/sing-box-manager/
+/tmp/singbox-panel.*
+/tmp/singbox-state.*

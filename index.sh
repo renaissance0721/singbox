@@ -23,7 +23,7 @@ ORIGINAL_ARGS=("$@")
 SELF_PATH="${BASH_SOURCE[0]}"
 SCRIPT_VERSION="0.1.0"
 SCRIPT_NAME="${0##*/}"
-APP_TITLE="Sing-box 管理面板"
+APP_TITLE="Sing-box 管理面板 | 输入 sbox 快捷打开脚本"
 STATE_DIR="${STATE_DIR:-/etc/sing-box-manager}"
 STATE_FILE="${STATE_FILE:-$STATE_DIR/state.json}"
 BACKUP_DIR="${BACKUP_DIR:-$STATE_DIR/backups}"
@@ -981,12 +981,13 @@ apply_firewall_rules() {
 }
 
 write_client_exports() {
-  local all_file server_address host links_file node_name link
+  local all_file server_address host links_file node_name link display_name
   all_file="$CLIENT_DIR/all-clients.txt"
   server_address="$(state_get '.meta.server_address')"
   host="$(format_uri_host "$server_address")"
   node_name="$(state_get '.meta.node_name')"
   links_file="$(direct_links_file)"
+  display_name="${node_name:-我的节点}"
 
   : >"$all_file"
   : >"$links_file"
@@ -1002,7 +1003,7 @@ write_client_exports() {
       [[ -n "$name" ]] || continue
       cat >"$CLIENT_DIR/shadowsocks/${name}.txt" <<EOF
 [Shadowsocks 2022]
-name = $name
+name = $display_name
 server = $server_address
 port = $ss_port
 method = $ss_method
@@ -1010,7 +1011,7 @@ password = ${ss_server_password}:${user_password}
 network = tcp
 multiplex = true
 EOF
-      link="ss://$(base64_urlsafe "${ss_method}:${ss_server_password}:${user_password}")@${host}:${ss_port}#$(uri_encode "${node_name}-Shadowsocks-${name}")"
+      link="ss://$(base64_urlsafe "${ss_method}:${ss_server_password}:${user_password}")@${host}:${ss_port}#$(uri_encode "$display_name")"
       printf '%s\n' "$link" >>"$links_file"
       cat "$CLIENT_DIR/shadowsocks/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
@@ -1028,7 +1029,7 @@ EOF
       [[ -n "$name" ]] || continue
       cat >"$CLIENT_DIR/vless-reality/${name}.txt" <<EOF
 [VLESS + Reality]
-name = $name
+name = $display_name
 server = $server_address
 port = $vless_port
 uuid = $uuid
@@ -1038,7 +1039,7 @@ reality.public_key = $vless_public_key
 reality.short_id = $vless_short_id
 transport = tcp
 EOF
-      link="vless://${uuid}@${host}:${vless_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(uri_encode "$vless_server_name")&fp=chrome&pbk=$(uri_encode "$vless_public_key")&sid=$(uri_encode "$vless_short_id")&alpn=$(uri_encode "h2,http/1.1")&type=tcp&headerType=none#$(uri_encode "${node_name}-VLESS-${name}")"
+      link="vless://${uuid}@${host}:${vless_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(uri_encode "$vless_server_name")&fp=chrome&pbk=$(uri_encode "$vless_public_key")&sid=$(uri_encode "$vless_short_id")&alpn=$(uri_encode "h2,http/1.1")&type=tcp&headerType=none#$(uri_encode "$display_name")"
       printf '%s\n' "$link" >>"$links_file"
       cat "$CLIENT_DIR/vless-reality/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
@@ -1055,7 +1056,7 @@ EOF
       [[ -n "$name" ]] || continue
       cat >"$CLIENT_DIR/hysteria2/${name}.txt" <<EOF
 [Hysteria2]
-name = $name
+name = $display_name
 server = $server_address
 port = $hy2_port
 password = $password
@@ -1064,7 +1065,7 @@ tls.insecure = true
 obfs = salamander
 obfs_password = $hy2_obfs
 EOF
-      link="hysteria2://$(uri_encode "$password")@${host}:${hy2_port}?sni=$(uri_encode "$hy2_sni")&insecure=1&obfs=salamander&obfs-password=$(uri_encode "$hy2_obfs")#$(uri_encode "${node_name}-Hysteria2-${name}")"
+      link="hysteria2://$(uri_encode "$password")@${host}:${hy2_port}?sni=$(uri_encode "$hy2_sni")&insecure=1&obfs=salamander&obfs-password=$(uri_encode "$hy2_obfs")#$(uri_encode "$display_name")"
       printf '%s\n' "$link" >>"$links_file"
       cat "$CLIENT_DIR/hysteria2/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
@@ -1107,7 +1108,7 @@ apply_config() {
   success_text="配置已写入 $CONFIG_FILE，服务已重载。客户端信息已导出到 $CLIENT_DIR。"
   links_file="$(direct_links_file)"
   if [[ -s "$links_file" ]]; then
-    success_text+=$'\n\n可直接导入 v2rayN 的链接：\n'"$(cat "$links_file")"
+    success_text+=$'\n\n订阅链接：\n'"$(cat "$links_file")"
   fi
   ui_msg "$success_text"
 }
@@ -1156,12 +1157,6 @@ configure_node_name() {
 configure_shadowsocks() {
   local current_port port regenerate_password server_password listen_addr
 
-  if ! ui_yesno "是否启用或保持启用 Shadowsocks 2022？选择“否”将停用该协议。"; then
-    state_jq --arg ts "$(utc_now)" '.protocols.shadowsocks.enabled = false | .meta.updated_at = $ts'
-    apply_config
-    return 0
-  fi
-
   prompt_node_name_for_protocol
 
   current_port="$(state_get '.protocols.shadowsocks.port')"
@@ -1198,12 +1193,6 @@ configure_shadowsocks() {
 
 configure_vless_reality() {
   local current_port port current_sni sni current_handshake_port handshake_port keypair private_key public_key short_id listen_addr
-
-  if ! ui_yesno "是否启用或保持启用 VLESS + Reality？选择“否”将停用该协议。"; then
-    state_jq --arg ts "$(utc_now)" '.protocols.vless_reality.enabled = false | .meta.updated_at = $ts'
-    apply_config
-    return 0
-  fi
 
   prompt_node_name_for_protocol
 
@@ -1260,12 +1249,6 @@ configure_vless_reality() {
 configure_hysteria2() {
   local current_port current_up current_down current_sni current_masquerade
   local port up_mbps down_mbps tls_server_name masquerade obfs_password listen_addr
-
-  if ! ui_yesno "是否启用或保持启用 Hysteria2？选择“否”将停用该协议。"; then
-    state_jq --arg ts "$(utc_now)" '.protocols.hysteria2.enabled = false | .meta.updated_at = $ts'
-    apply_config
-    return 0
-  fi
 
   prompt_node_name_for_protocol
 
@@ -1433,7 +1416,7 @@ show_client_info() {
   output="$(cat "$CLIENT_DIR/all-clients.txt")"
   links_file="$(direct_links_file)"
   if [[ -s "$links_file" ]]; then
-    output+=$'\n[可直接导入 v2rayN 的链接]\n'"$(cat "$links_file")"
+    output+=$'\n[订阅链接]\n'"$(cat "$links_file")"
   fi
 
   ui_show_text "客户端信息" "$output"

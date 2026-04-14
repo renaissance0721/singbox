@@ -369,6 +369,7 @@ init_state_file() {
 {
   "meta": {
     "version": "$SCRIPT_VERSION",
+    "node_name": "",
     "server_address": "",
     "created_at": "$now",
     "updated_at": "$now",
@@ -424,6 +425,49 @@ state_jq() {
   tmp_file="$(mktemp "$TMP_DIR/singbox-state.XXXXXX")"
   jq "$@" "$STATE_FILE" >"$tmp_file"
   mv "$tmp_file" "$STATE_FILE"
+}
+
+uri_encode() {
+  jq -rn --arg v "$1" '$v|@uri'
+}
+
+base64_urlsafe() {
+  printf '%s' "$1" | openssl base64 -A | tr '+/' '-_' | tr -d '='
+}
+
+format_uri_host() {
+  local host=$1
+  if is_ipv6 "$host"; then
+    printf '[%s]\n' "$host"
+  else
+    printf '%s\n' "$host"
+  fi
+}
+
+direct_links_file() {
+  printf '%s/direct-links.txt\n' "$CLIENT_DIR"
+}
+
+set_node_name_if_empty() {
+  local current preset desired
+  current="$(state_get '.meta.node_name')"
+
+  if [[ -n "$current" && "$current" != "null" ]]; then
+    return 0
+  fi
+
+  preset="${SINGBOX_NODE_NAME:-${NODE_NAME:-我的节点}}"
+  desired="$preset"
+
+  if is_interactive; then
+    desired="$(ui_input "节点名称" "请输入该节点在客户端中显示的名称" "$desired")" || return 1
+  fi
+
+  desired="${desired//[$'\r\n']}"
+  [[ -n "$desired" ]] || die "节点名称不能为空。"
+
+  state_jq --arg node_name "$desired" --arg ts "$(utc_now)" \
+    '.meta.node_name = $node_name | .meta.updated_at = $ts'
 }
 
 set_server_address_if_empty() {
@@ -852,11 +896,15 @@ apply_firewall_rules() {
 }
 
 write_client_exports() {
-  local all_file server_address
+  local all_file server_address host links_file node_name link
   all_file="$CLIENT_DIR/all-clients.txt"
   server_address="$(state_get '.meta.server_address')"
+  host="$(format_uri_host "$server_address")"
+  node_name="$(state_get '.meta.node_name')"
+  links_file="$(direct_links_file)"
 
   : >"$all_file"
+  : >"$links_file"
   rm -f "$CLIENT_DIR"/shadowsocks/*.txt "$CLIENT_DIR"/vless-reality/*.txt "$CLIENT_DIR"/hysteria2/*.txt 2>/dev/null || true
 
   if [[ "$(state_get '.protocols.shadowsocks.enabled')" == "true" ]]; then
@@ -877,6 +925,8 @@ password = ${ss_server_password}:${user_password}
 network = tcp
 multiplex = true
 EOF
+      link="ss://$(base64_urlsafe "${ss_method}:${ss_server_password}:${user_password}")@${host}:${ss_port}#$(uri_encode "${node_name}-Shadowsocks-${name}")"
+      printf '%s\n' "$link" >>"$links_file"
       cat "$CLIENT_DIR/shadowsocks/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
     done < <(jq -r '.protocols.shadowsocks.users[]? | [.name, .password] | @tsv' "$STATE_FILE")
@@ -903,6 +953,8 @@ reality.public_key = $vless_public_key
 reality.short_id = $vless_short_id
 transport = tcp
 EOF
+      link="vless://${uuid}@${host}:${vless_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(uri_encode "$vless_server_name")&fp=chrome&pbk=$(uri_encode "$vless_public_key")&sid=$(uri_encode "$vless_short_id")&type=tcp&headerType=none#$(uri_encode "${node_name}-VLESS-${name}")"
+      printf '%s\n' "$link" >>"$links_file"
       cat "$CLIENT_DIR/vless-reality/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
     done < <(jq -r '.protocols.vless_reality.users[]? | [.name, .uuid] | @tsv' "$STATE_FILE")
@@ -927,6 +979,8 @@ tls.insecure = true
 obfs = salamander
 obfs_password = $hy2_obfs
 EOF
+      link="hysteria2://$(uri_encode "$password")@${host}:${hy2_port}?sni=$(uri_encode "$hy2_sni")&insecure=1&obfs=salamander&obfs-password=$(uri_encode "$hy2_obfs")#$(uri_encode "${node_name}-Hysteria2-${name}")"
+      printf '%s\n' "$link" >>"$links_file"
       cat "$CLIENT_DIR/hysteria2/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
     done < <(jq -r '.protocols.hysteria2.users[]? | [.name, .password] | @tsv' "$STATE_FILE")
@@ -934,7 +988,7 @@ EOF
 }
 
 apply_config() {
-  local enabled_count tmp_config check_output
+  local enabled_count tmp_config check_output success_text links_file
   enabled_count="$(enabled_protocol_count)"
 
   if [[ "$enabled_count" -eq 0 ]]; then
@@ -964,7 +1018,12 @@ apply_config() {
   apply_firewall_rules
   restart_sing_box || return 1
 
-  ui_msg "配置已写入 $CONFIG_FILE，服务已重载。客户端信息已导出到 $CLIENT_DIR。"
+  success_text="配置已写入 $CONFIG_FILE，服务已重载。客户端信息已导出到 $CLIENT_DIR。"
+  links_file="$(direct_links_file)"
+  if [[ -s "$links_file" ]]; then
+    success_text+=$'\n\n可直接导入 v2rayN 的链接：\n'"$(cat "$links_file")"
+  fi
+  ui_msg "$success_text"
 }
 
 quick_install() {
@@ -974,6 +1033,7 @@ quick_install() {
   install_dependencies
   install_sing_box
   init_state_file
+  set_node_name_if_empty
   set_server_address_if_empty
   ensure_ss_defaults
   ensure_vless_defaults
@@ -997,6 +1057,15 @@ configure_server_address() {
   fi
 
   apply_config
+}
+
+configure_node_name() {
+  local current desired
+  current="$(state_get '.meta.node_name')"
+  desired="$(prompt_nonempty "节点名称" "请输入该节点在客户端中显示的名称" "${current:-我的节点}")" || return 1
+  state_jq --arg node_name "$desired" --arg ts "$(utc_now)" '.meta.node_name = $node_name | .meta.updated_at = $ts'
+  write_client_exports
+  ui_msg "节点名称已更新。"
 }
 
 configure_shadowsocks() {
@@ -1259,6 +1328,7 @@ remove_client() {
 }
 
 show_client_info() {
+  local output="" links_file
   write_client_exports
 
   if [[ ! -s "$CLIENT_DIR/all-clients.txt" ]]; then
@@ -1266,12 +1336,19 @@ show_client_info() {
     return 0
   fi
 
-  ui_show_text "客户端信息" "$(cat "$CLIENT_DIR/all-clients.txt")"
+  output="$(cat "$CLIENT_DIR/all-clients.txt")"
+  links_file="$(direct_links_file)"
+  if [[ -s "$links_file" ]]; then
+    output+=$'\n[可直接导入 v2rayN 的链接]\n'"$(cat "$links_file")"
+  fi
+
+  ui_show_text "客户端信息" "$output"
 }
 
 show_overview() {
-  local server_address service_status ss_users vless_users hy2_users overview
+  local server_address service_status ss_users vless_users hy2_users overview node_name links_file
   server_address="$(state_get '.meta.server_address')"
+  node_name="$(state_get '.meta.node_name')"
 
   if service_exists; then
     service_status="$(systemctl is-active sing-box 2>/dev/null || true)"
@@ -1282,14 +1359,17 @@ show_overview() {
   ss_users="$(jq -r '.protocols.shadowsocks.users | map(.name) | if length == 0 then "-" else join(", ") end' "$STATE_FILE")"
   vless_users="$(jq -r '.protocols.vless_reality.users | map(.name) | if length == 0 then "-" else join(", ") end' "$STATE_FILE")"
   hy2_users="$(jq -r '.protocols.hysteria2.users | map(.name) | if length == 0 then "-" else join(", ") end' "$STATE_FILE")"
+  links_file="$(direct_links_file)"
 
   overview=$(
     cat <<EOF
 脚本版本: $SCRIPT_VERSION
+节点名称: ${node_name:-未设置}
 节点地址: ${server_address:-未设置}
 sing-box 状态: $service_status
 配置文件: $CONFIG_FILE
 客户端导出目录: $CLIENT_DIR
+导入链接文件: ${links_file}
 
 [Shadowsocks 2022]
 enabled = $(state_get '.protocols.shadowsocks.enabled')
@@ -1389,16 +1469,17 @@ main_menu() {
     choice="$(ui_menu "$APP_TITLE" "请选择要执行的操作" \
       "1" "一键安装 / 初始化三协议" \
       "2" "设置节点对外地址" \
-      "3" "配置 Shadowsocks 2022" \
-      "4" "配置 VLESS + Reality" \
-      "5" "配置 Hysteria2" \
-      "6" "新增客户端" \
-      "7" "删除客户端" \
-      "8" "查看客户端信息" \
-      "9" "重新生成配置并重载服务" \
-      "10" "查看当前概览" \
-      "11" "查看服务状态" \
-      "12" "卸载" \
+      "3" "设置节点名称" \
+      "4" "配置 Shadowsocks 2022" \
+      "5" "配置 VLESS + Reality" \
+      "6" "配置 Hysteria2" \
+      "7" "新增客户端" \
+      "8" "删除客户端" \
+      "9" "查看客户端信息" \
+      "10" "重新生成配置并重载服务" \
+      "11" "查看当前概览" \
+      "12" "查看服务状态" \
+      "13" "卸载" \
       "0" "退出")" || break
 
     case "$choice" in
@@ -1409,33 +1490,36 @@ main_menu() {
         configure_server_address
         ;;
       3)
-        configure_shadowsocks
+        configure_node_name
         ;;
       4)
-        configure_vless_reality
+        configure_shadowsocks
         ;;
       5)
-        configure_hysteria2
+        configure_vless_reality
         ;;
       6)
-        add_client
+        configure_hysteria2
         ;;
       7)
-        remove_client
+        add_client
         ;;
       8)
-        show_client_info
+        remove_client
         ;;
       9)
-        apply_config
+        show_client_info
         ;;
       10)
-        show_overview
+        apply_config
         ;;
       11)
-        show_service_status
+        show_overview
         ;;
       12)
+        show_service_status
+        ;;
+      13)
         uninstall_sbox
         ;;
       0)
@@ -1470,6 +1554,7 @@ usage() {
   1. 面板使用纯命令行数字输入，不依赖方向键。
   2. Hysteria2 默认使用自签名证书。
   3. 非交互安装可通过 SINGBOX_SERVER_ADDRESS=your.domain 指定节点地址。
+  4. 一键安装时会询问节点名称，并生成可直接导入 v2rayN 的协议链接。
 EOF
 }
 

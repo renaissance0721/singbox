@@ -1035,10 +1035,7 @@ quick_install() {
   init_state_file
   set_node_name_if_empty
   set_server_address_if_empty
-  ensure_ss_defaults
-  ensure_vless_defaults
-  ensure_hy2_defaults
-  apply_config
+  ui_msg "基础环境安装完成，请继续在面板中按需启用并配置协议。"
 }
 
 configure_server_address() {
@@ -1070,6 +1067,8 @@ configure_node_name() {
 
 configure_shadowsocks() {
   local current_port port regenerate_password server_password
+
+  set_node_name_if_empty
 
   if ! ui_yesno "是否启用或保持启用 Shadowsocks 2022？选择“否”将停用该协议。"; then
     state_jq --arg ts "$(utc_now)" '.protocols.shadowsocks.enabled = false | .meta.updated_at = $ts'
@@ -1110,6 +1109,8 @@ configure_shadowsocks() {
 
 configure_vless_reality() {
   local current_port port current_sni sni current_handshake_port handshake_port keypair private_key public_key short_id
+
+  set_node_name_if_empty
 
   if ! ui_yesno "是否启用或保持启用 VLESS + Reality？选择“否”将停用该协议。"; then
     state_jq --arg ts "$(utc_now)" '.protocols.vless_reality.enabled = false | .meta.updated_at = $ts'
@@ -1170,6 +1171,8 @@ configure_hysteria2() {
   local current_port current_up current_down current_sni current_masquerade
   local port up_mbps down_mbps tls_server_name masquerade obfs_password
 
+  set_node_name_if_empty
+
   if ! ui_yesno "是否启用或保持启用 Hysteria2？选择“否”将停用该协议。"; then
     state_jq --arg ts "$(utc_now)" '.protocols.hysteria2.enabled = false | .meta.updated_at = $ts'
     apply_config
@@ -1222,6 +1225,7 @@ configure_hysteria2() {
 
 add_client() {
   local protocol_choice name value
+  set_node_name_if_empty
   protocol_choice="$(ui_protocol_menu)" || return 1
 
   case "$protocol_choice" in
@@ -1467,7 +1471,7 @@ main_menu() {
 
   while true; do
     choice="$(ui_menu "$APP_TITLE" "请选择要执行的操作" \
-      "1" "一键安装 / 初始化三协议" \
+      "1" "一键安装 / 初始化环境" \
       "2" "设置节点对外地址" \
       "3" "设置节点名称" \
       "4" "配置 Shadowsocks 2022" \
@@ -1554,7 +1558,7 @@ usage() {
   1. 面板使用纯命令行数字输入，不依赖方向键。
   2. Hysteria2 默认使用自签名证书。
   3. 非交互安装可通过 SINGBOX_SERVER_ADDRESS=your.domain 指定节点地址。
-  4. 一键安装时会询问节点名称，并生成可直接导入 v2rayN 的协议链接。
+  4. 一键安装只安装环境；当你启用协议或新增客户端后，才会生成对应的协议链接。
 EOF
 }
 

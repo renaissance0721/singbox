@@ -12,7 +12,7 @@
 - 安装完成后自动进入终端管理面板
 - 退出后可直接输入 `sbox` 重新打开面板
 - 支持输入 `sbox uninstall` 一键卸载
-- 安装时会询问节点名称，并生成可直接导入 v2rayN 的协议链接
+- 安装时会询问节点名称，启用协议后生成可直接导入 v2rayN 的协议链接
 - 支持 `Shadowsocks 2022`、`VLESS + Reality`、`Hysteria2`
 - 支持客户端新增、删除、导出
 - 自动生成 Reality 密钥、随机密码和 Hysteria2 自签名证书

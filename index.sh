@@ -131,12 +131,21 @@ ensure_dirs() {
   mkdir -p "$CLIENT_DIR/shadowsocks" "$CLIENT_DIR/vless-reality" "$CLIENT_DIR/hysteria2"
 }
 
+ui_pause() {
+  if is_interactive; then
+    printf '按回车键返回菜单...' >&2
+    read -r _
+    printf '\n' >&2
+  fi
+}
+
 ui_msg() {
   local text=${1:-}
   printf '\n========================================\n' >&2
   printf '%s\n' "$APP_TITLE" >&2
   printf '========================================\n' >&2
   printf '%s\n\n' "$text" >&2
+  ui_pause
 }
 
 ui_show_text() {
@@ -146,6 +155,7 @@ ui_show_text() {
   printf '%s\n' "$title" >&2
   printf '========================================\n' >&2
   printf '%s\n\n' "$text" >&2
+  ui_pause
 }
 
 ui_yesno() {
@@ -1012,7 +1022,7 @@ network = tcp
 multiplex = true
 EOF
       link="ss://$(base64_urlsafe "${ss_method}:${ss_server_password}:${user_password}")@${host}:${ss_port}#$(uri_encode "$display_name")"
-      printf '%s\n' "$link" >>"$links_file"
+      printf '%s（%s）的订阅链接是：%s\n' "$display_name" "$name" "$link" >>"$links_file"
       cat "$CLIENT_DIR/shadowsocks/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
     done < <(jq -r '.protocols.shadowsocks.users[]? | [.name, .password] | @tsv' "$STATE_FILE")
@@ -1040,7 +1050,7 @@ reality.short_id = $vless_short_id
 transport = tcp
 EOF
       link="vless://${uuid}@${host}:${vless_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(uri_encode "$vless_server_name")&fp=chrome&pbk=$(uri_encode "$vless_public_key")&sid=$(uri_encode "$vless_short_id")&alpn=$(uri_encode "h2,http/1.1")&type=tcp&headerType=none#$(uri_encode "$display_name")"
-      printf '%s\n' "$link" >>"$links_file"
+      printf '%s（%s）的订阅链接是：%s\n' "$display_name" "$name" "$link" >>"$links_file"
       cat "$CLIENT_DIR/vless-reality/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
     done < <(jq -r '.protocols.vless_reality.users[]? | [.name, .uuid] | @tsv' "$STATE_FILE")
@@ -1066,7 +1076,7 @@ obfs = salamander
 obfs_password = $hy2_obfs
 EOF
       link="hysteria2://$(uri_encode "$password")@${host}:${hy2_port}?sni=$(uri_encode "$hy2_sni")&insecure=1&obfs=salamander&obfs-password=$(uri_encode "$hy2_obfs")#$(uri_encode "$display_name")"
-      printf '%s\n' "$link" >>"$links_file"
+      printf '%s（%s）的订阅链接是：%s\n' "$display_name" "$name" "$link" >>"$links_file"
       cat "$CLIENT_DIR/hysteria2/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
     done < <(jq -r '.protocols.hysteria2.users[]? | [.name, .password] | @tsv' "$STATE_FILE")
@@ -1422,6 +1432,20 @@ show_client_info() {
   ui_show_text "客户端信息" "$output"
 }
 
+show_subscription_links() {
+  local links_file output
+  write_client_exports
+  links_file="$(direct_links_file)"
+
+  if [[ ! -s "$links_file" ]]; then
+    ui_msg "当前还没有可展示的订阅链接。"
+    return 0
+  fi
+
+  output="$(cat "$links_file")"
+  ui_show_text "订阅链接" "$output"
+}
+
 show_overview() {
   local server_address service_status ss_users vless_users hy2_users overview node_name links_file
   server_address="$(state_get '.meta.server_address')"
@@ -1553,10 +1577,11 @@ main_menu() {
       "7" "新增客户端" \
       "8" "删除客户端" \
       "9" "查看客户端信息" \
-      "10" "重新生成配置并重载服务" \
-      "11" "查看当前概览" \
-      "12" "查看服务状态" \
-      "13" "卸载" \
+      "10" "查看订阅链接" \
+      "11" "重新生成配置并重载服务" \
+      "12" "查看当前概览" \
+      "13" "查看服务状态" \
+      "14" "卸载" \
       "0" "退出")" || break
 
     case "$choice" in
@@ -1588,15 +1613,18 @@ main_menu() {
         show_client_info
         ;;
       10)
-        apply_config
+        show_subscription_links
         ;;
       11)
-        show_overview
+        apply_config
         ;;
       12)
-        show_service_status
+        show_overview
         ;;
       13)
+        show_service_status
+        ;;
+      14)
         uninstall_sbox
         ;;
       0)

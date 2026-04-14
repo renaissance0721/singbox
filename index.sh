@@ -133,25 +133,19 @@ ensure_dirs() {
 
 ui_msg() {
   local text=${1:-}
-  if (( HAS_WHIPTAIL )); then
-    whiptail --title "$APP_TITLE" --msgbox "$text" 18 78
-  else
-    printf '\n%s\n\n' "$text"
-  fi
+  printf '\n========================================\n' >&2
+  printf '%s\n' "$APP_TITLE" >&2
+  printf '========================================\n' >&2
+  printf '%s\n\n' "$text" >&2
 }
 
 ui_show_text() {
   local title=${1:-$APP_TITLE}
   local text=${2:-}
-  if (( HAS_WHIPTAIL )); then
-    local tmp_file
-    tmp_file="$(mktemp "$TMP_DIR/singbox-panel.XXXXXX")"
-    printf '%s\n' "$text" >"$tmp_file"
-    whiptail --title "$title" --scrolltext --textbox "$tmp_file" 28 100
-    rm -f "$tmp_file"
-  else
-    printf '\n[%s]\n%s\n\n' "$title" "$text"
-  fi
+  printf '\n========================================\n' >&2
+  printf '%s\n' "$title" >&2
+  printf '========================================\n' >&2
+  printf '%s\n\n' "$text" >&2
 }
 
 ui_yesno() {
@@ -201,9 +195,12 @@ ui_menu() {
   local text=$2
   shift 2
 
-  printf '\n[%s]\n%s\n' "$title" "$text"
+  printf '\n========================================\n' >&2
+  printf '%s\n' "$title" >&2
+  printf '========================================\n' >&2
+  printf '%s\n' "$text" >&2
   while (( $# >= 2 )); do
-    printf '  %s) %s\n' "$1" "$2"
+    printf '  %s) %s\n' "$1" "$2" >&2
     shift 2
   done
   local choice

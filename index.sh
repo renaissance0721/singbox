@@ -254,11 +254,12 @@ install_dependencies() {
 
 install_sing_box() {
   if have_cmd sing-box; then
-    log "检测到 sing-box 已安装，跳过安装步骤。"
+    log "检测到 sing-box 已安装，开始通过官方安装脚本检查并更新到最新版本..."
   else
     log "开始通过官方安装脚本安装 sing-box..."
-    curl -fsSL https://sing-box.app/install.sh | sh
   fi
+
+  curl -fsSL https://sing-box.app/install.sh | sh
 
   if have_cmd systemctl; then
     systemctl enable sing-box >/dev/null 2>&1 || true
@@ -378,7 +379,7 @@ init_state_file() {
   "protocols": {
     "shadowsocks": {
       "enabled": false,
-      "listen": "::",
+      "listen": "0.0.0.0",
       "port": 8388,
       "network": "tcp",
       "method": "2022-blake3-aes-256-gcm",
@@ -388,7 +389,7 @@ init_state_file() {
     },
     "vless_reality": {
       "enabled": false,
-      "listen": "::",
+      "listen": "0.0.0.0",
       "port": 443,
       "server_name": "www.cloudflare.com",
       "handshake_server": "www.cloudflare.com",
@@ -400,7 +401,7 @@ init_state_file() {
     },
     "hysteria2": {
       "enabled": false,
-      "listen": "::",
+      "listen": "0.0.0.0",
       "port": 8443,
       "up_mbps": 100,
       "down_mbps": 100,
@@ -446,6 +447,29 @@ format_uri_host() {
 
 direct_links_file() {
   printf '%s/direct-links.txt\n' "$CLIENT_DIR"
+}
+
+default_listen_address() {
+  local server_address
+  server_address="$(state_get '.meta.server_address' 2>/dev/null || true)"
+
+  if [[ -n "$server_address" && "$server_address" != "null" ]] && is_ipv6 "$server_address"; then
+    printf '::\n'
+  else
+    printf '0.0.0.0\n'
+  fi
+}
+
+normalize_protocol_listen_addresses() {
+  local listen_addr
+  listen_addr="$(default_listen_address)"
+
+  state_jq --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
+    .protocols.shadowsocks.listen = $listen_addr |
+    .protocols.vless_reality.listen = $listen_addr |
+    .protocols.hysteria2.listen = $listen_addr |
+    .meta.updated_at = $ts
+  '
 }
 
 set_node_name_if_empty() {
@@ -693,17 +717,18 @@ EOF
 }
 
 ensure_ss_defaults() {
-  local current_password user_count
+  local current_password user_count listen_addr
   current_password="$(state_get '.protocols.shadowsocks.server_password')"
   user_count="$(state_get '.protocols.shadowsocks.users | length')"
+  listen_addr="$(default_listen_address)"
 
   if [[ -z "$current_password" || "$current_password" == "null" ]]; then
     current_password="$(generate_base64_bytes 32)"
   fi
 
-  state_jq --arg password "$current_password" --arg ts "$(utc_now)" '
+  state_jq --arg password "$current_password" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
     .protocols.shadowsocks.enabled = true |
-    .protocols.shadowsocks.listen = "::" |
+    .protocols.shadowsocks.listen = $listen_addr |
     .protocols.shadowsocks.port = (.protocols.shadowsocks.port // 8388) |
     .protocols.shadowsocks.network = "tcp" |
     .protocols.shadowsocks.method = "2022-blake3-aes-256-gcm" |
@@ -718,11 +743,12 @@ ensure_ss_defaults() {
 }
 
 ensure_vless_defaults() {
-  local private_key public_key short_id user_count keypair
+  local private_key public_key short_id user_count keypair listen_addr
   private_key="$(state_get '.protocols.vless_reality.private_key')"
   public_key="$(state_get '.protocols.vless_reality.public_key')"
   short_id="$(state_get '.protocols.vless_reality.short_id')"
   user_count="$(state_get '.protocols.vless_reality.users | length')"
+  listen_addr="$(default_listen_address)"
 
   if [[ -z "$private_key" || "$private_key" == "null" || -z "$public_key" || "$public_key" == "null" ]]; then
     keypair="$(generate_reality_keypair)"
@@ -734,9 +760,9 @@ ensure_vless_defaults() {
     short_id="$(generate_hex 8)"
   fi
 
-  state_jq --arg private_key "$private_key" --arg public_key "$public_key" --arg short_id "$short_id" --arg ts "$(utc_now)" '
+  state_jq --arg private_key "$private_key" --arg public_key "$public_key" --arg short_id "$short_id" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
     .protocols.vless_reality.enabled = true |
-    .protocols.vless_reality.listen = "::" |
+    .protocols.vless_reality.listen = $listen_addr |
     .protocols.vless_reality.port = (.protocols.vless_reality.port // 443) |
     .protocols.vless_reality.server_name = (if .protocols.vless_reality.server_name == "" then "www.cloudflare.com" else .protocols.vless_reality.server_name end) |
     .protocols.vless_reality.handshake_server = (if .protocols.vless_reality.handshake_server == "" then .protocols.vless_reality.server_name else .protocols.vless_reality.handshake_server end) |
@@ -753,10 +779,11 @@ ensure_vless_defaults() {
 }
 
 ensure_hy2_defaults() {
-  local tls_server_name obfs_password user_count
+  local tls_server_name obfs_password user_count listen_addr
   tls_server_name="$(state_get '.protocols.hysteria2.tls_server_name')"
   obfs_password="$(state_get '.protocols.hysteria2.obfs_password')"
   user_count="$(state_get '.protocols.hysteria2.users | length')"
+  listen_addr="$(default_listen_address)"
 
   if [[ -z "$tls_server_name" || "$tls_server_name" == "null" ]]; then
     tls_server_name="$(state_get '.meta.server_address')"
@@ -766,9 +793,9 @@ ensure_hy2_defaults() {
     obfs_password="$(generate_password)"
   fi
 
-  state_jq --arg tls_server_name "$tls_server_name" --arg obfs_password "$obfs_password" --arg ts "$(utc_now)" '
+  state_jq --arg tls_server_name "$tls_server_name" --arg obfs_password "$obfs_password" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
     .protocols.hysteria2.enabled = true |
-    .protocols.hysteria2.listen = "::" |
+    .protocols.hysteria2.listen = $listen_addr |
     .protocols.hysteria2.port = (.protocols.hysteria2.port // 8443) |
     .protocols.hysteria2.up_mbps = (.protocols.hysteria2.up_mbps // 100) |
     .protocols.hysteria2.down_mbps = (.protocols.hysteria2.down_mbps // 100) |
@@ -788,10 +815,14 @@ ensure_hy2_defaults() {
 validate_state() {
   local errors=""
   local ss_enabled vless_enabled hy2_enabled
+  local server_address vless_server_name handshake_server
 
   ss_enabled="$(state_get '.protocols.shadowsocks.enabled')"
   vless_enabled="$(state_get '.protocols.vless_reality.enabled')"
   hy2_enabled="$(state_get '.protocols.hysteria2.enabled')"
+  server_address="$(state_get '.meta.server_address')"
+
+  [[ -n "$server_address" && "$server_address" != "null" ]] || errors+=$'节点对外地址不能为空。\n'
 
   if [[ "$ss_enabled" == "true" ]]; then
     [[ "$(state_get '.protocols.shadowsocks.users | length')" -gt 0 ]] || errors+=$'Shadowsocks 至少需要一个客户端。\n'
@@ -799,10 +830,20 @@ validate_state() {
   fi
 
   if [[ "$vless_enabled" == "true" ]]; then
+    vless_server_name="$(state_get '.protocols.vless_reality.server_name')"
+    handshake_server="$(state_get '.protocols.vless_reality.handshake_server')"
     [[ "$(state_get '.protocols.vless_reality.users | length')" -gt 0 ]] || errors+=$'VLESS + Reality 至少需要一个客户端。\n'
     [[ -n "$(state_get '.protocols.vless_reality.private_key')" ]] || errors+=$'VLESS + Reality 私钥不能为空。\n'
     [[ -n "$(state_get '.protocols.vless_reality.public_key')" ]] || errors+=$'VLESS + Reality 公钥不能为空。\n'
     [[ -n "$(state_get '.protocols.vless_reality.short_id')" ]] || errors+=$'VLESS + Reality short_id 不能为空。\n'
+    [[ -n "$vless_server_name" && "$vless_server_name" != "null" ]] || errors+=$'VLESS + Reality 的伪装域名不能为空。\n'
+    [[ -n "$handshake_server" && "$handshake_server" != "null" ]] || errors+=$'VLESS + Reality 的握手站点不能为空。\n'
+    if [[ "$vless_server_name" == "$server_address" || "$handshake_server" == "$server_address" ]]; then
+      errors+=$'VLESS + Reality 的伪装域名不能与节点对外地址相同，请填写第三方网站域名，例如 www.cloudflare.com。\n'
+    fi
+    if is_ipv4 "$vless_server_name" || is_ipv6 "$vless_server_name"; then
+      errors+=$'VLESS + Reality 的伪装域名请填写域名，不要填写 IP。\n'
+    fi
   fi
 
   if [[ "$hy2_enabled" == "true" ]]; then
@@ -997,7 +1038,7 @@ reality.public_key = $vless_public_key
 reality.short_id = $vless_short_id
 transport = tcp
 EOF
-      link="vless://${uuid}@${host}:${vless_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(uri_encode "$vless_server_name")&fp=chrome&pbk=$(uri_encode "$vless_public_key")&sid=$(uri_encode "$vless_short_id")&spx=%2F&alpn=h2&type=tcp&headerType=none#$(uri_encode "${node_name}-VLESS-${name}")"
+      link="vless://${uuid}@${host}:${vless_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(uri_encode "$vless_server_name")&fp=chrome&pbk=$(uri_encode "$vless_public_key")&sid=$(uri_encode "$vless_short_id")&alpn=$(uri_encode "h2,http/1.1")&type=tcp&headerType=none#$(uri_encode "${node_name}-VLESS-${name}")"
       printf '%s\n' "$link" >>"$links_file"
       cat "$CLIENT_DIR/vless-reality/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
@@ -1041,6 +1082,7 @@ apply_config() {
     return 0
   fi
 
+  normalize_protocol_listen_addresses
   validate_state || return 1
 
   tmp_config="$(mktemp "$TMP_DIR/singbox-config.XXXXXX.json")"
@@ -1080,6 +1122,7 @@ quick_install() {
   migrate_legacy_auto_init_state
   set_node_name_if_empty
   set_server_address_if_empty
+  normalize_protocol_listen_addresses
   ui_msg "基础环境安装完成，请继续在面板中按需启用并配置协议。"
 }
 
@@ -1111,7 +1154,7 @@ configure_node_name() {
 }
 
 configure_shadowsocks() {
-  local current_port port regenerate_password server_password
+  local current_port port regenerate_password server_password listen_addr
 
   if ! ui_yesno "是否启用或保持启用 Shadowsocks 2022？选择“否”将停用该协议。"; then
     state_jq --arg ts "$(utc_now)" '.protocols.shadowsocks.enabled = false | .meta.updated_at = $ts'
@@ -1133,10 +1176,11 @@ configure_shadowsocks() {
   if [[ "$regenerate_password" == "true" || -z "$server_password" || "$server_password" == "null" ]]; then
     server_password="$(generate_base64_bytes 32)"
   fi
+  listen_addr="$(default_listen_address)"
 
-  state_jq --argjson port "$port" --arg server_password "$server_password" --arg ts "$(utc_now)" '
+  state_jq --argjson port "$port" --arg server_password "$server_password" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
     .protocols.shadowsocks.enabled = true |
-    .protocols.shadowsocks.listen = "::" |
+    .protocols.shadowsocks.listen = $listen_addr |
     .protocols.shadowsocks.port = $port |
     .protocols.shadowsocks.network = "tcp" |
     .protocols.shadowsocks.method = "2022-blake3-aes-256-gcm" |
@@ -1153,7 +1197,7 @@ configure_shadowsocks() {
 }
 
 configure_vless_reality() {
-  local current_port port current_sni sni current_handshake_port handshake_port keypair private_key public_key short_id
+  local current_port port current_sni sni current_handshake_port handshake_port keypair private_key public_key short_id listen_addr
 
   if ! ui_yesno "是否启用或保持启用 VLESS + Reality？选择“否”将停用该协议。"; then
     state_jq --arg ts "$(utc_now)" '.protocols.vless_reality.enabled = false | .meta.updated_at = $ts'
@@ -1168,7 +1212,7 @@ configure_vless_reality() {
   current_handshake_port="$(state_get '.protocols.vless_reality.handshake_port')"
 
   port="$(prompt_number "VLESS 端口" "请输入 VLESS + Reality 监听端口" "$current_port" 1 65535)" || return 1
-  sni="$(prompt_nonempty "Reality SNI" "请输入 Reality 伪装域名（例如 www.cloudflare.com）" "$current_sni")" || return 1
+  sni="$(prompt_nonempty "Reality SNI" "请输入第三方 Reality 伪装域名（例如 www.cloudflare.com，不能填写本机 IP 或节点域名）" "$current_sni")" || return 1
   handshake_port="$(prompt_number "Reality 握手端口" "请输入 Reality 伪装站点端口" "$current_handshake_port" 1 65535)" || return 1
 
   private_key="$(state_get '.protocols.vless_reality.private_key')"
@@ -1191,10 +1235,11 @@ configure_vless_reality() {
   if [[ -z "$short_id" || "$short_id" == "null" ]]; then
     short_id="$(generate_hex 8)"
   fi
+  listen_addr="$(default_listen_address)"
 
-  state_jq --argjson port "$port" --arg sni "$sni" --arg handshake_server "$sni" --argjson handshake_port "$handshake_port" --arg private_key "$private_key" --arg public_key "$public_key" --arg short_id "$short_id" --arg ts "$(utc_now)" '
+  state_jq --argjson port "$port" --arg sni "$sni" --arg handshake_server "$sni" --argjson handshake_port "$handshake_port" --arg private_key "$private_key" --arg public_key "$public_key" --arg short_id "$short_id" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
     .protocols.vless_reality.enabled = true |
-    .protocols.vless_reality.listen = "::" |
+    .protocols.vless_reality.listen = $listen_addr |
     .protocols.vless_reality.port = $port |
     .protocols.vless_reality.server_name = $sni |
     .protocols.vless_reality.handshake_server = $handshake_server |
@@ -1214,7 +1259,7 @@ configure_vless_reality() {
 
 configure_hysteria2() {
   local current_port current_up current_down current_sni current_masquerade
-  local port up_mbps down_mbps tls_server_name masquerade obfs_password
+  local port up_mbps down_mbps tls_server_name masquerade obfs_password listen_addr
 
   if ! ui_yesno "是否启用或保持启用 Hysteria2？选择“否”将停用该协议。"; then
     state_jq --arg ts "$(utc_now)" '.protocols.hysteria2.enabled = false | .meta.updated_at = $ts'
@@ -1243,10 +1288,11 @@ configure_hysteria2() {
   if [[ -z "$obfs_password" || "$obfs_password" == "null" ]]; then
     obfs_password="$(generate_password)"
   fi
+  listen_addr="$(default_listen_address)"
 
-  state_jq --argjson port "$port" --argjson up_mbps "$up_mbps" --argjson down_mbps "$down_mbps" --arg tls_server_name "$tls_server_name" --arg masquerade "$masquerade" --arg obfs_password "$obfs_password" --arg ts "$(utc_now)" '
+  state_jq --argjson port "$port" --argjson up_mbps "$up_mbps" --argjson down_mbps "$down_mbps" --arg tls_server_name "$tls_server_name" --arg masquerade "$masquerade" --arg obfs_password "$obfs_password" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
     .protocols.hysteria2.enabled = true |
-    .protocols.hysteria2.listen = "::" |
+    .protocols.hysteria2.listen = $listen_addr |
     .protocols.hysteria2.port = $port |
     .protocols.hysteria2.up_mbps = $up_mbps |
     .protocols.hysteria2.down_mbps = $down_mbps |

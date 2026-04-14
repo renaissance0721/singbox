@@ -11,6 +11,7 @@
 - 输入一键安装命令后自动安装依赖与 `sing-box`
 - 安装完成后自动进入终端管理面板
 - 退出后可直接输入 `sbox` 重新打开面板
+- 支持输入 `sbox uninstall` 一键卸载
 - 支持 `Shadowsocks 2022`、`VLESS + Reality`、`Hysteria2`
 - 支持客户端新增、删除、导出
 - 自动生成 Reality 密钥、随机密码和 Hysteria2 自签名证书
@@ -46,6 +47,12 @@ curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/instal
 
 ```bash
 sbox
+```
+
+如需卸载：
+
+```bash
+sbox uninstall
 ```
 
 ## 使用流程

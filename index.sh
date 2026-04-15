@@ -802,6 +802,68 @@ prompt_number() {
   done
 }
 
+realm_prompt_nonempty_limited() {
+  local counter_var=$1
+  local title=$2
+  local text=$3
+  local default_value=${4:-}
+  local value=""
+  local attempts=${!counter_var:-0}
+
+  while true; do
+    value="$(ui_input "$title" "$text" "$default_value")" || return 1
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+
+    if [[ -n "$value" ]]; then
+      printf -v "$counter_var" '%s' 0
+      printf '%s\n' "$value"
+      return 0
+    fi
+
+    attempts=$((attempts + 1))
+    printf -v "$counter_var" '%s' "$attempts"
+
+    if (( attempts >= 2 )); then
+      ui_msg "连续输入错误两次，已返回 Realm 菜单。"
+      return 1
+    fi
+
+    ui_msg "输入不能为空，再次输错将返回 Realm 菜单。"
+  done
+}
+
+realm_prompt_number_limited() {
+  local counter_var=$1
+  local title=$2
+  local text=$3
+  local default_value=$4
+  local min_value=$5
+  local max_value=$6
+  local value=""
+  local attempts=${!counter_var:-0}
+
+  while true; do
+    value="$(ui_input "$title" "$text" "$default_value")" || return 1
+
+    if [[ "$value" =~ ^[0-9]+$ ]] && (( value >= min_value && value <= max_value )); then
+      printf -v "$counter_var" '%s' 0
+      printf '%s\n' "$value"
+      return 0
+    fi
+
+    attempts=$((attempts + 1))
+    printf -v "$counter_var" '%s' "$attempts"
+
+    if (( attempts >= 2 )); then
+      ui_msg "连续输入错误两次，已返回 Realm 菜单。"
+      return 1
+    fi
+
+    ui_msg "请输入 ${min_value}-${max_value} 范围内的数字，再次输错将返回 Realm 菜单。"
+  done
+}
+
 user_exists() {
   local protocol=$1
   local name=$2
@@ -1768,7 +1830,7 @@ realm_uninstall() {
 }
 
 add_realm_forward_rule() {
-  local listen_port remote_host remote_port rule_id description entries_json
+  local listen_port remote_host remote_port rule_id description entries_json error_count=0
 
   ensure_realm_dirs
   init_realm_state_file
@@ -1778,9 +1840,9 @@ add_realm_forward_rule() {
     return 1
   }
 
-  listen_port="$(prompt_number "本地端口" "请输入需要监听的本地端口" "10000" 1 65535)" || return 1
-  remote_host="$(prompt_nonempty "目标地址" "请输入需要转发到的目标地址（域名或 IP）" "")" || return 1
-  remote_port="$(prompt_number "目标端口" "请输入目标端口" "443" 1 65535)" || return 1
+  listen_port="$(realm_prompt_number_limited error_count "本地端口" "请输入需要监听的本地端口" "$(generate_vless_port)" 10000 60000)" || return 1
+  remote_host="$(realm_prompt_nonempty_limited error_count "落地地址" "请输入目标地址【落地机的ip或域名】" "")" || return 1
+  remote_port="$(realm_prompt_number_limited error_count "落地端口" "请输入目标端口【落地节点的端口】" "443" 1 65535)" || return 1
 
   rule_id="realm-$(date +%s)-$(generate_hex 4)"
   description="0.0.0.0:${listen_port} -> ${remote_host}:${remote_port}"
@@ -1795,7 +1857,7 @@ add_realm_forward_rule() {
 }
 
 add_realm_range_rule() {
-  local listen_start listen_end remote_host remote_start remote_end count rule_id description entries_json
+  local listen_start listen_end remote_host remote_start remote_end count rule_id description entries_json error_count=0
 
   ensure_realm_dirs
   init_realm_state_file
@@ -1805,26 +1867,49 @@ add_realm_range_rule() {
     return 1
   }
 
-  listen_start="$(prompt_number "起始端口" "请输入本地起始端口" "10000" 1 65535)" || return 1
-  listen_end="$(prompt_number "结束端口" "请输入本地结束端口" "$listen_start" 1 65535)" || return 1
-  (( listen_end >= listen_start )) || {
-    ui_msg "本地结束端口不能小于起始端口。"
-    return 1
-  }
+  while true; do
+    listen_start="$(realm_prompt_number_limited error_count "起始端口" "请输入本地起始端口" "$(generate_vless_port)" 10000 60000)" || return 1
+    listen_end="$(realm_prompt_number_limited error_count "结束端口" "请输入本地结束端口" "$listen_start" 10000 60000)" || return 1
+    if (( listen_end >= listen_start )); then
+      break
+    fi
 
-  remote_host="$(prompt_nonempty "目标地址" "请输入需要转发到的目标地址（域名或 IP）" "")" || return 1
-  remote_start="$(prompt_number "目标起始端口" "请输入目标起始端口" "$listen_start" 1 65535)" || return 1
-  remote_end="$(prompt_number "目标结束端口" "请输入目标结束端口" "$((remote_start + listen_end - listen_start))" 1 65535)" || return 1
-  (( remote_end >= remote_start )) || {
-    ui_msg "目标结束端口不能小于起始端口。"
-    return 1
-  }
+    error_count=$((error_count + 1))
+    if (( error_count >= 2 )); then
+      ui_msg "连续输入错误两次，已返回 Realm 菜单。"
+      return 1
+    fi
+    ui_msg "本地结束端口不能小于起始端口，再次输错将返回 Realm 菜单。"
+  done
+
+  remote_host="$(realm_prompt_nonempty_limited error_count "落地地址" "请输入目标地址【落地机的ip或域名】" "")" || return 1
+  while true; do
+    remote_start="$(realm_prompt_number_limited error_count "落地起始端口" "请输入目标起始端口【落地节点的端口】" "$listen_start" 1 65535)" || return 1
+    remote_end="$(realm_prompt_number_limited error_count "落地结束端口" "请输入目标结束端口【落地节点的端口】" "$((remote_start + listen_end - listen_start))" 1 65535)" || return 1
+    if (( remote_end >= remote_start )); then
+      count=$((listen_end - listen_start))
+      if (( count == (remote_end - remote_start) )); then
+        break
+      fi
+
+      error_count=$((error_count + 1))
+      if (( error_count >= 2 )); then
+        ui_msg "连续输入错误两次，已返回 Realm 菜单。"
+        return 1
+      fi
+      ui_msg "本地端口段和目标端口段长度必须一致，再次输错将返回 Realm 菜单。"
+      continue
+    fi
+
+    error_count=$((error_count + 1))
+    if (( error_count >= 2 )); then
+      ui_msg "连续输入错误两次，已返回 Realm 菜单。"
+      return 1
+    fi
+    ui_msg "目标结束端口不能小于起始端口，再次输错将返回 Realm 菜单。"
+  done
 
   count=$((listen_end - listen_start))
-  (( count == (remote_end - remote_start) )) || {
-    ui_msg "本地端口段和目标端口段长度必须一致。"
-    return 1
-  }
 
   rule_id="realm-$(date +%s)-$(generate_hex 4)"
   description="0.0.0.0:${listen_start}-${listen_end} -> ${remote_host}:${remote_start}-${remote_end}"

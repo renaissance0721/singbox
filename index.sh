@@ -1315,7 +1315,7 @@ realm_apply_firewall_rules() {
 }
 
 apply_realm_config() {
-  local rule_count service_active message
+  local rule_count message
 
   ensure_realm_dirs
   init_realm_state_file
@@ -1334,19 +1334,19 @@ apply_realm_config() {
 
   realm_apply_firewall_rules
 
-  service_active="false"
+  systemctl enable realm >/dev/null 2>&1 || true
   if realm_service_exists && [[ "$(systemctl is-active realm 2>/dev/null || true)" == "active" ]]; then
-    service_active="true"
-  fi
-
-  if [[ "$service_active" == "true" ]]; then
     systemctl restart realm >/dev/null 2>&1 || {
       ui_show_text "Realm 启动失败" "$(journalctl -u realm -n 30 --no-pager 2>/dev/null || echo '无法读取 Realm 日志。')"
       return 1
     }
     message="Realm 配置已保存到 ${REALM_CONFIG_FILE}，服务已重启。"
   else
-    message="Realm 配置已保存到 ${REALM_CONFIG_FILE}。当前服务未启动，请在 Realm 菜单中选择 7 启动服务。"
+    systemctl start realm >/dev/null 2>&1 || {
+      ui_show_text "Realm 启动失败" "$(journalctl -u realm -n 30 --no-pager 2>/dev/null || echo '无法读取 Realm 日志。')"
+      return 1
+    }
+    message="Realm 配置已保存到 ${REALM_CONFIG_FILE}，服务已自动启动。"
   fi
 
   ui_msg "$message"

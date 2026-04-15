@@ -2099,9 +2099,11 @@ update_manager_script() {
 
 realm_submenu() {
   local choice
+  local menu_text
 
   while true; do
-    choice="$(ui_menu "Realm 中转菜单" "请选择要执行的操作（输入 0 返回上一级，输入 00 退出脚本）" \
+    menu_text="$(realm_menu_text)"
+    choice="$(ui_menu "Realm 中转菜单" "$menu_text" \
       "1" "安装 / 重置 Realm" \
       "2" "卸载 Realm" \
       "3" "添加转发规则" \
@@ -2157,6 +2159,72 @@ realm_submenu() {
         ;;
     esac
   done
+}
+
+sing_box_install_status() {
+  if have_cmd sing-box; then
+    printf '已安装\n'
+  else
+    printf '未安装\n'
+  fi
+}
+
+realm_install_status() {
+  if [[ -x "$REALM_BIN" ]]; then
+    printf '已安装\n'
+  else
+    printf '未安装\n'
+  fi
+}
+
+main_menu_text() {
+  cat <<EOF
+Sing-box 状态：$(sing_box_install_status)
+Shadowsocks 2022 规则个数：$(state_get '.protocols.shadowsocks.users | length')
+VLESS + Reality 规则个数：$(state_get '.protocols.vless_reality.users | length')
+Hysteria2 规则个数：$(state_get '.protocols.hysteria2.users | length')
+
+请选择要执行的操作
+EOF
+}
+
+realm_menu_text() {
+  local rule_count
+  if [[ -s "$REALM_STATE_FILE" ]]; then
+    rule_count="$(realm_rule_group_count)"
+  else
+    rule_count="0"
+  fi
+
+  cat <<EOF
+Realm 状态：$(realm_install_status)
+转发规则组个数：${rule_count}
+
+请选择要执行的操作（输入 0 返回上一级，输入 00 退出脚本）
+EOF
+}
+
+prepare_realm_menu() {
+  require_linux
+  require_root
+  has_systemd || {
+    ui_msg "Realm 服务管理仅支持 systemd 环境。"
+    return 1
+  }
+
+  ensure_realm_dirs
+  init_realm_state_file
+
+  if [[ ! -x "$REALM_BIN" ]]; then
+    log "未检测到 Realm，正在自动安装..."
+    install_realm_binary || {
+      ui_msg "Realm 自动安装失败，请稍后重试。"
+      return 1
+    }
+  fi
+
+  ensure_realm_service
+  write_realm_config_file
 }
 
 show_client_info() {
@@ -2320,9 +2388,11 @@ uninstall_sbox() {
 
 main_menu() {
   local choice
+  local menu_text
 
   while true; do
-    choice="$(ui_menu "$APP_TITLE" "请选择要执行的操作" \
+    menu_text="$(main_menu_text)"
+    choice="$(ui_menu "$APP_TITLE" "$menu_text" \
       "1" "一键安装 / 初始化环境" \
       "2" "设置节点对外地址" \
       "3" "设置节点名称" \
@@ -2381,7 +2451,7 @@ main_menu() {
         show_service_status
         ;;
       14)
-        realm_submenu
+        prepare_realm_menu && realm_submenu
         ;;
       15)
         uninstall_sbox
@@ -2466,11 +2536,9 @@ main() {
       remove_client
       ;;
     realm)
-      require_linux
-      require_root
       ensure_ui_backend
       ensure_dirs
-      realm_submenu
+      prepare_realm_menu && realm_submenu
       ;;
     overview)
       require_linux

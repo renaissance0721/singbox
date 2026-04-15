@@ -30,6 +30,14 @@ BACKUP_DIR="${BACKUP_DIR:-$STATE_DIR/backups}"
 CLIENT_DIR="${CLIENT_DIR:-$STATE_DIR/clients}"
 CERT_DIR="${CERT_DIR:-$STATE_DIR/certs}"
 CONFIG_FILE="${CONFIG_FILE:-/etc/sing-box/config.json}"
+REALM_DIR="${REALM_DIR:-/etc/realm}"
+REALM_CONFIG_FILE="${REALM_CONFIG_FILE:-$REALM_DIR/config.toml}"
+REALM_STATE_FILE="${REALM_STATE_FILE:-$STATE_DIR/realm-state.json}"
+REALM_BIN="${REALM_BIN:-/usr/local/bin/realm}"
+REALM_SERVICE_FILE="${REALM_SERVICE_FILE:-/etc/systemd/system/realm.service}"
+SCRIPT_REPO_OWNER="${SCRIPT_REPO_OWNER:-renaissance0721}"
+SCRIPT_REPO_NAME="${SCRIPT_REPO_NAME:-singbox}"
+SCRIPT_REPO_BRANCH="${SCRIPT_REPO_BRANCH:-main}"
 TMP_DIR="${TMP_DIR:-/tmp}"
 
 HAS_WHIPTAIL=0
@@ -102,6 +110,30 @@ have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+download_to_file() {
+  local destination=$1
+  shift
+  local url
+
+  if have_cmd curl; then
+    for url in "$@"; do
+      if curl -fsSL "$url" -o "$destination"; then
+        return 0
+      fi
+    done
+  elif have_cmd wget; then
+    for url in "$@"; do
+      if wget -qO "$destination" "$url"; then
+        return 0
+      fi
+    done
+  else
+    die "未检测到 curl 或 wget，无法下载文件。"
+  fi
+
+  return 1
+}
+
 is_interactive() {
   [[ -t 0 && -t 1 ]]
 }
@@ -129,6 +161,10 @@ utc_now() {
 ensure_dirs() {
   mkdir -p "$STATE_DIR" "$BACKUP_DIR" "$CLIENT_DIR" "$CERT_DIR" "$(dirname "$CONFIG_FILE")"
   mkdir -p "$CLIENT_DIR/shadowsocks" "$CLIENT_DIR/vless-reality" "$CLIENT_DIR/hysteria2"
+}
+
+ensure_realm_dirs() {
+  mkdir -p "$REALM_DIR" "$STATE_DIR"
 }
 
 ui_pause() {
@@ -339,6 +375,79 @@ stop_sing_box() {
   fi
 }
 
+realm_service_exists() {
+  has_systemd || return 1
+
+  systemctl cat realm >/dev/null 2>&1 && return 0
+  systemctl list-unit-files realm.service --no-legend 2>/dev/null | grep -q '^realm\.service' && return 0
+  [[ -f "$REALM_SERVICE_FILE" || -f /lib/systemd/system/realm.service || -f /usr/lib/systemd/system/realm.service ]]
+}
+
+ensure_realm_service() {
+  has_systemd || return 0
+
+  cat >"$REALM_SERVICE_FILE" <<EOF
+[Unit]
+Description=Realm relay service
+Documentation=https://github.com/zhboner/realm
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${REALM_BIN} -c ${REALM_CONFIG_FILE}
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+detect_realm_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64)
+      printf 'x86_64-unknown-linux-gnu\n'
+      ;;
+    aarch64|arm64)
+      printf 'aarch64-unknown-linux-gnu\n'
+      ;;
+    armv7l|armv7)
+      printf 'armv7-unknown-linux-gnueabihf\n'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+install_realm_binary() {
+  local arch tmp_dir archive_path extracted_bin
+  arch="$(detect_realm_arch)" || die "当前架构暂不支持自动安装 Realm：$(uname -m)"
+  tmp_dir="$(mktemp -d "$TMP_DIR/realm-install.XXXXXX")"
+  archive_path="$tmp_dir/realm.tar.gz"
+
+  if ! download_to_file \
+    "$archive_path" \
+    "https://github.com/zhboner/realm/releases/latest/download/realm-${arch}.tar.gz"; then
+    rm -rf "$tmp_dir"
+    die "下载 Realm 失败，请稍后重试。"
+  fi
+
+  tar -xzf "$archive_path" -C "$tmp_dir"
+  extracted_bin="$(find "$tmp_dir" -type f -name realm | head -n 1)"
+  [[ -n "$extracted_bin" ]] || {
+    rm -rf "$tmp_dir"
+    die "无法从下载包中找到 realm 可执行文件。"
+  }
+
+  install -m 755 "$extracted_bin" "$REALM_BIN"
+  rm -rf "$tmp_dir"
+}
+
 detect_public_address() {
   local addr=""
 
@@ -482,6 +591,42 @@ state_jq() {
   tmp_file="$(mktemp "$TMP_DIR/singbox-state.XXXXXX")"
   jq "$@" "$STATE_FILE" >"$tmp_file"
   mv "$tmp_file" "$STATE_FILE"
+}
+
+init_realm_state_file() {
+  if [[ -s "$REALM_STATE_FILE" ]]; then
+    return 0
+  fi
+
+  local now
+  now="$(utc_now)"
+
+  cat >"$REALM_STATE_FILE" <<EOF
+{
+  "meta": {
+    "version": "$SCRIPT_VERSION",
+    "updated_at": "$now"
+  },
+  "global": {
+    "log_level": "warn",
+    "log_output": "stdout",
+    "use_udp": true,
+    "no_tcp": false
+  },
+  "rules": []
+}
+EOF
+}
+
+realm_state_get() {
+  jq -r "$1" "$REALM_STATE_FILE"
+}
+
+realm_state_jq() {
+  local tmp_file
+  tmp_file="$(mktemp "$TMP_DIR/realm-state.XXXXXX")"
+  jq "$@" "$REALM_STATE_FILE" >"$tmp_file"
+  mv "$tmp_file" "$REALM_STATE_FILE"
 }
 
 uri_encode() {
@@ -1046,6 +1191,105 @@ apply_firewall_rules() {
   fi
 }
 
+realm_rule_group_count() {
+  realm_state_get '.rules | length'
+}
+
+render_realm_config() {
+  local log_level log_output use_udp no_tcp
+  log_level="$(realm_state_get '.global.log_level')"
+  log_output="$(realm_state_get '.global.log_output')"
+  use_udp="$(realm_state_get '.global.use_udp')"
+  no_tcp="$(realm_state_get '.global.no_tcp')"
+
+  cat <<EOF
+[log]
+level = "${log_level}"
+output = "${log_output}"
+
+[network]
+use_udp = ${use_udp}
+no_tcp = ${no_tcp}
+EOF
+
+  while IFS=$'\t' read -r listen remote; do
+    [[ -n "$listen" && -n "$remote" ]] || continue
+    cat <<EOF
+
+[[endpoints]]
+listen = "${listen}"
+remote = "${remote}"
+EOF
+  done < <(jq -r '.rules[]?.entries[]? | [.listen, .remote] | @tsv' "$REALM_STATE_FILE")
+}
+
+write_realm_config_file() {
+  local tmp_config
+  tmp_config="$(mktemp "$TMP_DIR/realm-config.XXXXXX.toml")"
+  render_realm_config >"$tmp_config"
+  cp "$tmp_config" "$REALM_CONFIG_FILE"
+  rm -f "$tmp_config"
+}
+
+realm_apply_firewall_rules() {
+  local port
+
+  if have_cmd ufw && ufw status 2>/dev/null | grep -q 'Status: active'; then
+    while IFS= read -r port; do
+      [[ -n "$port" ]] || continue
+      ufw allow "${port}/tcp" >/dev/null 2>&1 || true
+      ufw allow "${port}/udp" >/dev/null 2>&1 || true
+    done < <(jq -r '.rules[]?.entries[]?.listen | capture(":(?<port>[0-9]+)$").port' "$REALM_STATE_FILE" | sort -un)
+  fi
+
+  if have_cmd firewall-cmd && systemctl is-active firewalld >/dev/null 2>&1; then
+    while IFS= read -r port; do
+      [[ -n "$port" ]] || continue
+      firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1 || true
+      firewall-cmd --permanent --add-port="${port}/udp" >/dev/null 2>&1 || true
+    done < <(jq -r '.rules[]?.entries[]?.listen | capture(":(?<port>[0-9]+)$").port' "$REALM_STATE_FILE" | sort -un)
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+}
+
+apply_realm_config() {
+  local rule_count service_active message
+
+  ensure_realm_dirs
+  init_realm_state_file
+  ensure_realm_service
+
+  write_realm_config_file
+
+  rule_count="$(realm_rule_group_count)"
+  if [[ "$rule_count" -eq 0 ]]; then
+    if realm_service_exists; then
+      systemctl stop realm >/dev/null 2>&1 || true
+    fi
+    ui_msg "Realm 当前没有任何转发规则，配置已保存，服务已停止。"
+    return 0
+  fi
+
+  realm_apply_firewall_rules
+
+  service_active="false"
+  if realm_service_exists && [[ "$(systemctl is-active realm 2>/dev/null || true)" == "active" ]]; then
+    service_active="true"
+  fi
+
+  if [[ "$service_active" == "true" ]]; then
+    systemctl restart realm >/dev/null 2>&1 || {
+      ui_show_text "Realm 启动失败" "$(journalctl -u realm -n 30 --no-pager 2>/dev/null || echo '无法读取 Realm 日志。')"
+      return 1
+    }
+    message="Realm 配置已保存到 ${REALM_CONFIG_FILE}，服务已重启。"
+  else
+    message="Realm 配置已保存到 ${REALM_CONFIG_FILE}。当前服务未启动，请在 Realm 菜单中选择 7 启动服务。"
+  fi
+
+  ui_msg "$message"
+}
+
 write_client_exports() {
   local all_file server_address host links_file node_name link display_name
   all_file="$CLIENT_DIR/all-clients.txt"
@@ -1477,6 +1721,359 @@ remove_client() {
   apply_config
 }
 
+realm_install_or_reset() {
+  require_linux
+  require_root
+  has_systemd || {
+    ui_msg "Realm 服务管理仅支持 systemd 环境。"
+    return 1
+  }
+  ensure_realm_dirs
+  init_realm_state_file
+
+  if [[ -x "$REALM_BIN" || "$(realm_rule_group_count)" -gt 0 ]]; then
+    ui_yesno "这会重新安装 Realm，并清空所有中转规则。是否继续？" || return 0
+  fi
+
+  install_realm_binary
+  realm_state_jq --arg ts "$(utc_now)" '.rules = [] | .meta.updated_at = $ts'
+  ensure_realm_service
+  render_realm_config >"$REALM_CONFIG_FILE"
+
+  if realm_service_exists; then
+    systemctl stop realm >/dev/null 2>&1 || true
+    systemctl disable realm >/dev/null 2>&1 || true
+  fi
+
+  ui_msg "Realm 安装 / 重置完成。当前规则已清空，请继续添加转发规则。"
+}
+
+realm_uninstall() {
+  ui_yesno "这将卸载 Realm，并删除所有中转规则和配置。是否继续？" || return 0
+
+  if realm_service_exists; then
+    systemctl stop realm >/dev/null 2>&1 || true
+    systemctl disable realm >/dev/null 2>&1 || true
+  fi
+
+  rm -f "$REALM_BIN" "$REALM_SERVICE_FILE" "$REALM_CONFIG_FILE" "$REALM_STATE_FILE" 2>/dev/null || true
+  rm -rf "$REALM_DIR" 2>/dev/null || true
+
+  if has_systemd; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed realm >/dev/null 2>&1 || true
+  fi
+
+  ui_msg "Realm 已卸载完成。"
+}
+
+add_realm_forward_rule() {
+  local listen_port remote_host remote_port rule_id description entries_json
+
+  ensure_realm_dirs
+  init_realm_state_file
+
+  [[ -x "$REALM_BIN" ]] || {
+    ui_msg "请先安装 Realm。"
+    return 1
+  }
+
+  listen_port="$(prompt_number "本地端口" "请输入需要监听的本地端口" "10000" 1 65535)" || return 1
+  remote_host="$(prompt_nonempty "目标地址" "请输入需要转发到的目标地址（域名或 IP）" "")" || return 1
+  remote_port="$(prompt_number "目标端口" "请输入目标端口" "443" 1 65535)" || return 1
+
+  rule_id="realm-$(date +%s)-$(generate_hex 4)"
+  description="0.0.0.0:${listen_port} -> ${remote_host}:${remote_port}"
+  entries_json="$(jq -nc --arg listen "0.0.0.0:${listen_port}" --arg remote "${remote_host}:${remote_port}" '[{listen: $listen, remote: $remote}]')"
+
+  realm_state_jq --arg id "$rule_id" --arg description "$description" --argjson entries "$entries_json" --arg ts "$(utc_now)" '
+    .rules += [{id: $id, type: "single", description: $description, entries: $entries}] |
+    .meta.updated_at = $ts
+  '
+
+  apply_realm_config
+}
+
+add_realm_range_rule() {
+  local listen_start listen_end remote_host remote_start remote_end count rule_id description entries_json
+
+  ensure_realm_dirs
+  init_realm_state_file
+
+  [[ -x "$REALM_BIN" ]] || {
+    ui_msg "请先安装 Realm。"
+    return 1
+  }
+
+  listen_start="$(prompt_number "起始端口" "请输入本地起始端口" "10000" 1 65535)" || return 1
+  listen_end="$(prompt_number "结束端口" "请输入本地结束端口" "$listen_start" 1 65535)" || return 1
+  (( listen_end >= listen_start )) || {
+    ui_msg "本地结束端口不能小于起始端口。"
+    return 1
+  }
+
+  remote_host="$(prompt_nonempty "目标地址" "请输入需要转发到的目标地址（域名或 IP）" "")" || return 1
+  remote_start="$(prompt_number "目标起始端口" "请输入目标起始端口" "$listen_start" 1 65535)" || return 1
+  remote_end="$(prompt_number "目标结束端口" "请输入目标结束端口" "$((remote_start + listen_end - listen_start))" 1 65535)" || return 1
+  (( remote_end >= remote_start )) || {
+    ui_msg "目标结束端口不能小于起始端口。"
+    return 1
+  }
+
+  count=$((listen_end - listen_start))
+  (( count == (remote_end - remote_start) )) || {
+    ui_msg "本地端口段和目标端口段长度必须一致。"
+    return 1
+  }
+
+  rule_id="realm-$(date +%s)-$(generate_hex 4)"
+  description="0.0.0.0:${listen_start}-${listen_end} -> ${remote_host}:${remote_start}-${remote_end}"
+  entries_json="$(jq -nc --arg host "$remote_host" --argjson listen_start "$listen_start" --argjson listen_end "$listen_end" --argjson remote_start "$remote_start" '
+    [range(0; ($listen_end - $listen_start) + 1) | {
+      listen: ("0.0.0.0:" + (($listen_start + .) | tostring)),
+      remote: ($host + ":" + (($remote_start + .) | tostring))
+    }]
+  ')"
+
+  realm_state_jq --arg id "$rule_id" --arg description "$description" --argjson entries "$entries_json" --arg ts "$(utc_now)" '
+    .rules += [{id: $id, type: "range", description: $description, entries: $entries}] |
+    .meta.updated_at = $ts
+  '
+
+  apply_realm_config
+}
+
+delete_realm_rule() {
+  local choice selected_index rule_id
+  local -a rule_ids=()
+  local -a options=()
+
+  ensure_realm_dirs
+  init_realm_state_file
+
+  if [[ "$(realm_rule_group_count)" -eq 0 ]]; then
+    ui_msg "当前没有可删除的 Realm 转发规则。"
+    return 0
+  fi
+
+  while IFS=$'\t' read -r rule_id description entry_count; do
+    [[ -n "$rule_id" ]] || continue
+    rule_ids+=("$rule_id")
+    options+=("$(( ${#rule_ids[@]} ))" "${description}（${entry_count} 条）")
+  done < <(jq -r '.rules[]? | [.id, .description, (.entries | length)] | @tsv' "$REALM_STATE_FILE")
+
+  options+=("0" "返回")
+  options+=("00" "退出脚本")
+
+  choice="$(ui_menu "Realm 中转菜单" "请选择要删除的转发规则（输入 0 返回上一级，输入 00 退出脚本）" "${options[@]}")" || return 1
+  case "$choice" in
+    00)
+      exit 0
+      ;;
+    0)
+      return 0
+      ;;
+  esac
+
+  [[ "$choice" =~ ^[0-9]+$ ]] || {
+    ui_msg "无效选项，请重新选择。"
+    return 1
+  }
+
+  selected_index=$((choice - 1))
+  (( selected_index >= 0 && selected_index < ${#rule_ids[@]} )) || {
+    ui_msg "无效选项，请重新选择。"
+    return 1
+  }
+
+  rule_id="${rule_ids[$selected_index]}"
+  realm_state_jq --arg id "$rule_id" --arg ts "$(utc_now)" '
+    .rules |= map(select(.id != $id)) |
+    .meta.updated_at = $ts
+  '
+
+  apply_realm_config
+}
+
+show_realm_config() {
+  local summary rendered
+
+  ensure_realm_dirs
+  init_realm_state_file
+
+  summary="$(jq -r '
+    if (.rules | length) == 0 then
+      "当前没有任何 Realm 转发规则。"
+    else
+      (.rules | to_entries | map("\(.key + 1). \(.value.description)（\(.value.entries | length) 条）") | join("\n"))
+    end
+  ' "$REALM_STATE_FILE")"
+  rendered="$(render_realm_config)"
+
+  ui_show_text "Realm 当前配置" "$(printf '规则列表：\n%s\n\n配置文件：%s\n\n%s\n' "$summary" "$REALM_CONFIG_FILE" "$rendered")"
+}
+
+start_realm_service() {
+  has_systemd || {
+    ui_msg "Realm 服务管理仅支持 systemd 环境。"
+    return 1
+  }
+  ensure_realm_dirs
+  init_realm_state_file
+
+  [[ -x "$REALM_BIN" ]] || {
+    ui_msg "请先安装 Realm。"
+    return 1
+  }
+
+  [[ "$(realm_rule_group_count)" -gt 0 ]] || {
+    ui_msg "当前没有任何转发规则，请先添加转发规则。"
+    return 1
+  }
+
+  write_realm_config_file
+  realm_apply_firewall_rules
+  ensure_realm_service
+  systemctl enable realm >/dev/null 2>&1 || true
+  if ! systemctl start realm; then
+    ui_show_text "Realm 启动失败" "$(journalctl -u realm -n 30 --no-pager 2>/dev/null || echo '无法读取 Realm 日志。')"
+    return 1
+  fi
+
+  ui_msg "Realm 服务已启动。"
+}
+
+stop_realm_service() {
+  has_systemd || {
+    ui_msg "Realm 服务管理仅支持 systemd 环境。"
+    return 1
+  }
+  if realm_service_exists; then
+    systemctl stop realm >/dev/null 2>&1 || true
+    ui_msg "Realm 服务已停止。"
+  else
+    ui_msg "当前未检测到 Realm systemd 服务。"
+  fi
+}
+
+restart_realm_service() {
+  has_systemd || {
+    ui_msg "Realm 服务管理仅支持 systemd 环境。"
+    return 1
+  }
+  ensure_realm_dirs
+  init_realm_state_file
+
+  [[ -x "$REALM_BIN" ]] || {
+    ui_msg "请先安装 Realm。"
+    return 1
+  }
+
+  [[ "$(realm_rule_group_count)" -gt 0 ]] || {
+    ui_msg "当前没有任何转发规则，请先添加转发规则。"
+    return 1
+  }
+
+  write_realm_config_file
+  realm_apply_firewall_rules
+  ensure_realm_service
+  systemctl enable realm >/dev/null 2>&1 || true
+  if ! systemctl restart realm; then
+    ui_show_text "Realm 重启失败" "$(journalctl -u realm -n 30 --no-pager 2>/dev/null || echo '无法读取 Realm 日志。')"
+    return 1
+  fi
+
+  ui_msg "Realm 服务已重启。"
+}
+
+update_manager_script() {
+  local target_path tmp_file
+  local -a urls=(
+    "https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/${SCRIPT_REPO_BRANCH}/index.sh"
+    "https://github.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/raw/${SCRIPT_REPO_BRANCH}/index.sh"
+    "https://cdn.jsdelivr.net/gh/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}@${SCRIPT_REPO_BRANCH}/index.sh"
+  )
+
+  if [[ -x /usr/local/bin/sbox ]]; then
+    target_path="/usr/local/bin/sbox"
+  else
+    target_path="$SELF_PATH"
+  fi
+
+  tmp_file="$(mktemp "$TMP_DIR/sbox-update.XXXXXX")"
+  if ! download_to_file "$tmp_file" "${urls[@]}"; then
+    rm -f "$tmp_file"
+    ui_msg "更新脚本失败，请稍后重试。"
+    return 1
+  fi
+
+  install -m 755 "$tmp_file" "$target_path"
+  rm -f "$tmp_file"
+  ui_msg "脚本已更新完成。"
+}
+
+realm_submenu() {
+  local choice
+
+  while true; do
+    choice="$(ui_menu "Realm 中转菜单" "请选择要执行的操作（输入 0 返回上一级，输入 00 退出脚本）" \
+      "1" "安装 / 重置 Realm" \
+      "2" "卸载 Realm" \
+      "3" "添加转发规则" \
+      "4" "添加端口段转发" \
+      "5" "删除转发规则" \
+      "6" "查看当前配置" \
+      "7" "启动服务" \
+      "8" "停止服务" \
+      "9" "重启服务" \
+      "10" "更新脚本" \
+      "0" "返回上一级菜单" \
+      "00" "退出脚本")" || return 1
+
+    case "$choice" in
+      1)
+        realm_install_or_reset
+        ;;
+      2)
+        realm_uninstall
+        ;;
+      3)
+        add_realm_forward_rule
+        ;;
+      4)
+        add_realm_range_rule
+        ;;
+      5)
+        delete_realm_rule
+        ;;
+      6)
+        show_realm_config
+        ;;
+      7)
+        start_realm_service
+        ;;
+      8)
+        stop_realm_service
+        ;;
+      9)
+        restart_realm_service
+        ;;
+      10)
+        update_manager_script
+        ;;
+      0)
+        return 0
+        ;;
+      00)
+        exit 0
+        ;;
+      *)
+        ui_msg "无效选项，请重新选择。"
+        ;;
+    esac
+  done
+}
+
 show_client_info() {
   local output="" links_file
   write_client_exports
@@ -1589,13 +2186,15 @@ show_service_status() {
 
 uninstall_sbox() {
   local uninstall_text
-  uninstall_text=$'这将执行以下操作：\n- 停止并禁用 sing-box\n- 卸载 sing-box 软件包（如果存在）\n- 删除 /etc/sing-box 和 /etc/sing-box-manager\n- 删除 sbox 命令\n\n是否继续？'
+  uninstall_text=$'这将执行以下操作：\n- 停止并禁用 sing-box\n- 停止并禁用 Realm\n- 卸载 sing-box 软件包（如果存在）\n- 删除 /etc/sing-box、/etc/realm 和 /etc/sing-box-manager\n- 删除 sbox 与 realm 命令\n\n是否继续？'
 
   ui_yesno "$uninstall_text" || return 0
 
   if have_cmd systemctl; then
     systemctl stop sing-box >/dev/null 2>&1 || true
     systemctl disable sing-box >/dev/null 2>&1 || true
+    systemctl stop realm >/dev/null 2>&1 || true
+    systemctl disable realm >/dev/null 2>&1 || true
   fi
 
   detect_pkg_manager
@@ -1615,12 +2214,14 @@ uninstall_sbox() {
   esac
 
   rm -f /etc/systemd/system/sing-box.service /lib/systemd/system/sing-box.service /usr/lib/systemd/system/sing-box.service /etc/systemd/system/multi-user.target.wants/sing-box.service 2>/dev/null || true
-  rm -rf /etc/sing-box "$STATE_DIR" 2>/dev/null || true
-  rm -f /usr/local/bin/sbox /usr/local/bin/singbox-manager 2>/dev/null || true
+  rm -f "$REALM_SERVICE_FILE" /lib/systemd/system/realm.service /usr/lib/systemd/system/realm.service /etc/systemd/system/multi-user.target.wants/realm.service 2>/dev/null || true
+  rm -rf /etc/sing-box "$REALM_DIR" "$STATE_DIR" 2>/dev/null || true
+  rm -f /usr/local/bin/sbox /usr/local/bin/singbox-manager "$REALM_BIN" 2>/dev/null || true
 
   if have_cmd systemctl; then
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl reset-failed sing-box >/dev/null 2>&1 || true
+    systemctl reset-failed realm >/dev/null 2>&1 || true
   fi
 
   if is_interactive; then
@@ -1650,7 +2251,8 @@ main_menu() {
       "11" "重新生成配置并重载服务" \
       "12" "查看当前概览" \
       "13" "查看服务状态" \
-      "14" "卸载" \
+      "14" "Realm 中转" \
+      "15" "卸载" \
       "0" "退出")" || break
 
     case "$choice" in
@@ -1694,6 +2296,9 @@ main_menu() {
         show_service_status
         ;;
       14)
+        realm_submenu
+        ;;
+      15)
         uninstall_sbox
         ;;
       0)
@@ -1717,6 +2322,7 @@ usage() {
   $SCRIPT_NAME quick-install  一键安装并初始化
   $SCRIPT_NAME add-client     打开新增客户端流程
   $SCRIPT_NAME remove-client  打开删除客户端流程
+  $SCRIPT_NAME realm          打开 Realm 中转菜单
   $SCRIPT_NAME apply          重新生成配置并重载服务
   $SCRIPT_NAME show           查看客户端信息
   $SCRIPT_NAME overview       查看当前概览
@@ -1773,6 +2379,13 @@ main() {
       ensure_dirs
       init_state_file
       remove_client
+      ;;
+    realm)
+      require_linux
+      require_root
+      ensure_ui_backend
+      ensure_dirs
+      realm_submenu
       ;;
     overview)
       require_linux

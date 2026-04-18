@@ -1841,8 +1841,8 @@ add_realm_forward_rule() {
   }
 
   listen_port="$(realm_prompt_number_limited error_count "本地端口" "请输入需要监听的本地端口" "$(generate_vless_port)" 10000 60000)" || return 1
-  remote_host="$(realm_prompt_nonempty_limited error_count "落地地址" "请输入目标地址[落地机的ip或域名]")" || return 1
-  remote_port="$(realm_prompt_number_limited error_count "落地端口" "请输入目标端口[落地节点的端口]"  1 65535)" || return 1
+  remote_host="$(realm_prompt_nonempty_limited error_count "落地地址" "请输入目标地址【落地机的ip或域名】" "")" || return 1
+  remote_port="$(realm_prompt_number_limited error_count "落地端口" "请输入目标端口【落地节点的端口】" "443" 1 65535)" || return 1
 
   rule_id="realm-$(date +%s)-$(generate_hex 4)"
   description="0.0.0.0:${listen_port} -> ${remote_host}:${remote_port}"

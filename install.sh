@@ -9,6 +9,7 @@ TARGET_PATH="${TARGET_PATH:-/usr/local/bin/sbox}"
 LEGACY_PATH="/usr/local/bin/singbox-manager"
 INDEX_URL="${INDEX_URL:-https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/index.sh}"
 SERVER_ADDRESS="${SINGBOX_SERVER_ADDRESS:-${SERVER_ADDRESS:-}}"
+INSTALL_COMMAND="quick-install"
 
 log() {
   printf '[*] %s\n' "$*" >&2
@@ -57,8 +58,10 @@ usage() {
 
 示例:
   bash install.sh
+  bash install.sh --repair
   bash install.sh --server-address node.example.com
   curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | sudo bash
+  curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | sudo bash -s -- --repair
   curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | sudo bash -s -- --server-address node.example.com
 
 参数:
@@ -73,6 +76,10 @@ while (( $# > 0 )); do
       [[ $# -ge 2 ]] || die "--server-address 需要一个值。"
       SERVER_ADDRESS="$2"
       shift 2
+      ;;
+    --repair|--reinstall)
+      INSTALL_COMMAND="repair-install"
+      shift
       ;;
     -h|--help)
       usage
@@ -101,7 +108,7 @@ else
   log "未显式指定节点地址，将尝试自动探测公网 IP。"
 fi
 
-"$TARGET_PATH" quick-install
+"$TARGET_PATH" "$INSTALL_COMMAND"
 
 printf '\n安装完成，正在打开 sbox 管理面板...\n\n'
 

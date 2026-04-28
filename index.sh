@@ -587,6 +587,14 @@ init_state_file() {
       "port": 443,
       "method": "chacha20-ietf-poly1305",
       "password": "",
+      "uuid": "",
+      "flow": "",
+      "tls_enabled": false,
+      "tls_server_name": "",
+      "tls_insecure": false,
+      "reality_enabled": false,
+      "reality_public_key": "",
+      "reality_short_id": "",
       "network": "tcp",
       "domain_suffix": [
         "openai.com",
@@ -637,6 +645,14 @@ migrate_state_schema() {
     (.routing.ai.enabled? != null)
     and (.routing.ai.domain_suffix? != null)
     and (.routing.ai.domain_keyword? != null)
+    and (.routing.ai.uuid? != null)
+    and (.routing.ai.flow? != null)
+    and (.routing.ai.tls_enabled? != null)
+    and (.routing.ai.tls_server_name? != null)
+    and (.routing.ai.tls_insecure? != null)
+    and (.routing.ai.reality_enabled? != null)
+    and (.routing.ai.reality_public_key? != null)
+    and (.routing.ai.reality_short_id? != null)
   ' "$STATE_FILE" >/dev/null 2>&1; then
     return 0
   fi
@@ -650,6 +666,14 @@ migrate_state_schema() {
     .routing.ai.port = (.routing.ai.port // 443) |
     .routing.ai.method = (.routing.ai.method // "chacha20-ietf-poly1305") |
     .routing.ai.password = (.routing.ai.password // "") |
+    .routing.ai.uuid = (.routing.ai.uuid // "") |
+    .routing.ai.flow = (.routing.ai.flow // "") |
+    .routing.ai.tls_enabled = (.routing.ai.tls_enabled // false) |
+    .routing.ai.tls_server_name = (.routing.ai.tls_server_name // "") |
+    .routing.ai.tls_insecure = (.routing.ai.tls_insecure // false) |
+    .routing.ai.reality_enabled = (.routing.ai.reality_enabled // false) |
+    .routing.ai.reality_public_key = (.routing.ai.reality_public_key // "") |
+    .routing.ai.reality_short_id = (.routing.ai.reality_short_id // "") |
     .routing.ai.network = (.routing.ai.network // "tcp") |
     .routing.ai.domain_suffix = (.routing.ai.domain_suffix // [
       "openai.com",
@@ -690,14 +714,17 @@ build_ai_rules_json() {
   local input=$1
   jq -nc --arg input "$input" '
     def normalized_items:
-      ascii_downcase
-      | gsub("[，、;；\r\n\t ]+"; ",")
+      (. // "" | tostring | ascii_downcase)
+      | gsub("，|、|；"; ",")
+      | gsub("[,;[:space:]]+"; ",")
       | split(",")
       | map(
-          gsub("^\\s+|\\s+$"; "")
+          (. // "" | tostring)
+          | gsub("^\\s+|\\s+$"; "")
           | sub("^[a-z][a-z0-9+.-]*://"; "")
           | sub("^//"; "")
           | split("/")[0]
+          | (. // "" | tostring)
           | sub("^\\["; "")
           | sub("\\]$"; "")
           | sub(":[0-9]+$"; "")
@@ -1211,7 +1238,7 @@ validate_state() {
   local errors=""
   local ss_enabled vless_enabled hy2_enabled
   local server_address vless_server_name handshake_server
-  local ai_enabled ai_server ai_password
+  local ai_enabled ai_protocol ai_server ai_password ai_uuid ai_reality_enabled ai_reality_public_key
 
   ss_enabled="$(state_get '.protocols.shadowsocks.enabled')"
   vless_enabled="$(state_get '.protocols.vless_reality.enabled')"
@@ -1251,12 +1278,25 @@ validate_state() {
   fi
 
   if [[ "$ai_enabled" == "true" ]]; then
+    ai_protocol="$(state_get '.routing.ai.outbound_type // "shadowsocks"')"
     ai_server="$(state_get '.routing.ai.server')"
-    ai_password="$(state_get '.routing.ai.password')"
-    [[ -n "$ai_server" && "$ai_server" != "null" ]] || errors+=$'AI 分流落地节点域名不能为空。\n'
+    [[ "$ai_protocol" == "shadowsocks" || "$ai_protocol" == "vless" ]] || errors+=$'AI 分流出站协议仅支持 Shadowsocks 或 VLESS。\n'
+    [[ -n "$ai_server" && "$ai_server" != "null" ]] || errors+=$'AI 分流落地节点地址不能为空。\n'
     [[ "$(state_get '.routing.ai.port')" =~ ^[0-9]+$ ]] || errors+=$'AI 分流落地节点端口必须是数字。\n'
-    [[ -n "$(state_get '.routing.ai.method')" ]] || errors+=$'AI 分流 Shadowsocks 加密方式不能为空。\n'
-    [[ -n "$ai_password" && "$ai_password" != "null" ]] || errors+=$'AI 分流 Shadowsocks 密码不能为空。\n'
+    if [[ "$ai_protocol" == "shadowsocks" ]]; then
+      ai_password="$(state_get '.routing.ai.password')"
+      [[ -n "$(state_get '.routing.ai.method')" ]] || errors+=$'AI 分流 Shadowsocks 加密方式不能为空。\n'
+      [[ -n "$ai_password" && "$ai_password" != "null" ]] || errors+=$'AI 分流 Shadowsocks 密码不能为空。\n'
+    fi
+    if [[ "$ai_protocol" == "vless" ]]; then
+      ai_uuid="$(state_get '.routing.ai.uuid')"
+      ai_reality_enabled="$(state_get '.routing.ai.reality_enabled // false')"
+      ai_reality_public_key="$(state_get '.routing.ai.reality_public_key')"
+      [[ -n "$ai_uuid" && "$ai_uuid" != "null" ]] || errors+=$'AI 分流 VLESS UUID 不能为空。\n'
+      if [[ "$ai_reality_enabled" == "true" ]]; then
+        [[ -n "$ai_reality_public_key" && "$ai_reality_public_key" != "null" ]] || errors+=$'AI 分流 VLESS Reality public key 不能为空。\n'
+      fi
+    fi
     [[ "$(state_get '((.routing.ai.domain_suffix // []) + (.routing.ai.domain_keyword // [])) | length')" -gt 0 ]] || errors+=$'AI 分流域名规则不能为空。\n'
   fi
 
@@ -1367,15 +1407,53 @@ render_config() {
       },
       (
         if (.routing.ai.enabled // false) then
-          {
-            type: "shadowsocks",
-            tag: "ai-out",
-            server: .routing.ai.server,
-            server_port: .routing.ai.port,
-            method: .routing.ai.method,
-            password: .routing.ai.password,
-            network: (.routing.ai.network // "tcp")
-          }
+          if (.routing.ai.outbound_type // "shadowsocks") == "vless" then
+            (
+              {
+                type: "vless",
+                tag: "ai-out",
+                server: .routing.ai.server,
+                server_port: .routing.ai.port,
+                uuid: .routing.ai.uuid,
+                network: (.routing.ai.network // "tcp")
+              }
+              + (if (.routing.ai.flow // "") != "" then
+                  { flow: .routing.ai.flow }
+                else {} end)
+              + (if (.routing.ai.tls_enabled // false) or (.routing.ai.reality_enabled // false) then
+                  {
+                    tls: (
+                      {
+                        enabled: true,
+                        insecure: (.routing.ai.tls_insecure // false)
+                      }
+                      + (if (.routing.ai.tls_server_name // "") != "" then
+                          { server_name: .routing.ai.tls_server_name }
+                        else {} end)
+                      + (if (.routing.ai.reality_enabled // false) then
+                          {
+                            reality: {
+                              enabled: true,
+                              public_key: .routing.ai.reality_public_key,
+                              short_id: (.routing.ai.reality_short_id // "")
+                            }
+                          }
+                        else {} end)
+                    )
+                  }
+                else {} end)
+            )
+          else
+            {
+              type: "shadowsocks",
+              tag: "ai-out",
+              server: .routing.ai.server,
+              server_port: .routing.ai.port,
+              method: .routing.ai.method,
+              password: .routing.ai.password,
+              network: (.routing.ai.network // "tcp")
+            }
+          end
         else empty
         end
       )
@@ -1669,6 +1747,23 @@ quick_install() {
   ui_msg "基础环境安装完成，请继续在面板中按需启用并配置协议。"
 }
 
+repair_install() {
+  require_linux
+  require_root
+  ensure_dirs
+  init_state_file
+  install_dependencies
+  if install_manager_script_from_repo; then
+    log "管理脚本已重新安装 / 更新。"
+  else
+    warn "管理脚本更新失败，将继续修复 sing-box 核心与配置。"
+  fi
+  install_sing_box
+  ensure_sing_box_service
+  apply_config || return 1
+  ui_msg "重新安装 / 修复完成。原有节点、客户端和分流规则已保留。"
+}
+
 configure_server_address() {
   local current desired
   current="$(state_get '.meta.server_address')"
@@ -1847,14 +1942,22 @@ configure_hysteria2() {
 }
 
 configure_ai_routing() {
-  local current_enabled current_server current_port current_method current_password current_rules
-  local server port method password rules_input rules_json rules_count
+  local current_enabled current_protocol current_server current_port current_method current_password current_rules
+  local current_uuid current_flow current_tls_server_name current_reality_public_key current_reality_short_id
+  local protocol_choice protocol server port rules_input rules_json rules_count
+  local method password uuid flow tls_enabled tls_server_name tls_insecure reality_enabled reality_public_key reality_short_id
 
   current_enabled="$(state_get '.routing.ai.enabled // false')"
+  current_protocol="$(state_get '.routing.ai.outbound_type // "shadowsocks"')"
   current_server="$(state_get '.routing.ai.server // ""')"
   current_port="$(state_get '.routing.ai.port // 443')"
   current_method="$(state_get '.routing.ai.method // "chacha20-ietf-poly1305"')"
   current_password="$(state_get '.routing.ai.password // ""')"
+  current_uuid="$(state_get '.routing.ai.uuid // ""')"
+  current_flow="$(state_get '.routing.ai.flow // ""')"
+  current_tls_server_name="$(state_get '.routing.ai.tls_server_name // ""')"
+  current_reality_public_key="$(state_get '.routing.ai.reality_public_key // ""')"
+  current_reality_short_id="$(state_get '.routing.ai.reality_short_id // ""')"
   current_rules="$(format_ai_rule_list)"
 
   if ! ui_yesno "是否启用或继续配置 AI 分流？选择否将关闭 AI 分流。当前状态：${current_enabled}"; then
@@ -1866,38 +1969,107 @@ configure_ai_routing() {
     return 0
   fi
 
-  server="$(prompt_nonempty "AI 分流落地节点" "请输入 Shadowsocks 落地节点域名" "$current_server")" || return 1
-  port="$(prompt_number "AI 分流落地端口" "请输入 Shadowsocks 落地节点端口" "$current_port" 1 65535)" || return 1
-  method="$(prompt_nonempty "AI 分流加密方式" "请输入 Shadowsocks 加密方式，例如 chacha20-ietf-poly1305 / aes-256-gcm" "$current_method")" || return 1
+  protocol_choice="$(ui_menu "AI 分流出站协议" "请选择落地节点协议。当前协议：${current_protocol}" \
+    "1" "Shadowsocks" \
+    "2" "VLESS" \
+    "0" "返回")" || return 1
+  case "$protocol_choice" in
+    1) protocol="shadowsocks" ;;
+    2) protocol="vless" ;;
+    0) return 0 ;;
+    *)
+      ui_msg "无效选项，请重新选择。"
+      return 1
+      ;;
+  esac
+
+  server="$(prompt_nonempty "AI 分流落地节点地址" "请输入落地节点地址（域名、IPv4 或 IPv6）" "$current_server")" || return 1
+  port="$(prompt_number "AI 分流落地端口" "请输入落地节点端口" "$current_port" 1 65535)" || return 1
   rules_input="$(prompt_nonempty "AI 分流站点规则" "请输入要走落地的域名、网址或关键词，用逗号/空格分隔；例如 gemini, gpt, claude" "$current_rules")" || return 1
-  rules_json="$(build_ai_rules_json "$rules_input")"
-  rules_count="$(printf '%s' "$rules_json" | jq -r '((.domain_suffix // []) + (.domain_keyword // [])) | length')"
+  if ! rules_json="$(build_ai_rules_json "$rules_input")"; then
+    ui_msg "AI 分流站点规则解析失败，请检查输入内容后重试。"
+    return 1
+  fi
+  if ! rules_count="$(printf '%s' "$rules_json" | jq -r '((.domain_suffix // []) + (.domain_keyword // [])) | length')"; then
+    ui_msg "AI 分流站点规则解析失败，请检查输入内容后重试。"
+    return 1
+  fi
   if [[ "$rules_count" -eq 0 ]]; then
     ui_msg "AI 分流站点规则不能为空。"
     return 1
   fi
 
-  password="$(ui_password "AI 分流密码" "请输入 Shadowsocks 密码；留空则保留当前密码")" || return 1
-  if [[ -z "$password" ]]; then
-    password="$current_password"
-  fi
-  if [[ -z "$password" || "$password" == "null" ]]; then
-    ui_msg "Shadowsocks 密码不能为空。仅有域名和端口不足以连接落地节点，请向节点提供方确认加密方式和密码。"
-    return 1
-  fi
+  if [[ "$protocol" == "shadowsocks" ]]; then
+    method="$(prompt_nonempty "AI 分流加密方式" "请输入 Shadowsocks 加密方式，例如 chacha20-ietf-poly1305 / aes-256-gcm" "$current_method")" || return 1
+    password="$(ui_password "AI 分流密码" "请输入 Shadowsocks 密码；留空则保留当前密码")" || return 1
+    if [[ -z "$password" ]]; then
+      password="$current_password"
+    fi
+    if [[ -z "$password" || "$password" == "null" ]]; then
+      ui_msg "Shadowsocks 密码不能为空。请向节点提供方确认加密方式和密码。"
+      return 1
+    fi
 
-  state_jq --arg server "$server" --argjson port "$port" --arg method "$method" --arg password "$password" --argjson rules "$rules_json" --arg ts "$(utc_now)" '
-    .routing.ai.enabled = true |
-    .routing.ai.outbound_type = "shadowsocks" |
-    .routing.ai.server = $server |
-    .routing.ai.port = $port |
-    .routing.ai.method = $method |
-    .routing.ai.password = $password |
-    .routing.ai.network = "tcp" |
-    .routing.ai.domain_suffix = $rules.domain_suffix |
-    .routing.ai.domain_keyword = $rules.domain_keyword |
-    .meta.updated_at = $ts
-  '
+    state_jq --arg server "$server" --argjson port "$port" --arg method "$method" --arg password "$password" --argjson rules "$rules_json" --arg ts "$(utc_now)" '
+      .routing.ai.enabled = true |
+      .routing.ai.outbound_type = "shadowsocks" |
+      .routing.ai.server = $server |
+      .routing.ai.port = $port |
+      .routing.ai.method = $method |
+      .routing.ai.password = $password |
+      .routing.ai.network = "tcp" |
+      .routing.ai.domain_suffix = $rules.domain_suffix |
+      .routing.ai.domain_keyword = $rules.domain_keyword |
+      .meta.updated_at = $ts
+    '
+  else
+    uuid="$(prompt_nonempty "AI 分流 VLESS UUID" "请输入 VLESS UUID" "$current_uuid")" || return 1
+    flow="$(ui_input "AI 分流 VLESS Flow" "请输入 VLESS flow；普通 VLESS 可留空，Reality Vision 常用 xtls-rprx-vision" "$current_flow")" || return 1
+    flow="${flow//[$'\r\n ']}"
+    tls_enabled="false"
+    tls_server_name=""
+    tls_insecure="false"
+    reality_enabled="false"
+    reality_public_key=""
+    reality_short_id=""
+
+    if ui_yesno "是否启用 VLESS TLS？如果是 Reality 节点请选择是。"; then
+      tls_enabled="true"
+      tls_server_name="$(ui_input "AI 分流 TLS Server Name" "请输入 TLS SNI / server_name；只有 IP 且无需 SNI 时可留空" "$current_tls_server_name")" || return 1
+      tls_server_name="${tls_server_name//[$'\r\n ']}"
+      if ui_yesno "是否允许不安全证书 insecure？"; then
+        tls_insecure="true"
+      fi
+      if ui_yesno "是否启用 Reality？"; then
+        reality_enabled="true"
+        reality_public_key="$(prompt_nonempty "AI 分流 Reality Public Key" "请输入 Reality public key" "$current_reality_public_key")" || return 1
+        reality_short_id="$(ui_input "AI 分流 Reality Short ID" "请输入 Reality short_id；可留空" "$current_reality_short_id")" || return 1
+        reality_short_id="${reality_short_id//[$'\r\n ']}"
+      fi
+    fi
+
+    state_jq --arg server "$server" --argjson port "$port" --arg uuid "$uuid" --arg flow "$flow" \
+      --argjson tls_enabled "$tls_enabled" --arg tls_server_name "$tls_server_name" --argjson tls_insecure "$tls_insecure" \
+      --argjson reality_enabled "$reality_enabled" --arg reality_public_key "$reality_public_key" --arg reality_short_id "$reality_short_id" \
+      --argjson rules "$rules_json" --arg ts "$(utc_now)" '
+      .routing.ai.enabled = true |
+      .routing.ai.outbound_type = "vless" |
+      .routing.ai.server = $server |
+      .routing.ai.port = $port |
+      .routing.ai.uuid = $uuid |
+      .routing.ai.flow = $flow |
+      .routing.ai.network = "tcp" |
+      .routing.ai.tls_enabled = $tls_enabled |
+      .routing.ai.tls_server_name = $tls_server_name |
+      .routing.ai.tls_insecure = $tls_insecure |
+      .routing.ai.reality_enabled = $reality_enabled |
+      .routing.ai.reality_public_key = $reality_public_key |
+      .routing.ai.reality_short_id = $reality_short_id |
+      .routing.ai.domain_suffix = $rules.domain_suffix |
+      .routing.ai.domain_keyword = $rules.domain_keyword |
+      .meta.updated_at = $ts
+    '
+  fi
 
   apply_config
 }
@@ -2297,7 +2469,15 @@ restart_realm_service() {
   ui_msg "Realm 服务已重启。"
 }
 
-update_manager_script() {
+manager_script_target_path() {
+  if [[ -x /usr/local/bin/sbox ]]; then
+    printf '%s\n' "/usr/local/bin/sbox"
+  else
+    printf '%s\n' "$SELF_PATH"
+  fi
+}
+
+install_manager_script_from_repo() {
   local target_path tmp_file
   local -a urls=(
     "https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/${SCRIPT_REPO_BRANCH}/index.sh"
@@ -2305,21 +2485,23 @@ update_manager_script() {
     "https://cdn.jsdelivr.net/gh/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}@${SCRIPT_REPO_BRANCH}/index.sh"
   )
 
-  if [[ -x /usr/local/bin/sbox ]]; then
-    target_path="/usr/local/bin/sbox"
-  else
-    target_path="$SELF_PATH"
-  fi
-
+  target_path="$(manager_script_target_path)"
   tmp_file="$(mktemp "$TMP_DIR/sbox-update.XXXXXX")"
   if ! download_to_file "$tmp_file" "${urls[@]}"; then
     rm -f "$tmp_file"
-    ui_msg "更新脚本失败，请稍后重试。"
     return 1
   fi
 
   install -m 755 "$tmp_file" "$target_path"
   rm -f "$tmp_file"
+}
+
+update_manager_script() {
+  if ! install_manager_script_from_repo; then
+    ui_msg "更新脚本失败，请稍后重试。"
+    return 1
+  fi
+
   ui_msg "脚本已更新完成。"
 }
 
@@ -2534,10 +2716,13 @@ users = $hy2_users
 
 [AI Routing]
 enabled = $(state_get '.routing.ai.enabled // false')
-outbound = Shadowsocks
-server = $(state_get '.routing.ai.server // "-"')
+outbound = $(state_get '.routing.ai.outbound_type // "shadowsocks"')
+address = $(state_get '.routing.ai.server // "-"')
 port = $(state_get '.routing.ai.port // "-"')
 method = $(state_get '.routing.ai.method // "-"')
+uuid = $(state_get '.routing.ai.uuid // "-"')
+tls = $(state_get '.routing.ai.tls_enabled // false')
+reality = $(state_get '.routing.ai.reality_enabled // false')
 rules = $(format_ai_rule_list)
 EOF
   )
@@ -2643,7 +2828,8 @@ main_menu() {
       "13" "查看服务状态" \
       "14" "配置 AI 分流" \
       "15" "Realm 中转" \
-      "16" "卸载" \
+      "16" "重新安装 / 修复（保留规则）" \
+      "17" "卸载" \
       "0" "退出")" || break
 
     case "$choice" in
@@ -2693,6 +2879,9 @@ main_menu() {
         prepare_realm_menu && realm_submenu
         ;;
       16)
+        repair_install
+        ;;
+      17)
         uninstall_sbox
         ;;
       0)
@@ -2716,7 +2905,8 @@ usage() {
   $SCRIPT_NAME quick-install  一键安装并初始化
   $SCRIPT_NAME add-client     打开新增客户端流程
   $SCRIPT_NAME remove-client  打开删除客户端流程
-  $SCRIPT_NAME ai-route       配置 AI 分流到远端 Shadowsocks 落地节点
+  $SCRIPT_NAME ai-route       配置 AI 分流到远端 SS / VLESS 落地节点
+  $SCRIPT_NAME repair-install 重新安装 / 修复环境并保留现有规则
   $SCRIPT_NAME realm          打开 Realm 中转菜单
   $SCRIPT_NAME apply          重新生成配置并重载服务
   $SCRIPT_NAME show           查看客户端信息
@@ -2729,8 +2919,9 @@ usage() {
   1. 面板使用纯命令行数字输入，不依赖方向键。
   2. Hysteria2 默认使用自签名证书。
   3. 非交互安装可通过 SINGBOX_SERVER_ADDRESS=your.domain 指定节点地址。
-  4. AI 分流需要 Shadowsocks 落地节点的域名、端口、加密方式和密码。
-  5. 一键安装只安装环境；当你启用协议或新增客户端后，才会生成对应的协议链接。
+  4. AI 分流支持 Shadowsocks 和 VLESS，落地节点地址可以是域名、IPv4 或 IPv6。
+  5. repair-install 会重装 / 更新脚本和 sing-box 核心，但不会删除状态文件、客户端或分流规则。
+  6. 一键安装只安装环境；当你启用协议或新增客户端后，才会生成对应的协议链接。
 EOF
 }
 
@@ -2783,6 +2974,13 @@ main() {
       ensure_dirs
       init_state_file
       configure_ai_routing
+      ;;
+    repair-install|reinstall)
+      require_linux
+      require_root
+      ensure_dirs
+      init_state_file
+      repair_install
       ;;
     realm)
       ensure_ui_backend

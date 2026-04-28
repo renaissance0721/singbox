@@ -2001,7 +2001,7 @@ configure_ai_routing() {
 
   if [[ "$protocol" == "shadowsocks" ]]; then
     method="$(prompt_nonempty "AI 分流加密方式" "请输入 Shadowsocks 加密方式，例如 chacha20-ietf-poly1305 / aes-256-gcm" "$current_method")" || return 1
-    password="$(ui_password "AI 分流密码" "请输入 Shadowsocks 密码；留空则保留当前密码")" || return 1
+    password="$(ui_input "AI 分流密码" "请输入 Shadowsocks 密码；留空则保留当前密码" "")" || return 1
     if [[ -z "$password" ]]; then
       password="$current_password"
     fi
@@ -2067,6 +2067,93 @@ configure_ai_routing() {
       .routing.ai.reality_short_id = $reality_short_id |
       .routing.ai.domain_suffix = $rules.domain_suffix |
       .routing.ai.domain_keyword = $rules.domain_keyword |
+      .meta.updated_at = $ts
+    '
+  fi
+
+  apply_config
+}
+
+show_ai_routing_rules() {
+  local rules_text summary
+  rules_text="$(jq -r '
+    [
+      (.routing.ai.domain_suffix // [] | map("domain_suffix: " + .)[]?),
+      (.routing.ai.domain_keyword // [] | map("domain_keyword: " + .)[]?)
+    ] | if length == 0 then "当前没有 AI 分流站点规则。" else join("\n") end
+  ' "$STATE_FILE")"
+
+  summary=$(
+    cat <<EOF
+enabled = $(state_get '.routing.ai.enabled // false')
+outbound = $(state_get '.routing.ai.outbound_type // "shadowsocks"')
+address = $(state_get '.routing.ai.server // "-"')
+port = $(state_get '.routing.ai.port // "-"')
+tls = $(state_get '.routing.ai.tls_enabled // false')
+reality = $(state_get '.routing.ai.reality_enabled // false')
+
+[Rules]
+${rules_text}
+EOF
+  )
+
+  ui_show_text "AI 分流规则" "$summary"
+}
+
+delete_ai_routing_rule() {
+  local total_count choice selected_index selected_kind selected_rule
+  local -a rule_kinds=()
+  local -a rule_values=()
+  local -a options=()
+
+  total_count="$(state_get '((.routing.ai.domain_suffix // []) + (.routing.ai.domain_keyword // [])) | length')"
+  if [[ "$total_count" -eq 0 ]]; then
+    ui_msg "当前没有可删除的 AI 分流站点规则。"
+    return 0
+  fi
+
+  while IFS=$'\t' read -r selected_kind selected_rule; do
+    [[ -n "$selected_kind" && -n "$selected_rule" ]] || continue
+    rule_kinds+=("$selected_kind")
+    rule_values+=("$selected_rule")
+    options+=("${#rule_values[@]}" "${selected_kind}: ${selected_rule}")
+  done < <(jq -r '
+    (.routing.ai.domain_suffix // [] | .[] | ["domain_suffix", .] | @tsv),
+    (.routing.ai.domain_keyword // [] | .[] | ["domain_keyword", .] | @tsv)
+  ' "$STATE_FILE")
+
+  options+=("0" "返回")
+  choice="$(ui_menu "删除 AI 分流规则" "请选择要删除的规则" "${options[@]}")" || return 1
+  [[ "$choice" == "0" ]] && return 0
+  [[ "$choice" =~ ^[0-9]+$ ]] || {
+    ui_msg "无效选项，请重新选择。"
+    return 1
+  }
+
+  selected_index=$((choice - 1))
+  (( selected_index >= 0 && selected_index < ${#rule_values[@]} )) || {
+    ui_msg "无效选项，请重新选择。"
+    return 1
+  }
+
+  selected_kind="${rule_kinds[$selected_index]}"
+  selected_rule="${rule_values[$selected_index]}"
+
+  if [[ "$total_count" -eq 1 ]]; then
+    ui_yesno "这是最后一条 AI 分流规则。删除后将自动关闭 AI 分流，是否继续？" || return 0
+    state_jq --arg ts "$(utc_now)" '
+      .routing.ai.enabled = false |
+      .routing.ai.domain_suffix = [] |
+      .routing.ai.domain_keyword = [] |
+      .meta.updated_at = $ts
+    '
+  else
+    state_jq --arg kind "$selected_kind" --arg rule "$selected_rule" --arg ts "$(utc_now)" '
+      if $kind == "domain_suffix" then
+        .routing.ai.domain_suffix |= map(select(. != $rule))
+      else
+        .routing.ai.domain_keyword |= map(select(. != $rule))
+      end |
       .meta.updated_at = $ts
     '
   fi
@@ -2827,9 +2914,11 @@ main_menu() {
       "12" "查看当前概览" \
       "13" "查看服务状态" \
       "14" "配置 AI 分流" \
-      "15" "Realm 中转" \
-      "16" "重新安装 / 修复（保留规则）" \
-      "17" "卸载" \
+      "15" "查看 AI 分流规则" \
+      "16" "删除 AI 分流规则" \
+      "17" "Realm 中转" \
+      "18" "重新安装 / 修复（保留规则）" \
+      "19" "卸载" \
       "0" "退出")" || break
 
     case "$choice" in
@@ -2876,12 +2965,18 @@ main_menu() {
         configure_ai_routing
         ;;
       15)
-        prepare_realm_menu && realm_submenu
+        show_ai_routing_rules
         ;;
       16)
-        repair_install
+        delete_ai_routing_rule
         ;;
       17)
+        prepare_realm_menu && realm_submenu
+        ;;
+      18)
+        repair_install
+        ;;
+      19)
         uninstall_sbox
         ;;
       0)
@@ -2906,6 +3001,8 @@ usage() {
   $SCRIPT_NAME add-client     打开新增客户端流程
   $SCRIPT_NAME remove-client  打开删除客户端流程
   $SCRIPT_NAME ai-route       配置 AI 分流到远端 SS / VLESS 落地节点
+  $SCRIPT_NAME ai-rules       查看 AI 分流规则
+  $SCRIPT_NAME delete-ai-rule 删除 AI 分流规则
   $SCRIPT_NAME repair-install 重新安装 / 修复环境并保留现有规则
   $SCRIPT_NAME realm          打开 Realm 中转菜单
   $SCRIPT_NAME apply          重新生成配置并重载服务
@@ -2974,6 +3071,21 @@ main() {
       ensure_dirs
       init_state_file
       configure_ai_routing
+      ;;
+    ai-rules|show-ai-rules)
+      require_linux
+      require_root
+      ensure_dirs
+      init_state_file
+      show_ai_routing_rules
+      ;;
+    delete-ai-rule|remove-ai-rule)
+      require_linux
+      require_root
+      ensure_ui_backend
+      ensure_dirs
+      init_state_file
+      delete_ai_routing_rule
       ;;
     repair-install|reinstall)
       require_linux

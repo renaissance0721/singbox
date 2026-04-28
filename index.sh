@@ -524,6 +524,7 @@ backup_config_if_exists() {
 
 init_state_file() {
   if [[ -s "$STATE_FILE" ]]; then
+    migrate_state_schema
     return 0
   fi
 
@@ -577,6 +578,44 @@ init_state_file() {
       "masquerade": "https://www.bing.com",
       "users": []
     }
+  },
+  "routing": {
+    "ai": {
+      "enabled": false,
+      "outbound_type": "shadowsocks",
+      "server": "",
+      "port": 443,
+      "method": "chacha20-ietf-poly1305",
+      "password": "",
+      "network": "tcp",
+      "domain_suffix": [
+        "openai.com",
+        "chatgpt.com",
+        "oaistatic.com",
+        "oaiusercontent.com",
+        "anthropic.com",
+        "claude.ai",
+        "perplexity.ai",
+        "poe.com",
+        "sora.com",
+        "x.ai",
+        "grok.com",
+        "deepseek.com",
+        "deepseek.ai",
+        "generativelanguage.googleapis.com",
+        "aistudio.google.com",
+        "gemini.google.com"
+      ],
+      "domain_keyword": [
+        "openai",
+        "chatgpt",
+        "gpt",
+        "anthropic",
+        "claude",
+        "perplexity",
+        "gemini"
+      ]
+    }
   }
 }
 EOF
@@ -591,6 +630,89 @@ state_jq() {
   tmp_file="$(mktemp "$TMP_DIR/singbox-state.XXXXXX")"
   jq "$@" "$STATE_FILE" >"$tmp_file"
   mv "$tmp_file" "$STATE_FILE"
+}
+
+migrate_state_schema() {
+  if jq -e '
+    (.routing.ai.enabled? != null)
+    and (.routing.ai.domain_suffix? != null)
+    and (.routing.ai.domain_keyword? != null)
+  ' "$STATE_FILE" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  state_jq --arg ts "$(utc_now)" '
+    .routing = (.routing // {}) |
+    .routing.ai = (.routing.ai // {}) |
+    .routing.ai.enabled = (.routing.ai.enabled // false) |
+    .routing.ai.outbound_type = (.routing.ai.outbound_type // "shadowsocks") |
+    .routing.ai.server = (.routing.ai.server // "") |
+    .routing.ai.port = (.routing.ai.port // 443) |
+    .routing.ai.method = (.routing.ai.method // "chacha20-ietf-poly1305") |
+    .routing.ai.password = (.routing.ai.password // "") |
+    .routing.ai.network = (.routing.ai.network // "tcp") |
+    .routing.ai.domain_suffix = (.routing.ai.domain_suffix // [
+      "openai.com",
+      "chatgpt.com",
+      "oaistatic.com",
+      "oaiusercontent.com",
+      "anthropic.com",
+      "claude.ai",
+      "perplexity.ai",
+      "poe.com",
+      "sora.com",
+      "x.ai",
+      "grok.com",
+      "deepseek.com",
+      "deepseek.ai",
+      "generativelanguage.googleapis.com",
+      "aistudio.google.com",
+      "gemini.google.com"
+    ]) |
+    .routing.ai.domain_keyword = (.routing.ai.domain_keyword // [
+      "openai",
+      "chatgpt",
+      "gpt",
+      "anthropic",
+      "claude",
+      "perplexity",
+      "gemini"
+    ]) |
+    .meta.updated_at = $ts
+  '
+}
+
+format_ai_rule_list() {
+  jq -r '((.routing.ai.domain_suffix // []) + (.routing.ai.domain_keyword // [])) | join(", ")' "$STATE_FILE"
+}
+
+build_ai_rules_json() {
+  local input=$1
+  jq -nc --arg input "$input" '
+    def normalized_items:
+      ascii_downcase
+      | gsub("[，、;；\r\n\t ]+"; ",")
+      | split(",")
+      | map(
+          gsub("^\\s+|\\s+$"; "")
+          | sub("^[a-z][a-z0-9+.-]*://"; "")
+          | sub("^//"; "")
+          | split("/")[0]
+          | sub("^\\["; "")
+          | sub("\\]$"; "")
+          | sub(":[0-9]+$"; "")
+          | sub("^\\*\\."; "")
+          | sub("^\\."; "")
+        )
+      | map(select(length > 0))
+      | unique;
+
+    ($input | normalized_items) as $items |
+    {
+      domain_suffix: ($items | map(select(contains(".")))),
+      domain_keyword: ($items | map(select(contains(".") | not)))
+    }
+  '
 }
 
 init_realm_state_file() {
@@ -1089,11 +1211,13 @@ validate_state() {
   local errors=""
   local ss_enabled vless_enabled hy2_enabled
   local server_address vless_server_name handshake_server
+  local ai_enabled ai_server ai_password
 
   ss_enabled="$(state_get '.protocols.shadowsocks.enabled')"
   vless_enabled="$(state_get '.protocols.vless_reality.enabled')"
   hy2_enabled="$(state_get '.protocols.hysteria2.enabled')"
   server_address="$(state_get '.meta.server_address')"
+  ai_enabled="$(state_get '.routing.ai.enabled // false')"
 
   [[ -n "$server_address" && "$server_address" != "null" ]] || errors+=$'节点对外地址不能为空。\n'
 
@@ -1124,6 +1248,16 @@ validate_state() {
     [[ "$(state_get '.protocols.hysteria2.users | length')" -gt 0 ]] || errors+=$'Hysteria2 至少需要一个客户端。\n'
     [[ -f "$(state_get '.protocols.hysteria2.cert_path')" ]] || errors+=$'Hysteria2 证书文件不存在。\n'
     [[ -f "$(state_get '.protocols.hysteria2.key_path')" ]] || errors+=$'Hysteria2 私钥文件不存在。\n'
+  fi
+
+  if [[ "$ai_enabled" == "true" ]]; then
+    ai_server="$(state_get '.routing.ai.server')"
+    ai_password="$(state_get '.routing.ai.password')"
+    [[ -n "$ai_server" && "$ai_server" != "null" ]] || errors+=$'AI 分流落地节点域名不能为空。\n'
+    [[ "$(state_get '.routing.ai.port')" =~ ^[0-9]+$ ]] || errors+=$'AI 分流落地节点端口必须是数字。\n'
+    [[ -n "$(state_get '.routing.ai.method')" ]] || errors+=$'AI 分流 Shadowsocks 加密方式不能为空。\n'
+    [[ -n "$ai_password" && "$ai_password" != "null" ]] || errors+=$'AI 分流 Shadowsocks 密码不能为空。\n'
+    [[ "$(state_get '((.routing.ai.domain_suffix // []) + (.routing.ai.domain_keyword // [])) | length')" -gt 0 ]] || errors+=$'AI 分流域名规则不能为空。\n'
   fi
 
   if [[ -n "$errors" ]]; then
@@ -1225,7 +1359,43 @@ render_config() {
         else empty
         end
       )
-    ]
+    ],
+    outbounds: [
+      {
+        type: "direct",
+        tag: "direct"
+      },
+      (
+        if (.routing.ai.enabled // false) then
+          {
+            type: "shadowsocks",
+            tag: "ai-out",
+            server: .routing.ai.server,
+            server_port: .routing.ai.port,
+            method: .routing.ai.method,
+            password: .routing.ai.password,
+            network: (.routing.ai.network // "tcp")
+          }
+        else empty
+        end
+      )
+    ],
+    route: {
+      rules: [
+        (
+          if (.routing.ai.enabled // false) then
+            {
+              domain_suffix: (.routing.ai.domain_suffix // []),
+              domain_keyword: (.routing.ai.domain_keyword // []),
+              action: "route",
+              outbound: "ai-out"
+            }
+          else empty
+          end
+        )
+      ],
+      final: "direct"
+    }
   }' "$STATE_FILE"
 }
 
@@ -1672,6 +1842,62 @@ configure_hysteria2() {
   if [[ "$(state_get '.protocols.hysteria2.users | length')" -eq 0 ]]; then
     append_hy2_user "hy2-client-1" "$(generate_password)"
   fi
+
+  apply_config
+}
+
+configure_ai_routing() {
+  local current_enabled current_server current_port current_method current_password current_rules
+  local server port method password rules_input rules_json rules_count
+
+  current_enabled="$(state_get '.routing.ai.enabled // false')"
+  current_server="$(state_get '.routing.ai.server // ""')"
+  current_port="$(state_get '.routing.ai.port // 443')"
+  current_method="$(state_get '.routing.ai.method // "chacha20-ietf-poly1305"')"
+  current_password="$(state_get '.routing.ai.password // ""')"
+  current_rules="$(format_ai_rule_list)"
+
+  if ! ui_yesno "是否启用或继续配置 AI 分流？选择否将关闭 AI 分流。当前状态：${current_enabled}"; then
+    state_jq --arg ts "$(utc_now)" '
+      .routing.ai.enabled = false |
+      .meta.updated_at = $ts
+    '
+    apply_config
+    return 0
+  fi
+
+  server="$(prompt_nonempty "AI 分流落地节点" "请输入 Shadowsocks 落地节点域名" "$current_server")" || return 1
+  port="$(prompt_number "AI 分流落地端口" "请输入 Shadowsocks 落地节点端口" "$current_port" 1 65535)" || return 1
+  method="$(prompt_nonempty "AI 分流加密方式" "请输入 Shadowsocks 加密方式，例如 chacha20-ietf-poly1305 / aes-256-gcm" "$current_method")" || return 1
+  rules_input="$(prompt_nonempty "AI 分流站点规则" "请输入要走落地的域名、网址或关键词，用逗号/空格分隔；例如 gemini, gpt, claude" "$current_rules")" || return 1
+  rules_json="$(build_ai_rules_json "$rules_input")"
+  rules_count="$(printf '%s' "$rules_json" | jq -r '((.domain_suffix // []) + (.domain_keyword // [])) | length')"
+  if [[ "$rules_count" -eq 0 ]]; then
+    ui_msg "AI 分流站点规则不能为空。"
+    return 1
+  fi
+
+  password="$(ui_password "AI 分流密码" "请输入 Shadowsocks 密码；留空则保留当前密码")" || return 1
+  if [[ -z "$password" ]]; then
+    password="$current_password"
+  fi
+  if [[ -z "$password" || "$password" == "null" ]]; then
+    ui_msg "Shadowsocks 密码不能为空。仅有域名和端口不足以连接落地节点，请向节点提供方确认加密方式和密码。"
+    return 1
+  fi
+
+  state_jq --arg server "$server" --argjson port "$port" --arg method "$method" --arg password "$password" --argjson rules "$rules_json" --arg ts "$(utc_now)" '
+    .routing.ai.enabled = true |
+    .routing.ai.outbound_type = "shadowsocks" |
+    .routing.ai.server = $server |
+    .routing.ai.port = $port |
+    .routing.ai.method = $method |
+    .routing.ai.password = $password |
+    .routing.ai.network = "tcp" |
+    .routing.ai.domain_suffix = $rules.domain_suffix |
+    .routing.ai.domain_keyword = $rules.domain_keyword |
+    .meta.updated_at = $ts
+  '
 
   apply_config
 }
@@ -2183,6 +2409,7 @@ Sing-box 状态：$(sing_box_install_status)
 Shadowsocks 2022 规则个数：$(state_get '.protocols.shadowsocks.users | length')
 VLESS + Reality 规则个数：$(state_get '.protocols.vless_reality.users | length')
 Hysteria2 规则个数：$(state_get '.protocols.hysteria2.users | length')
+AI 分流状态：$(state_get '.routing.ai.enabled // false')
 
 请选择要执行的操作
 EOF
@@ -2304,6 +2531,14 @@ port = $(state_get '.protocols.hysteria2.port')/udp
 tls_server_name = $(state_get '.protocols.hysteria2.tls_server_name')
 obfs_password = $(state_get '.protocols.hysteria2.obfs_password')
 users = $hy2_users
+
+[AI Routing]
+enabled = $(state_get '.routing.ai.enabled // false')
+outbound = Shadowsocks
+server = $(state_get '.routing.ai.server // "-"')
+port = $(state_get '.routing.ai.port // "-"')
+method = $(state_get '.routing.ai.method // "-"')
+rules = $(format_ai_rule_list)
 EOF
   )
 
@@ -2406,8 +2641,9 @@ main_menu() {
       "11" "重新生成配置并重载服务" \
       "12" "查看当前概览" \
       "13" "查看服务状态" \
-      "14" "Realm 中转" \
-      "15" "卸载" \
+      "14" "配置 AI 分流" \
+      "15" "Realm 中转" \
+      "16" "卸载" \
       "0" "退出")" || break
 
     case "$choice" in
@@ -2451,9 +2687,12 @@ main_menu() {
         show_service_status
         ;;
       14)
-        prepare_realm_menu && realm_submenu
+        configure_ai_routing
         ;;
       15)
+        prepare_realm_menu && realm_submenu
+        ;;
+      16)
         uninstall_sbox
         ;;
       0)
@@ -2477,6 +2716,7 @@ usage() {
   $SCRIPT_NAME quick-install  一键安装并初始化
   $SCRIPT_NAME add-client     打开新增客户端流程
   $SCRIPT_NAME remove-client  打开删除客户端流程
+  $SCRIPT_NAME ai-route       配置 AI 分流到远端 Shadowsocks 落地节点
   $SCRIPT_NAME realm          打开 Realm 中转菜单
   $SCRIPT_NAME apply          重新生成配置并重载服务
   $SCRIPT_NAME show           查看客户端信息
@@ -2489,7 +2729,8 @@ usage() {
   1. 面板使用纯命令行数字输入，不依赖方向键。
   2. Hysteria2 默认使用自签名证书。
   3. 非交互安装可通过 SINGBOX_SERVER_ADDRESS=your.domain 指定节点地址。
-  4. 一键安装只安装环境；当你启用协议或新增客户端后，才会生成对应的协议链接。
+  4. AI 分流需要 Shadowsocks 落地节点的域名、端口、加密方式和密码。
+  5. 一键安装只安装环境；当你启用协议或新增客户端后，才会生成对应的协议链接。
 EOF
 }
 
@@ -2534,6 +2775,14 @@ main() {
       ensure_dirs
       init_state_file
       remove_client
+      ;;
+    ai-route)
+      require_linux
+      require_root
+      ensure_ui_backend
+      ensure_dirs
+      init_state_file
+      configure_ai_routing
       ;;
     realm)
       ensure_ui_backend

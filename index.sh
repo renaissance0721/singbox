@@ -35,6 +35,7 @@ REALM_CONFIG_FILE="${REALM_CONFIG_FILE:-$REALM_DIR/config.toml}"
 REALM_STATE_FILE="${REALM_STATE_FILE:-$STATE_DIR/realm-state.json}"
 REALM_BIN="${REALM_BIN:-/usr/local/bin/realm}"
 REALM_SERVICE_FILE="${REALM_SERVICE_FILE:-/etc/systemd/system/realm.service}"
+MANAGER_SCRIPT_PATH="${MANAGER_SCRIPT_PATH:-/usr/local/bin/sbox}"
 SCRIPT_REPO_OWNER="${SCRIPT_REPO_OWNER:-renaissance0721}"
 SCRIPT_REPO_NAME="${SCRIPT_REPO_NAME:-singbox}"
 SCRIPT_REPO_BRANCH="${SCRIPT_REPO_BRANCH:-main}"
@@ -1309,7 +1310,16 @@ validate_state() {
 }
 
 render_config() {
-  jq '{
+  jq '
+  def ai_route_matcher:
+    (.routing.ai.domain_suffix // []) as $suffix |
+    {
+      domain: ($suffix | map(select(contains("."))) | unique),
+      domain_suffix: ($suffix | map(select(contains("."))) | map(if startswith(".") then . else "." + . end) | unique),
+      domain_keyword: (.routing.ai.domain_keyword // [] | unique)
+    };
+
+  {
     log: {
       disabled: false,
       level: .meta.log_level,
@@ -1465,16 +1475,24 @@ render_config() {
             {
               action: "sniff",
               sniffer: ["http", "tls", "quic"],
-              timeout: "1s"
+              timeout: "2s"
             }
           else empty
           end
         ),
         (
           if (.routing.ai.enabled // false) then
-            {
-              domain_suffix: (.routing.ai.domain_suffix // []),
-              domain_keyword: (.routing.ai.domain_keyword // []),
+            ai_route_matcher + {
+              protocol: "quic",
+              action: "reject",
+              method: "default"
+            }
+          else empty
+          end
+        ),
+        (
+          if (.routing.ai.enabled // false) then
+            ai_route_matcher + {
               action: "route",
               outbound: "ai-out"
             }
@@ -1758,16 +1776,27 @@ quick_install() {
 }
 
 repair_install() {
+  local manager_target
   require_linux
   require_root
   ensure_dirs
   init_state_file
   install_dependencies
-  if install_manager_script_from_repo; then
-    log "管理脚本已重新安装 / 更新。"
+
+  manager_target="$(manager_script_target_path)"
+  if [[ "${SBOX_REPAIR_RESUMED:-0}" != "1" ]]; then
+    if install_manager_script_from_repo; then
+      log "管理脚本已重新安装 / 更新到 ${manager_target}。"
+      log "将使用新安装的脚本继续修复，以应用最新逻辑。"
+      export SBOX_REPAIR_RESUMED=1
+      exec "$manager_target" repair-install
+    else
+      warn "管理脚本更新失败，将继续修复 sing-box 核心与配置。"
+    fi
   else
-    warn "管理脚本更新失败，将继续修复 sing-box 核心与配置。"
+    log "已切换到新安装的管理脚本，继续修复 sing-box 核心与配置。"
   fi
+
   install_sing_box
   ensure_sing_box_service
   apply_config || return 1
@@ -2108,6 +2137,42 @@ EOF
   )
 
   ui_show_text "AI 分流规则" "$summary"
+}
+
+append_ai_routing_rules() {
+  local rules_input rules_json rules_count
+
+  if [[ "$(state_get '.routing.ai.enabled // false')" != "true" ]]; then
+    ui_msg "AI 分流当前未启用，请先完成 AI 分流配置后再新增规则。"
+    return 0
+  fi
+
+  if (( $# > 0 )); then
+    rules_input="$*"
+  else
+    rules_input="$(prompt_nonempty "新增 AI 分流规则" "请输入要追加的域名、网址或关键词，用逗号/空格分隔；例如 openai.com, gemini, claude.ai" "")" || return 1
+  fi
+
+  if ! rules_json="$(build_ai_rules_json "$rules_input")"; then
+    ui_msg "AI 分流规则解析失败，请检查输入内容后重试。"
+    return 1
+  fi
+  if ! rules_count="$(printf '%s' "$rules_json" | jq -r '((.domain_suffix // []) + (.domain_keyword // [])) | length')"; then
+    ui_msg "AI 分流规则解析失败，请检查输入内容后重试。"
+    return 1
+  fi
+  if [[ "$rules_count" -eq 0 ]]; then
+    ui_msg "新增规则不能为空。"
+    return 1
+  fi
+
+  state_jq --argjson rules "$rules_json" --arg ts "$(utc_now)" '
+    .routing.ai.domain_suffix = (((.routing.ai.domain_suffix // []) + ($rules.domain_suffix // [])) | unique) |
+    .routing.ai.domain_keyword = (((.routing.ai.domain_keyword // []) + ($rules.domain_keyword // [])) | unique) |
+    .meta.updated_at = $ts
+  '
+
+  apply_config
 }
 
 delete_ai_routing_rule() {
@@ -2567,11 +2632,7 @@ restart_realm_service() {
 }
 
 manager_script_target_path() {
-  if [[ -x /usr/local/bin/sbox ]]; then
-    printf '%s\n' "/usr/local/bin/sbox"
-  else
-    printf '%s\n' "$SELF_PATH"
-  fi
+  printf '%s\n' "$MANAGER_SCRIPT_PATH"
 }
 
 install_manager_script_from_repo() {
@@ -2589,7 +2650,11 @@ install_manager_script_from_repo() {
     return 1
   fi
 
+  mkdir -p "$(dirname "$target_path")"
   install -m 755 "$tmp_file" "$target_path"
+  if [[ "$target_path" == "/usr/local/bin/sbox" ]]; then
+    rm -f /usr/local/bin/singbox-manager 2>/dev/null || true
+  fi
   rm -f "$tmp_file"
 }
 
@@ -2925,10 +2990,11 @@ main_menu() {
       "13" "查看服务状态" \
       "14" "配置 AI 分流" \
       "15" "查看 AI 分流规则" \
-      "16" "删除 AI 分流规则" \
-      "17" "Realm 中转" \
-      "18" "重新安装 / 修复（保留规则）" \
-      "19" "卸载" \
+      "16" "新增 AI 分流规则" \
+      "17" "删除 AI 分流规则" \
+      "18" "Realm 中转" \
+      "19" "重新安装 / 修复（保留规则）" \
+      "20" "卸载" \
       "0" "退出")" || break
 
     case "$choice" in
@@ -2978,15 +3044,18 @@ main_menu() {
         show_ai_routing_rules
         ;;
       16)
-        delete_ai_routing_rule
+        append_ai_routing_rules
         ;;
       17)
-        prepare_realm_menu && realm_submenu
+        delete_ai_routing_rule
         ;;
       18)
-        repair_install
+        prepare_realm_menu && realm_submenu
         ;;
       19)
+        repair_install
+        ;;
+      20)
         uninstall_sbox
         ;;
       0)
@@ -3012,6 +3081,8 @@ usage() {
   $SCRIPT_NAME remove-client  打开删除客户端流程
   $SCRIPT_NAME ai-route       配置 AI 分流到远端 SS / VLESS 落地节点
   $SCRIPT_NAME ai-rules       查看 AI 分流规则
+  $SCRIPT_NAME add-ai-rule domain1 keyword2
+                          新增 AI 分流规则
   $SCRIPT_NAME delete-ai-rule 删除 AI 分流规则
   $SCRIPT_NAME repair-install 重新安装 / 修复环境并保留现有规则
   $SCRIPT_NAME realm          打开 Realm 中转菜单
@@ -3088,6 +3159,14 @@ main() {
       ensure_dirs
       init_state_file
       show_ai_routing_rules
+      ;;
+    add-ai-rule|add-ai-rules|append-ai-rule|append-ai-rules)
+      require_linux
+      require_root
+      ensure_ui_backend
+      ensure_dirs
+      init_state_file
+      append_ai_routing_rules "${@:2}"
       ;;
     delete-ai-rule|remove-ai-rule)
       require_linux

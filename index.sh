@@ -1463,6 +1463,16 @@ render_config() {
         (
           if (.routing.ai.enabled // false) then
             {
+              action: "sniff",
+              sniffer: ["http", "tls", "quic"],
+              timeout: "1s"
+            }
+          else empty
+          end
+        ),
+        (
+          if (.routing.ai.enabled // false) then
+            {
               domain_suffix: (.routing.ai.domain_suffix // []),
               domain_keyword: (.routing.ai.domain_keyword // []),
               action: "route",

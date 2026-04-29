@@ -937,6 +937,80 @@ direct_links_file() {
   printf '%s/direct-links.txt\n' "$CLIENT_DIR"
 }
 
+nekobox_route_rule_file() {
+  printf '%s/nekobox-ai-route-rule.json\n' "$CLIENT_DIR"
+}
+
+nekobox_domain_rules_file() {
+  printf '%s/nekobox-ai-domain-rules.txt\n' "$CLIENT_DIR"
+}
+
+nekobox_ip_rules_file() {
+  printf '%s/nekobox-ai-ip-rules.txt\n' "$CLIENT_DIR"
+}
+
+nekobox_guide_file() {
+  printf '%s/nekobox-ai-routing-guide.txt\n' "$CLIENT_DIR"
+}
+
+render_nekobox_route_rule_json() {
+  jq '{
+    domain: (.routing.ai.domain_suffix // [] | map(select(contains("."))) | unique),
+    domain_suffix: (.routing.ai.domain_suffix // [] | map(select(contains("."))) | map(if startswith(".") then . else "." + . end) | unique),
+    domain_keyword: (.routing.ai.domain_keyword // [] | unique),
+    ip_cidr: (((.routing.ai.ip_cidr // []) + (.routing.ai.resolved_ip_cidr // [])) | unique),
+    outbound: "proxy"
+  }' "$STATE_FILE"
+}
+
+render_nekobox_domain_rules() {
+  jq -r '
+    [
+      (.routing.ai.domain_suffix // [] | unique | map("domain:" + .)[]?),
+      (.routing.ai.domain_keyword // [] | unique | map("keyword:" + .)[]?)
+    ] | join("\n")
+  ' "$STATE_FILE"
+}
+
+render_nekobox_ip_rules() {
+  jq -r '(((.routing.ai.ip_cidr // []) + (.routing.ai.resolved_ip_cidr // [])) | unique | join("\n"))' "$STATE_FILE"
+}
+
+write_nekobox_exports() {
+  local rule_file domain_file ip_file guide_file
+  rule_file="$(nekobox_route_rule_file)"
+  domain_file="$(nekobox_domain_rules_file)"
+  ip_file="$(nekobox_ip_rules_file)"
+  guide_file="$(nekobox_guide_file)"
+
+  render_nekobox_route_rule_json >"$rule_file"
+  render_nekobox_domain_rules >"$domain_file"
+  render_nekobox_ip_rules >"$ip_file"
+
+  cat >"$guide_file" <<EOF
+NekoBox for Android AI 分流使用说明
+
+NekoBox 导入节点/订阅时通常只解析节点 outbound，订阅或服务端里的分流规则不会自动进入 NekoBox 路由。
+请在手机端 NekoBox 本地添加路由规则：
+
+1. 先正常导入并保存你的节点。
+2. 进入该节点的「路由」或「自定义配置 / 自定义路由」页面。
+3. 推荐使用文件：
+   $rule_file
+   把里面的 JSON 作为 sing-box 自定义 route rule 使用，出站标签为 proxy。
+4. 如果你使用 NekoBox 的简易路由界面：
+   - 域名规则文件：$domain_file
+   - IP 规则文件：$ip_file
+5. 在 NekoBox 设置里建议开启：
+   - VPN 模式
+   - DNS 路由
+   - Block QUIC 规则
+   - 关闭 Android 系统「私人 DNS / 安全 DNS」
+
+如果 NekoBox 的当前版本不接受自定义 JSON，请把 domain 文件内容填到「代理」域名规则，把 ip 文件内容填到「代理」目标 IP 规则。
+EOF
+}
+
 default_listen_address() {
   local server_address
   server_address="$(state_get '.meta.server_address' 2>/dev/null || true)"
@@ -1877,6 +1951,8 @@ EOF
       printf '\n' >>"$all_file"
     done < <(jq -r '.protocols.hysteria2.users[]? | [.name, .password] | @tsv' "$STATE_FILE")
   fi
+
+  write_nekobox_exports
 }
 
 apply_config() {
@@ -3005,6 +3081,38 @@ show_subscription_links() {
   ui_show_text "订阅链接" "$output"
 }
 
+show_nekobox_routing_exports() {
+  local output rule_file domain_file ip_file guide_file
+
+  write_client_exports
+  rule_file="$(nekobox_route_rule_file)"
+  domain_file="$(nekobox_domain_rules_file)"
+  ip_file="$(nekobox_ip_rules_file)"
+  guide_file="$(nekobox_guide_file)"
+
+  output=$(
+    cat <<EOF
+NekoBox 分流规则已导出：
+
+推荐：sing-box 自定义 route rule
+$rule_file
+
+简易路由域名规则
+$domain_file
+
+简易路由 IP 规则
+$ip_file
+
+使用说明
+$guide_file
+
+注意：NekoBox 导入节点/订阅通常只解析节点，不会自动应用服务端分流规则。请在 NekoBox 手机端本地路由里使用以上规则。
+EOF
+  )
+
+  ui_show_text "NekoBox 分流规则" "$output"
+}
+
 show_overview() {
   local server_address service_status ss_users vless_users hy2_users overview node_name links_file
   server_address="$(state_get '.meta.server_address')"
@@ -3167,9 +3275,10 @@ main_menu() {
       "15" "查看 AI 分流规则" \
       "16" "新增 AI 分流规则" \
       "17" "删除 AI 分流规则" \
-      "18" "Realm 中转" \
-      "19" "重新安装 / 修复（保留规则）" \
-      "20" "卸载" \
+      "18" "导出 NekoBox 分流规则" \
+      "19" "Realm 中转" \
+      "20" "重新安装 / 修复（保留规则）" \
+      "21" "卸载" \
       "0" "退出")" || break
 
     case "$choice" in
@@ -3225,13 +3334,16 @@ main_menu() {
         delete_ai_routing_rule
         ;;
       18)
-        prepare_realm_menu && realm_submenu
+        show_nekobox_routing_exports
         ;;
       19)
+        prepare_realm_menu && realm_submenu
+        ;;
+      20)
         export SBOX_REPAIR_OPEN_PANEL=1
         repair_install
         ;;
-      20)
+      21)
         uninstall_sbox
         ;;
       0)
@@ -3260,6 +3372,7 @@ usage() {
   $SCRIPT_NAME add-ai-rule domain1 keyword2
                           新增 AI 分流规则
   $SCRIPT_NAME delete-ai-rule 删除 AI 分流规则
+  $SCRIPT_NAME nekobox-rules  导出 NekoBox 手机端分流规则
   $SCRIPT_NAME repair-install 重新安装 / 修复环境并保留现有规则
   $SCRIPT_NAME realm          打开 Realm 中转菜单
   $SCRIPT_NAME apply          重新生成配置并重载服务
@@ -3351,6 +3464,13 @@ main() {
       ensure_dirs
       init_state_file
       delete_ai_routing_rule
+      ;;
+    nekobox-rules|export-nekobox|nekobox)
+      require_linux
+      require_root
+      ensure_dirs
+      init_state_file
+      show_nekobox_routing_exports
       ;;
     repair-install|reinstall)
       require_linux

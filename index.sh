@@ -1801,6 +1801,10 @@ repair_install() {
   ensure_sing_box_service
   apply_config || return 1
   ui_msg "重新安装 / 修复完成。原有节点、客户端和分流规则已保留。"
+
+  if [[ "${SBOX_REPAIR_OPEN_PANEL:-0}" == "1" && -x "$manager_target" ]]; then
+    exec "$manager_target"
+  fi
 }
 
 configure_server_address() {
@@ -3053,6 +3057,7 @@ main_menu() {
         prepare_realm_menu && realm_submenu
         ;;
       19)
+        export SBOX_REPAIR_OPEN_PANEL=1
         repair_install
         ;;
       20)

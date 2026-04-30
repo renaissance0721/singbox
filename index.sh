@@ -21,7 +21,7 @@ set -Eeuo pipefail
 
 ORIGINAL_ARGS=("$@")
 SELF_PATH="${BASH_SOURCE[0]}"
-SCRIPT_VERSION="0.2.1"
+SCRIPT_VERSION="0.2.2"
 SCRIPT_NAME="${0##*/}"
 APP_TITLE="Sing-box 管理面板 | 输入 sbox 快捷打开脚本"
 STATE_DIR="${STATE_DIR:-/etc/sing-box-manager}"
@@ -465,6 +465,7 @@ replace_sing_box_binary() {
 }
 
 install_sing_box_with_v2ray_api() {
+  local install_mode=${1:-interactive}
   local target_bin cli_bin service_bin backup_bin tmp_dir src_dir build_ref go_bin build_tags ldflags tmp_bin check_output listen_addr success_text
   local path backup_paths=""
   local -a install_paths=()
@@ -472,7 +473,9 @@ install_sing_box_with_v2ray_api() {
   require_linux
   require_root
   ensure_dirs
-  init_state_file
+  if [[ "$install_mode" != "core" ]]; then
+    init_state_file
+  fi
   install_build_dependencies
   install_go_toolchain
 
@@ -481,7 +484,7 @@ install_sing_box_with_v2ray_api() {
 
   service_bin="$(sing_box_service_exec_path 2>/dev/null || true)"
   cli_bin="$(command -v sing-box 2>/dev/null || true)"
-  target_bin="${service_bin:-${cli_bin:-/usr/local/bin/sing-box}}"
+  target_bin="${service_bin:-${cli_bin:-/usr/bin/sing-box}}"
   install_paths+=("$target_bin")
   if [[ -n "$cli_bin" && "$cli_bin" != "$target_bin" ]]; then
     install_paths+=("$cli_bin")
@@ -564,6 +567,14 @@ EOF
     fi
   done
 
+  if [[ "$install_mode" == "core" ]]; then
+    if has_systemd; then
+      systemctl enable sing-box >/dev/null 2>&1 || true
+    fi
+    log "已安装支持 with_v2ray_api 的 sing-box：$(IFS=', '; printf '%s' "${install_paths[*]}")"
+    return 0
+  fi
+
   listen_addr="$(state_get '.traffic_stats.v2ray_api_listen // "127.0.0.1:10085"')"
   if ui_yesno "已安装支持流量统计的 sing-box。是否立即启用 V2Ray API 流量统计？监听地址：${listen_addr}"; then
     state_jq --arg listen "$listen_addr" --arg ts "$(utc_now)" '
@@ -590,18 +601,12 @@ EOF
 
 install_sing_box() {
   if have_cmd sing-box; then
-    log "检测到 sing-box 已安装，开始通过官方安装脚本检查并更新到最新版本..."
+    log "检测到 sing-box 已安装，将编译并替换为支持 with_v2ray_api 的版本..."
   else
-    log "开始通过官方安装脚本安装 sing-box..."
+    log "开始从源码编译安装支持 with_v2ray_api 的 sing-box..."
   fi
 
-  curl -fsSL https://sing-box.app/install.sh | sh
-
-  ensure_sing_box_service
-
-  if has_systemd; then
-    systemctl enable sing-box >/dev/null 2>&1 || true
-  fi
+  install_sing_box_with_v2ray_api core
 }
 
 has_systemd() {
@@ -4783,10 +4788,11 @@ usage() {
   1. 面板使用纯命令行数字输入，不依赖方向键。
   2. Hysteria2 默认使用自签名证书。
   3. 非交互安装可通过 SINGBOX_SERVER_ADDRESS=your.domain 指定节点地址。
-  4. AI 分流支持 Shadowsocks 和 VLESS，落地节点地址可以是域名、IPv4 或 IPv6。
-  5. repair-install 会重装 / 更新脚本和 sing-box 核心，但不会删除状态文件、客户端或分流规则。
-  6. 一键安装只安装环境；当你启用协议或新增客户端后，才会生成对应的协议链接。
-  7. 客户端流量统计依赖 sing-box with_v2ray_api 构建，以及 grpcurl、v2ray 或 xray 查询命令；到期 / 超额会通过 auth_user 拒绝规则限制。
+  4. 一键安装会从源码编译带 with_v2ray_api 的 sing-box，便于后续启用客户端流量统计。
+  5. AI 分流支持 Shadowsocks 和 VLESS，落地节点地址可以是域名、IPv4 或 IPv6。
+  6. repair-install 会重装 / 更新脚本和 sing-box 核心，但不会删除状态文件、客户端或分流规则。
+  7. 一键安装只安装环境；当你启用协议或新增客户端后，才会生成对应的协议链接。
+  8. 客户端流量统计依赖 grpcurl、v2ray 或 xray 查询命令；到期 / 超额会通过 auth_user 拒绝规则限制。
 EOF
 }
 

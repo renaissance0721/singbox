@@ -2662,6 +2662,51 @@ remove_client() {
   apply_config
 }
 
+client_menu_text() {
+  cat <<EOF
+Shadowsocks 2022 客户端数：$(state_get '.protocols.shadowsocks.users | length')
+VLESS + Reality 客户端数：$(state_get '.protocols.vless_reality.users | length')
+Hysteria2 客户端数：$(state_get '.protocols.hysteria2.users | length')
+
+请选择要执行的客户端操作（输入 0 返回上一级，输入 00 退出脚本）
+EOF
+}
+
+client_submenu() {
+  local choice menu_text
+
+  while true; do
+    menu_text="$(client_menu_text)"
+    choice="$(ui_menu "管理客户端" "$menu_text" \
+      "1" "新增客户端" \
+      "2" "删除客户端" \
+      "3" "查看客户端信息" \
+      "0" "返回上一级菜单" \
+      "00" "退出脚本")" || return 1
+
+    case "$choice" in
+      1)
+        add_client
+        ;;
+      2)
+        remove_client
+        ;;
+      3)
+        show_client_info
+        ;;
+      0)
+        return 0
+        ;;
+      00)
+        exit 0
+        ;;
+      *)
+        ui_msg "无效选项，请重新选择。"
+        ;;
+    esac
+  done
+}
+
 realm_install_or_reset() {
   require_linux
   require_root
@@ -3332,18 +3377,16 @@ main_menu() {
       "4" "配置 Shadowsocks 2022" \
       "5" "配置 VLESS + Reality" \
       "6" "配置 Hysteria2" \
-      "7" "新增客户端" \
-      "8" "删除客户端" \
-      "9" "查看客户端信息" \
-      "10" "查看订阅链接" \
-      "11" "重新生成配置并重载服务" \
-      "12" "查看当前概览" \
-      "13" "查看服务状态" \
-      "14" "一键AI分流" \
-      "15" "Realm 中转" \
-      "16" "重新安装 / 修复（保留规则）" \
-      "17" "全新重装（删除所有配置）" \
-      "18" "卸载" \
+      "7" "管理客户端" \
+      "8" "查看订阅链接" \
+      "9" "重新生成配置并重载服务" \
+      "10" "查看当前概览" \
+      "11" "查看服务状态" \
+      "12" "一键AI分流" \
+      "13" "Realm 中转" \
+      "14" "重新安装 / 修复（保留规则）" \
+      "15" "全新重装（删除所有配置）" \
+      "16" "卸载" \
       "0" "退出")" || break
 
     case "$choice" in
@@ -3366,40 +3409,34 @@ main_menu() {
         configure_hysteria2
         ;;
       7)
-        add_client
+        client_submenu
         ;;
       8)
-        remove_client
-        ;;
-      9)
-        show_client_info
-        ;;
-      10)
         show_subscription_links
         ;;
-      11)
+      9)
         apply_config
         ;;
-      12)
+      10)
         show_overview
         ;;
-      13)
+      11)
         show_service_status
         ;;
-      14)
+      12)
         ai_routing_submenu
         ;;
-      15)
+      13)
         prepare_realm_menu && realm_submenu
         ;;
-      16)
+      14)
         export SBOX_REPAIR_OPEN_PANEL=1
         repair_install
         ;;
-      17)
+      15)
         fresh_install
         ;;
-      18)
+      16)
         uninstall_sbox
         ;;
       0)

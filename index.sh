@@ -1937,6 +1937,7 @@ apply_config() {
 
   if [[ "$enabled_count" -eq 0 ]]; then
     stop_sing_box
+    write_client_exports
     ui_msg "当前没有启用任何协议，sing-box 服务已停止。"
     return 0
   fi
@@ -2248,6 +2249,157 @@ configure_hysteria2() {
   fi
 
   apply_config
+}
+
+node_menu_text() {
+  cat <<EOF
+节点名称：$(state_get '.meta.node_name // "-"')
+节点地址：$(state_get '.meta.server_address // "-"')
+Shadowsocks 2022：$(state_get '.protocols.shadowsocks.enabled')
+VLESS + Reality：$(state_get '.protocols.vless_reality.enabled')
+Hysteria2：$(state_get '.protocols.hysteria2.enabled')
+
+请选择要执行的节点操作（输入 0 返回上一级，输入 00 退出脚本）
+EOF
+}
+
+node_submenu() {
+  local choice menu_text
+
+  while true; do
+    menu_text="$(node_menu_text)"
+    choice="$(ui_menu "管理节点" "$menu_text" \
+      "1" "设置节点对外地址" \
+      "2" "设置节点名称" \
+      "3" "配置 Shadowsocks 2022" \
+      "4" "配置 VLESS + Reality" \
+      "5" "配置 Hysteria2" \
+      "6" "删除节点" \
+      "0" "返回上一级菜单" \
+      "00" "退出脚本")" || return 0
+
+    case "$choice" in
+      1)
+        configure_server_address || true
+        ;;
+      2)
+        configure_node_name || true
+        ;;
+      3)
+        configure_shadowsocks || true
+        ;;
+      4)
+        configure_vless_reality || true
+        ;;
+      5)
+        configure_hysteria2 || true
+        ;;
+      6)
+        delete_node || true
+        ;;
+      0)
+        return 0
+        ;;
+      00)
+        exit 0
+        ;;
+      *)
+        ui_msg "无效选项，请重新选择。"
+        ;;
+    esac
+  done
+}
+
+delete_node() {
+  local choice selected_index protocol label cert_path key_path
+  local -a protocols=()
+  local -a labels=()
+  local -a options=()
+
+  if [[ "$(state_get '.protocols.shadowsocks.enabled')" == "true" ]]; then
+    protocols+=("shadowsocks")
+    labels+=("Shadowsocks 2022")
+  fi
+  if [[ "$(state_get '.protocols.vless_reality.enabled')" == "true" ]]; then
+    protocols+=("vless_reality")
+    labels+=("VLESS + Reality")
+  fi
+  if [[ "$(state_get '.protocols.hysteria2.enabled')" == "true" ]]; then
+    protocols+=("hysteria2")
+    labels+=("Hysteria2")
+  fi
+
+  if (( ${#protocols[@]} == 0 )); then
+    ui_msg "当前没有已启用的节点可删除。"
+    return 0
+  fi
+
+  for selected_index in "${!protocols[@]}"; do
+    options+=("$((selected_index + 1))" "${labels[$selected_index]}")
+  done
+  options+=("0" "返回")
+  options+=("00" "退出脚本")
+
+  choice="$(ui_menu "删除节点" "请选择要删除的节点。删除后会停用该协议并清空该协议下的客户端。" "${options[@]}")" || return 0
+  case "$choice" in
+    00)
+      exit 0
+      ;;
+    0)
+      return 0
+      ;;
+  esac
+
+  [[ "$choice" =~ ^[0-9]+$ ]] || {
+    ui_msg "无效选项，请重新选择。"
+    return 0
+  }
+
+  selected_index=$((choice - 1))
+  (( selected_index >= 0 && selected_index < ${#protocols[@]} )) || {
+    ui_msg "无效选项，请重新选择。"
+    return 0
+  }
+
+  protocol="${protocols[$selected_index]}"
+  label="${labels[$selected_index]}"
+  ui_yesno "确认删除 ${label} 节点吗？该协议下的客户端会被清空。" || return 0
+
+  case "$protocol" in
+    shadowsocks)
+      state_jq --arg ts "$(utc_now)" '
+        .protocols.shadowsocks.enabled = false |
+        .protocols.shadowsocks.users = [] |
+        .protocols.shadowsocks.server_password = "" |
+        .meta.updated_at = $ts
+      '
+      ;;
+    vless_reality)
+      state_jq --arg ts "$(utc_now)" '
+        .protocols.vless_reality.enabled = false |
+        .protocols.vless_reality.users = [] |
+        .protocols.vless_reality.private_key = "" |
+        .protocols.vless_reality.public_key = "" |
+        .protocols.vless_reality.short_id = "" |
+        .meta.updated_at = $ts
+      '
+      ;;
+    hysteria2)
+      cert_path="$(state_get '.protocols.hysteria2.cert_path')"
+      key_path="$(state_get '.protocols.hysteria2.key_path')"
+      state_jq --arg ts "$(utc_now)" '
+        .protocols.hysteria2.enabled = false |
+        .protocols.hysteria2.users = [] |
+        .protocols.hysteria2.obfs_password = "" |
+        .meta.updated_at = $ts
+      '
+      if [[ "$cert_path" == "$CERT_DIR/"* && "$key_path" == "$CERT_DIR/"* ]]; then
+        rm -f "$cert_path" "$key_path" 2>/dev/null || true
+      fi
+      ;;
+  esac
+
+  apply_config || return 0
 }
 
 configure_ai_routing() {
@@ -2567,7 +2719,7 @@ add_client() {
     1)
       [[ "$(state_get '.protocols.shadowsocks.enabled')" == "true" ]] || {
         ui_msg "Shadowsocks 当前未启用，请先完成协议配置。"
-        return 1
+        return 0
       }
       while true; do
         name="$(prompt_nonempty "新增客户端" "请输入 Shadowsocks 客户端名称" "ss-client-$(date +%H%M%S)")" || return 1
@@ -2584,7 +2736,7 @@ add_client() {
     2)
       [[ "$(state_get '.protocols.vless_reality.enabled')" == "true" ]] || {
         ui_msg "VLESS + Reality 当前未启用，请先完成协议配置。"
-        return 1
+        return 0
       }
       while true; do
         name="$(prompt_nonempty "新增客户端" "请输入 VLESS 客户端名称" "vless-client-$(date +%H%M%S)")" || return 1
@@ -2601,7 +2753,7 @@ add_client() {
     3)
       [[ "$(state_get '.protocols.hysteria2.enabled')" == "true" ]] || {
         ui_msg "Hysteria2 当前未启用，请先完成协议配置。"
-        return 1
+        return 0
       }
       while true; do
         name="$(prompt_nonempty "新增客户端" "请输入 Hysteria2 客户端名称" "hy2-client-$(date +%H%M%S)")" || return 1
@@ -2645,18 +2797,18 @@ remove_client() {
 
   [[ "$(state_get ".protocols.${protocol_key}.enabled")" == "true" ]] || {
     ui_msg "${protocol_label} 当前未启用，请先完成协议配置。"
-    return 1
+    return 0
   }
 
   user_count="$(state_get ".protocols.${protocol_key}.users | length")"
   if [[ "$user_count" -eq 0 ]]; then
     ui_msg "${protocol_label} 当前没有可删除的客户端。"
-    return 1
+    return 0
   fi
 
   if [[ "$user_count" -eq 1 ]]; then
     ui_msg "${protocol_label} 当前仅剩 1 个客户端。请先新增客户端，或停用该协议后再删除。"
-    return 1
+    return 0
   fi
 
   user_name="$(select_protocol_user "$protocol_key" "删除客户端" "请选择要删除的 ${protocol_label} 客户端")" || return 1
@@ -2690,13 +2842,13 @@ client_submenu() {
 
     case "$choice" in
       1)
-        add_client
+        add_client || true
         ;;
       2)
-        remove_client
+        remove_client || true
         ;;
       3)
-        show_client_info
+        show_client_info || true
         ;;
       0)
         return 0
@@ -3409,21 +3561,17 @@ main_menu() {
     menu_text="$(main_menu_text)"
     choice="$(ui_menu "$APP_TITLE" "$menu_text" \
       "1" "一键安装 / 初始化环境" \
-      "2" "设置节点对外地址" \
-      "3" "设置节点名称" \
-      "4" "配置 Shadowsocks 2022" \
-      "5" "配置 VLESS + Reality" \
-      "6" "配置 Hysteria2" \
-      "7" "管理客户端" \
-      "8" "查看订阅链接" \
-      "9" "重新生成配置并重载服务" \
-      "10" "查看当前概览" \
-      "11" "查看服务状态" \
-      "12" "一键AI分流" \
-      "13" "Realm 中转" \
-      "14" "重新安装 / 修复（保留规则）" \
-      "15" "全新重装（删除所有配置）" \
-      "16" "卸载" \
+      "2" "管理节点" \
+      "3" "管理客户端" \
+      "4" "查看订阅链接" \
+      "5" "重新生成配置并重载服务" \
+      "6" "查看当前概览" \
+      "7" "查看服务状态" \
+      "8" "一键AI分流" \
+      "9" "Realm 中转" \
+      "10" "重新安装 / 修复（保留规则）" \
+      "11" "全新重装（删除所有配置）" \
+      "12" "卸载" \
       "0" "退出")" || break
 
     case "$choice" in
@@ -3431,49 +3579,37 @@ main_menu() {
         quick_install
         ;;
       2)
-        configure_server_address
+        node_submenu
         ;;
       3)
-        configure_node_name
-        ;;
-      4)
-        configure_shadowsocks
-        ;;
-      5)
-        configure_vless_reality
-        ;;
-      6)
-        configure_hysteria2
-        ;;
-      7)
         client_submenu
         ;;
-      8)
+      4)
         show_subscription_links
         ;;
-      9)
+      5)
         apply_config
         ;;
-      10)
+      6)
         show_overview
         ;;
-      11)
+      7)
         show_service_status
         ;;
-      12)
+      8)
         ai_routing_submenu
         ;;
-      13)
+      9)
         prepare_realm_menu && realm_submenu
         ;;
-      14)
+      10)
         export SBOX_REPAIR_OPEN_PANEL=1
         repair_install
         ;;
-      15)
+      11)
         fresh_install
         ;;
-      16)
+      12)
         uninstall_sbox
         ;;
       0)
@@ -3496,6 +3632,8 @@ usage() {
   $SCRIPT_NAME                打开管理面板
   $SCRIPT_NAME quick-install  一键安装并初始化
   $SCRIPT_NAME fresh-install  删除全部配置后全新安装（可加 --yes 跳过确认）
+  $SCRIPT_NAME node           打开节点管理菜单
+  $SCRIPT_NAME delete-node    删除已启用的协议节点
   $SCRIPT_NAME add-client     打开新增客户端流程
   $SCRIPT_NAME remove-client  打开删除客户端流程
   $SCRIPT_NAME ai             打开一键AI分流菜单
@@ -3569,6 +3707,22 @@ main() {
       ensure_dirs
       init_state_file
       remove_client
+      ;;
+    node|nodes|manage-node)
+      require_linux
+      require_root
+      ensure_ui_backend
+      ensure_dirs
+      init_state_file
+      node_submenu
+      ;;
+    delete-node|remove-node)
+      require_linux
+      require_root
+      ensure_ui_backend
+      ensure_dirs
+      init_state_file
+      delete_node
       ;;
     ai|ai-menu|ai-route-menu)
       require_linux

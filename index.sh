@@ -2020,6 +2020,7 @@ select_protocol_user() {
 }
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 select_client_with_protocol() {
   local title=$1
   local prompt=$2
@@ -2448,6 +2449,8 @@ client_limit_submenu() {
   done
 }
 
+=======
+>>>>>>> parent of 9c992e4 (Update index.sh)
 =======
 >>>>>>> parent of 9c992e4 (Update index.sh)
 ensure_hysteria_cert() {
@@ -3127,6 +3130,7 @@ apply_config() {
   normalize_protocol_listen_addresses
   refresh_ai_resolved_ip_cidrs
 <<<<<<< HEAD
+<<<<<<< HEAD
   refresh_client_traffic_usage >/dev/null 2>&1 || true
   if [[ "$(state_get '.traffic_stats.enabled // false')" == "true" ]] && sing_box_v2ray_api_unavailable; then
     state_jq --arg ts "$(utc_now)" '
@@ -3135,6 +3139,8 @@ apply_config() {
     '
     warn "当前 sing-box 未包含 with_v2ray_api，已自动关闭 V2Ray API 流量统计以避免服务启动失败。"
   fi
+=======
+>>>>>>> parent of 9c992e4 (Update index.sh)
 =======
 >>>>>>> parent of 9c992e4 (Update index.sh)
   validate_state || return 1
@@ -4506,6 +4512,7 @@ main_menu() {
       "8" "删除客户端" \
       "9" "查看客户端信息" \
 <<<<<<< HEAD
+<<<<<<< HEAD
       "10" "客户端流量 / 到期管理" \
       "11" "查看订阅链接" \
       "12" "重新生成配置并重载服务" \
@@ -4517,6 +4524,8 @@ main_menu() {
       "18" "全新重装（删除所有配置）" \
       "19" "卸载" \
 =======
+=======
+>>>>>>> parent of 9c992e4 (Update index.sh)
       "10" "查看订阅链接" \
       "11" "重新生成配置并重载服务" \
       "12" "查看当前概览" \
@@ -4529,6 +4538,9 @@ main_menu() {
       "19" "Realm 中转" \
       "20" "重新安装 / 修复（保留规则）" \
       "21" "卸载" \
+<<<<<<< HEAD
+>>>>>>> parent of 9c992e4 (Update index.sh)
+=======
 >>>>>>> parent of 9c992e4 (Update index.sh)
       "0" "退出")" || break
 
@@ -4595,10 +4607,14 @@ main_menu() {
         repair_install
         ;;
 <<<<<<< HEAD
+<<<<<<< HEAD
       18)
         fresh_install
         ;;
       19)
+=======
+      21)
+>>>>>>> parent of 9c992e4 (Update index.sh)
 =======
       21)
 >>>>>>> parent of 9c992e4 (Update index.sh)
@@ -4627,6 +4643,7 @@ usage() {
   $SCRIPT_NAME add-client     打开新增客户端流程
   $SCRIPT_NAME remove-client  打开删除客户端流程
 <<<<<<< HEAD
+<<<<<<< HEAD
   $SCRIPT_NAME traffic        查看客户端流量使用情况
   $SCRIPT_NAME client-limits  设置客户端总流量和到期时间
   $SCRIPT_NAME traffic-api    开启 / 关闭 V2Ray API 流量统计
@@ -4637,6 +4654,8 @@ usage() {
   $SCRIPT_NAME enforce-clients
                           刷新客户端流量并执行到期 / 超额限制
   $SCRIPT_NAME ai             打开一键AI分流菜单
+=======
+>>>>>>> parent of 9c992e4 (Update index.sh)
 =======
 >>>>>>> parent of 9c992e4 (Update index.sh)
   $SCRIPT_NAME ai-route       配置 AI 分流到远端 SS / VLESS 落地节点
@@ -4668,6 +4687,9 @@ usage() {
   4. AI 分流支持 Shadowsocks 和 VLESS，落地节点地址可以是域名、IPv4 或 IPv6。
   5. repair-install 会重装 / 更新脚本和 sing-box 核心，但不会删除状态文件、客户端或分流规则。
   6. 一键安装只安装环境；当你启用协议或新增客户端后，才会生成对应的协议链接。
+<<<<<<< HEAD
+>>>>>>> parent of 9c992e4 (Update index.sh)
+=======
 >>>>>>> parent of 9c992e4 (Update index.sh)
 EOF
 }
@@ -4718,6 +4740,7 @@ main() {
       remove_client
       ;;
 <<<<<<< HEAD
+<<<<<<< HEAD
     traffic|client-traffic|show-traffic)
       require_linux
       require_root
@@ -4763,6 +4786,8 @@ main() {
       init_state_file
       ai_routing_submenu
       ;;
+=======
+>>>>>>> parent of 9c992e4 (Update index.sh)
 =======
 >>>>>>> parent of 9c992e4 (Update index.sh)
     ai-route)

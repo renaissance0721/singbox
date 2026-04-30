@@ -21,7 +21,7 @@ set -Eeuo pipefail
 
 ORIGINAL_ARGS=("$@")
 SELF_PATH="${BASH_SOURCE[0]}"
-SCRIPT_VERSION="0.2.2"
+SCRIPT_VERSION="0.2.3"
 SCRIPT_NAME="${0##*/}"
 APP_TITLE="Sing-box 管理面板 | 输入 sbox 快捷打开脚本"
 STATE_DIR="${STATE_DIR:-/etc/sing-box-manager}"
@@ -520,9 +520,9 @@ install_sing_box_with_v2ray_api() {
 
   log "开始编译 sing-box ${build_ref}（包含 with_v2ray_api）..."
   if [[ -n "$ldflags" ]]; then
-    (cd "$src_dir" && GOTOOLCHAIN=auto "$go_bin" build -trimpath -tags "$build_tags" -ldflags "$ldflags" -o "$tmp_bin" ./cmd/sing-box)
+    (cd "$src_dir" && GOTOOLCHAIN=auto "$go_bin" build -v -trimpath -tags "$build_tags" -ldflags "$ldflags" -o "$tmp_bin" ./cmd/sing-box)
   else
-    (cd "$src_dir" && GOTOOLCHAIN=auto "$go_bin" build -trimpath -tags "$build_tags" -o "$tmp_bin" ./cmd/sing-box)
+    (cd "$src_dir" && GOTOOLCHAIN=auto "$go_bin" build -v -trimpath -tags "$build_tags" -o "$tmp_bin" ./cmd/sing-box)
   fi
   [[ -x "$tmp_bin" ]] || {
     rm -rf "$tmp_dir"
@@ -3345,6 +3345,66 @@ quick_install() {
   ui_msg "基础环境安装完成，请继续在面板中按需启用并配置协议。"
 }
 
+fresh_install() {
+  local assume_yes=${1:-}
+  local log_file manager_target confirm_text check_bin
+
+  require_linux
+  require_root
+  ensure_ui_backend
+
+  confirm_text=$'这将执行全新重装：\n- 停止并删除 sing-box / Realm 服务\n- 删除 /etc/sing-box、/etc/realm、/etc/sing-box-manager\n- 删除现有客户端、节点、分流和中转状态\n- 重新编译安装带 with_v2ray_api 的 sing-box\n\n是否继续？'
+  if [[ "$assume_yes" != "--yes" && "${SBOX_FRESH_INSTALL_YES:-0}" != "1" ]]; then
+    ui_yesno "$confirm_text" || return 0
+  fi
+
+  log_file="/tmp/sbox-fresh-install-$(date +%Y%m%d-%H%M%S).log"
+  log "全新重装日志：$log_file"
+  exec > >(tee -a "$log_file") 2>&1
+
+  manager_target="$(manager_script_target_path)"
+  if [[ -f "$SELF_PATH" ]]; then
+    mkdir -p "$(dirname "$manager_target")"
+    if [[ "$SELF_PATH" != "$manager_target" ]]; then
+      install -m 755 "$SELF_PATH" "$manager_target" || true
+    else
+      chmod 755 "$manager_target" || true
+    fi
+  fi
+
+  systemctl stop sing-box >/dev/null 2>&1 || true
+  systemctl disable sing-box >/dev/null 2>&1 || true
+  systemctl stop realm >/dev/null 2>&1 || true
+  systemctl disable realm >/dev/null 2>&1 || true
+  systemctl stop "$(basename "$CLIENT_ENFORCE_TIMER_FILE")" >/dev/null 2>&1 || true
+  systemctl disable "$(basename "$CLIENT_ENFORCE_TIMER_FILE")" >/dev/null 2>&1 || true
+
+  rm -f /etc/systemd/system/sing-box.service /lib/systemd/system/sing-box.service /usr/lib/systemd/system/sing-box.service /etc/systemd/system/multi-user.target.wants/sing-box.service 2>/dev/null || true
+  rm -f "$REALM_SERVICE_FILE" /lib/systemd/system/realm.service /usr/lib/systemd/system/realm.service /etc/systemd/system/multi-user.target.wants/realm.service 2>/dev/null || true
+  rm -f "$CLIENT_ENFORCE_SERVICE_FILE" "$CLIENT_ENFORCE_TIMER_FILE" 2>/dev/null || true
+  rm -rf /etc/sing-box "$REALM_DIR" "$STATE_DIR" 2>/dev/null || true
+  rm -f /usr/bin/sing-box /usr/local/bin/sing-box "$REALM_BIN" 2>/dev/null || true
+
+  if have_cmd systemctl; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed sing-box >/dev/null 2>&1 || true
+    systemctl reset-failed realm >/dev/null 2>&1 || true
+    systemctl reset-failed "$(basename "$CLIENT_ENFORCE_TIMER_FILE")" >/dev/null 2>&1 || true
+  fi
+
+  ensure_dirs
+  init_state_file
+  quick_install
+
+  check_bin="$(sing_box_check_bin 2>/dev/null || true)"
+  if [[ -z "$check_bin" ]] || sing_box_v2ray_api_unavailable "$check_bin"; then
+    ui_msg "全新重装完成，但 V2Ray API 支持校验失败。请查看日志：$log_file"
+    return 1
+  fi
+
+  ui_msg "全新重装完成。sing-box 已支持 with_v2ray_api。\n日志文件：$log_file"
+}
+
 repair_install() {
   local manager_target
   require_linux
@@ -4679,7 +4739,8 @@ main_menu() {
       "15" "一键AI分流" \
       "16" "Realm 中转" \
       "17" "重新安装 / 修复（保留规则）" \
-      "18" "卸载" \
+      "18" "全新重装（删除所有配置）" \
+      "19" "卸载" \
       "0" "退出")" || break
 
     case "$choice" in
@@ -4736,6 +4797,9 @@ main_menu() {
         repair_install
         ;;
       18)
+        fresh_install
+        ;;
+      19)
         uninstall_sbox
         ;;
       0)
@@ -4757,6 +4821,7 @@ usage() {
 用法:
   $SCRIPT_NAME                打开管理面板
   $SCRIPT_NAME quick-install  一键安装并初始化
+  $SCRIPT_NAME fresh-install  删除全部配置后全新安装（可加 --yes 跳过确认）
   $SCRIPT_NAME add-client     打开新增客户端流程
   $SCRIPT_NAME remove-client  打开删除客户端流程
   $SCRIPT_NAME traffic        查看客户端流量使用情况
@@ -4807,6 +4872,9 @@ main() {
       ensure_dirs
       init_state_file
       quick_install
+      ;;
+    fresh-install|clean-install|reinstall-clean)
+      fresh_install "${2:-}"
       ;;
     apply)
       require_linux

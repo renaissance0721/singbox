@@ -1987,58 +1987,6 @@ quick_install() {
   ui_msg "基础环境安装完成，请继续在面板中按需启用并配置协议。"
 }
 
-fresh_install() {
-  local assume_yes=${1:-}
-  local log_file manager_target confirm_text
-
-  require_linux
-  require_root
-  ensure_ui_backend
-
-  confirm_text=$'这将执行全新重装：\n- 停止并删除 sing-box / Realm 服务\n- 删除 /etc/sing-box、/etc/realm、/etc/sing-box-manager\n- 删除现有客户端、节点、分流和中转状态\n- 重新安装官方原生 sing-box\n\n是否继续？'
-  if [[ "$assume_yes" != "--yes" && "${SBOX_FRESH_INSTALL_YES:-0}" != "1" ]]; then
-    ui_yesno "$confirm_text" || return 0
-  fi
-
-  log_file="/tmp/sbox-fresh-install-$(date +%Y%m%d-%H%M%S).log"
-  log "全新重装日志：$log_file"
-  exec > >(tee -a "$log_file") 2>&1
-
-  manager_target="$(manager_script_target_path)"
-  if [[ -f "$SELF_PATH" ]]; then
-    mkdir -p "$(dirname "$manager_target")"
-    if [[ "$SELF_PATH" != "$manager_target" ]]; then
-      install -m 755 "$SELF_PATH" "$manager_target" || true
-    else
-      chmod 755 "$manager_target" || true
-    fi
-  fi
-
-  systemctl stop sing-box >/dev/null 2>&1 || true
-  systemctl disable sing-box >/dev/null 2>&1 || true
-  systemctl stop realm >/dev/null 2>&1 || true
-  systemctl disable realm >/dev/null 2>&1 || true
-
-  rm -f /etc/systemd/system/sing-box.service /lib/systemd/system/sing-box.service /usr/lib/systemd/system/sing-box.service /etc/systemd/system/multi-user.target.wants/sing-box.service 2>/dev/null || true
-  rm -f "$REALM_SERVICE_FILE" /lib/systemd/system/realm.service /usr/lib/systemd/system/realm.service /etc/systemd/system/multi-user.target.wants/realm.service 2>/dev/null || true
-  rm -rf /etc/sing-box "$REALM_DIR" "$STATE_DIR" 2>/dev/null || true
-  rm -f "$REALM_BIN" 2>/dev/null || true
-
-  if have_cmd systemctl; then
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl reset-failed sing-box >/dev/null 2>&1 || true
-    systemctl reset-failed realm >/dev/null 2>&1 || true
-  fi
-
-  ensure_dirs
-  init_state_file
-  quick_install
-
-  rm -f /usr/bin/sing-box.bak.* /usr/local/bin/sing-box.bak.* 2>/dev/null || true
-
-  ui_msg "全新重装完成。已安装官方原生 sing-box。\n日志文件：$log_file"
-}
-
 repair_install() {
   local manager_target
   require_linux
@@ -3570,8 +3518,7 @@ main_menu() {
       "8" "一键AI分流" \
       "9" "Realm 中转" \
       "10" "重新安装 / 修复（保留规则）" \
-      "11" "全新重装（删除所有配置）" \
-      "12" "卸载" \
+      "11" "卸载" \
       "0" "退出")" || break
 
     case "$choice" in
@@ -3607,9 +3554,6 @@ main_menu() {
         repair_install
         ;;
       11)
-        fresh_install
-        ;;
-      12)
         uninstall_sbox
         ;;
       0)
@@ -3631,7 +3575,6 @@ usage() {
 用法:
   $SCRIPT_NAME                打开管理面板
   $SCRIPT_NAME quick-install  一键安装并初始化
-  $SCRIPT_NAME fresh-install  删除全部配置后全新安装（可加 --yes 跳过确认）
   $SCRIPT_NAME node           打开节点管理菜单
   $SCRIPT_NAME delete-node    删除已启用的协议节点
   $SCRIPT_NAME add-client     打开新增客户端流程
@@ -3674,9 +3617,6 @@ main() {
       ensure_dirs
       init_state_file
       quick_install
-      ;;
-    fresh-install|clean-install|reinstall-clean)
-      fresh_install "${2:-}"
       ;;
     apply)
       require_linux

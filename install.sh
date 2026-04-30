@@ -55,21 +55,18 @@ attach_tty() {
 usage() {
   cat <<EOF
 用法:
-  bash install.sh [--server-address <domain-or-ip>] [--fresh]
+  bash install.sh [--server-address <domain-or-ip>]
 
 示例:
   bash install.sh
-  bash install.sh --fresh
   bash install.sh --repair
   bash install.sh --server-address node.example.com
   curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | sudo bash
-  curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | sudo bash -s -- --fresh
   curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | sudo bash -s -- --repair
   curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | sudo bash -s -- --server-address node.example.com
 
 参数:
   --server-address  指定节点对外地址，适合非交互安装
-  --fresh           删除旧配置后全新安装
   -h, --help        查看帮助
 EOF
 }
@@ -83,11 +80,6 @@ while (( $# > 0 )); do
       ;;
     --repair|--reinstall)
       INSTALL_COMMAND="repair-install"
-      shift
-      ;;
-    --fresh|--clean)
-      INSTALL_COMMAND="fresh-install"
-      INSTALL_ARGS=("--yes")
       shift
       ;;
     -h|--help)

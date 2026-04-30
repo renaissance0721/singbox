@@ -3130,7 +3130,7 @@ configure_ai_routing() {
 
   if [[ "$protocol" == "shadowsocks" ]]; then
     method="$(prompt_nonempty "AI 分流加密方式" "请输入 Shadowsocks 加密方式，例如 chacha20-ietf-poly1305 / aes-256-gcm" "$current_method")" || return 1
-    password="$(ui_input "AI 分流密码" "请输入 Shadowsocks 密码；留空则保留当前密码" "")" || return 1
+    password="$(ui_password "AI 分流密码" "请输入 Shadowsocks 密码；留空则保留当前密码")" || return 1
     if [[ -z "$password" ]]; then
       password="$current_password"
     fi
@@ -3203,6 +3203,7 @@ configure_ai_routing() {
   apply_config
 }
 
+<<<<<<< HEAD
 show_ai_routing_rules() {
   local rules_text summary
   rules_text="$(jq -r '
@@ -3326,6 +3327,8 @@ delete_ai_routing_rule() {
   apply_config
 }
 
+=======
+>>>>>>> parent of 20e5819 (Update index.sh)
 add_client() {
   local protocol_choice name value
   protocol_choice="$(ui_protocol_menu)" || return 1
@@ -4126,6 +4129,7 @@ main_menu() {
       "12" "查看当前概览" \
       "13" "查看服务状态" \
       "14" "配置 AI 分流" \
+<<<<<<< HEAD
       "15" "查看 AI 分流规则" \
       "16" "新增 AI 分流规则" \
       "17" "删除 AI 分流规则" \
@@ -4137,6 +4141,11 @@ main_menu() {
 >>>>>>> parent of 9c992e4 (Update index.sh)
 =======
 >>>>>>> parent of 9c992e4 (Update index.sh)
+=======
+      "15" "Realm 中转" \
+      "16" "重新安装 / 修复（保留规则）" \
+      "17" "卸载" \
+>>>>>>> parent of 20e5819 (Update index.sh)
       "0" "退出")" || break
 
     case "$choice" in
@@ -4183,6 +4192,7 @@ main_menu() {
         configure_ai_routing
         ;;
       15)
+<<<<<<< HEAD
         show_ai_routing_rules
         ;;
       16)
@@ -4213,6 +4223,14 @@ main_menu() {
 =======
       21)
 >>>>>>> parent of 9c992e4 (Update index.sh)
+=======
+        prepare_realm_menu && realm_submenu
+        ;;
+      16)
+        repair_install
+        ;;
+      17)
+>>>>>>> parent of 20e5819 (Update index.sh)
         uninstall_sbox
         ;;
       0)
@@ -4254,11 +4272,14 @@ usage() {
 =======
 >>>>>>> parent of 9c992e4 (Update index.sh)
   $SCRIPT_NAME ai-route       配置 AI 分流到远端 SS / VLESS 落地节点
+<<<<<<< HEAD
   $SCRIPT_NAME ai-rules       查看 AI 分流规则
   $SCRIPT_NAME add-ai-rule domain1 keyword2
                           新增 AI 分流规则
   $SCRIPT_NAME delete-ai-rule 删除 AI 分流规则
   $SCRIPT_NAME nekobox-rules  导出 NekoBox 手机端分流规则
+=======
+>>>>>>> parent of 20e5819 (Update index.sh)
   $SCRIPT_NAME repair-install 重新安装 / 修复环境并保留现有规则
   $SCRIPT_NAME realm          打开 Realm 中转菜单
   $SCRIPT_NAME apply          重新生成配置并重载服务
@@ -4393,6 +4414,7 @@ main() {
       init_state_file
       configure_ai_routing
       ;;
+<<<<<<< HEAD
     ai-rules|show-ai-rules)
       require_linux
       require_root
@@ -4423,6 +4445,8 @@ main() {
       init_state_file
       show_nekobox_routing_exports
       ;;
+=======
+>>>>>>> parent of 20e5819 (Update index.sh)
     repair-install|reinstall)
       require_linux
       require_root

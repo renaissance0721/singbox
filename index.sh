@@ -399,6 +399,7 @@ sing_box_version_value() {
 
 resolve_sing_box_build_ref() {
   local src_dir=$1
+  local target_bin=${2:-}
   local current_version desired_ref
 
   desired_ref="${SINGBOX_BUILD_VERSION:-}"
@@ -408,7 +409,7 @@ resolve_sing_box_build_ref() {
     return 0
   fi
 
-  current_version="$(sing_box_version_value "$(command -v sing-box 2>/dev/null || printf 'sing-box')")"
+  current_version="$(sing_box_version_value "${target_bin:-$(command -v sing-box 2>/dev/null || printf 'sing-box')}")"
   if [[ -n "$current_version" ]] && git -C "$src_dir" rev-parse "v${current_version}^{commit}" >/dev/null 2>&1; then
     printf 'v%s\n' "$current_version"
     return 0
@@ -428,7 +429,9 @@ install_grpcurl_if_missing() {
 }
 
 install_sing_box_with_v2ray_api() {
-  local target_bin backup_bin tmp_dir src_dir build_ref go_bin build_tags ldflags tmp_bin check_output listen_addr success_text
+  local target_bin cli_bin service_bin backup_bin tmp_dir src_dir build_ref go_bin build_tags ldflags tmp_bin check_output listen_addr success_text
+  local path backup_paths=""
+  local -a install_paths=()
 
   require_linux
   require_root
@@ -440,8 +443,13 @@ install_sing_box_with_v2ray_api() {
   go_bin="$(command -v go 2>/dev/null || true)"
   [[ -n "$go_bin" && -x "$go_bin" ]] || die "Go 安装失败，未找到 go 命令。"
 
-  target_bin="$(command -v sing-box 2>/dev/null || true)"
-  [[ -n "$target_bin" ]] || target_bin="/usr/local/bin/sing-box"
+  service_bin="$(sing_box_service_exec_path 2>/dev/null || true)"
+  cli_bin="$(command -v sing-box 2>/dev/null || true)"
+  target_bin="${service_bin:-${cli_bin:-/usr/local/bin/sing-box}}"
+  install_paths+=("$target_bin")
+  if [[ -n "$cli_bin" && "$cli_bin" != "$target_bin" ]]; then
+    install_paths+=("$cli_bin")
+  fi
 
   tmp_dir="$(mktemp -d "$TMP_DIR/sbox-build.XXXXXX")"
   src_dir="$tmp_dir/sing-box"
@@ -454,7 +462,7 @@ install_sing_box_with_v2ray_api() {
   }
   git -C "$src_dir" fetch --tags --force >/dev/null 2>&1 || true
 
-  build_ref="$(resolve_sing_box_build_ref "$src_dir")"
+  build_ref="$(resolve_sing_box_build_ref "$src_dir" "$target_bin")"
   [[ -n "$build_ref" ]] || {
     rm -rf "$tmp_dir"
     die "无法确定 sing-box 构建版本。"
@@ -501,15 +509,18 @@ EOF
     return 1
   fi
 
-  mkdir -p "$(dirname "$target_bin")"
-  backup_bin=""
-  if [[ -f "$target_bin" ]]; then
-    backup_bin="${target_bin}.bak.$(date +%Y%m%d-%H%M%S)"
-    cp "$target_bin" "$backup_bin"
-  fi
-
   stop_sing_box
-  install -m 755 "$tmp_bin" "$target_bin"
+  for path in "${install_paths[@]}"; do
+    mkdir -p "$(dirname "$path")"
+    backup_bin=""
+    if [[ -f "$path" ]]; then
+      backup_bin="${path}.bak.$(date +%Y%m%d-%H%M%S)"
+      cp "$path" "$backup_bin"
+      backup_paths+=$'\n'"$backup_bin"
+    fi
+    install -m 755 "$tmp_bin" "$path"
+  done
+  hash -r 2>/dev/null || true
   rm -rf "$tmp_dir"
   ensure_sing_box_service
   install_grpcurl_if_missing "$go_bin"
@@ -525,15 +536,15 @@ EOF
 
   ensure_client_enforce_timer
   apply_config || {
-    if [[ -n "$backup_bin" && -f "$backup_bin" ]]; then
-      warn "新 sing-box 应用配置失败，已保留备份：$backup_bin"
+    if [[ -n "$backup_paths" ]]; then
+      warn "新 sing-box 应用配置失败，已保留备份：$backup_paths"
     fi
     return 1
   }
 
-  success_text="已切换到支持 with_v2ray_api 的 sing-box：$target_bin"
-  if [[ -n "$backup_bin" ]]; then
-    success_text+=$'\n'"旧版本备份：$backup_bin"
+  success_text="已切换到支持 with_v2ray_api 的 sing-box：$(IFS=', '; printf '%s' "${install_paths[*]}")"
+  if [[ -n "$backup_paths" ]]; then
+    success_text+=$'\n'"旧版本备份：$backup_paths"
   fi
   ui_msg "$success_text"
 }
@@ -564,6 +575,22 @@ service_exists() {
   systemctl cat sing-box >/dev/null 2>&1 && return 0
   systemctl list-unit-files sing-box.service --no-legend 2>/dev/null | grep -q '^sing-box\.service' && return 0
   [[ -f /etc/systemd/system/sing-box.service || -f /lib/systemd/system/sing-box.service || -f /usr/lib/systemd/system/sing-box.service ]]
+}
+
+sing_box_service_exec_path() {
+  local exec_line exec_path
+
+  has_systemd || return 1
+  exec_line="$(systemctl cat sing-box 2>/dev/null | awk -F= '/^[[:space:]]*ExecStart=/ {print $2; exit}')"
+  [[ -n "$exec_line" ]] || return 1
+
+  set -- $exec_line
+  exec_path=${1:-}
+  exec_path="${exec_path#\"}"
+  exec_path="${exec_path%\"}"
+  [[ "$exec_path" == /* ]] || return 1
+
+  printf '%s\n' "$exec_path"
 }
 
 ensure_sing_box_service() {

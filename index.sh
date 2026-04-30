@@ -525,6 +525,13 @@ EOF
   ensure_sing_box_service
   install_grpcurl_if_missing "$go_bin"
 
+  for path in "${install_paths[@]}"; do
+    if sing_box_v2ray_api_unavailable "$path"; then
+      ui_show_text "sing-box 替换失败" "已尝试替换 ${path}，但该路径下的 sing-box 仍不支持 with_v2ray_api。\n\n请检查安装日志、磁盘空间、文件权限，或在更高配置机器上编译后手动上传替换。"
+      return 1
+    fi
+  done
+
   listen_addr="$(state_get '.traffic_stats.v2ray_api_listen // "127.0.0.1:10085"')"
   if ui_yesno "已安装支持流量统计的 sing-box。是否立即启用 V2Ray API 流量统计？监听地址：${listen_addr}"; then
     state_jq --arg listen "$listen_addr" --arg ts "$(utc_now)" '

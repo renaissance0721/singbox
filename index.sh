@@ -1448,14 +1448,6 @@ nekobox_guide_file() {
   printf '%s/nekobox-ai-routing-guide.txt\n' "$CLIENT_DIR"
 }
 
-nekobox_clash_meta_file() {
-  printf '%s/nekobox-ai-clash-meta.yaml\n' "$CLIENT_DIR"
-}
-
-yaml_quote() {
-  jq -Rn --arg v "$1" '$v | @json'
-}
-
 render_nekobox_route_rule_json() {
   jq '{
     domain: (.routing.ai.domain_suffix // [] | map(select(contains("."))) | unique),
@@ -1479,233 +1471,16 @@ render_nekobox_ip_rules() {
   jq -r '(((.routing.ai.ip_cidr // []) + (.routing.ai.resolved_ip_cidr // [])) | unique | join("\n"))' "$STATE_FILE"
 }
 
-append_clash_ss_proxy() {
-  local file=$1 name=$2 server=$3 port=$4 method=$5 password=$6
-
-  cat >>"$file" <<EOF
-  - name: $(yaml_quote "$name")
-    type: ss
-    server: $(yaml_quote "$server")
-    port: $port
-    cipher: $(yaml_quote "$method")
-    password: $(yaml_quote "$password")
-    udp: true
-EOF
-}
-
-append_clash_vless_proxy() {
-  local file=$1 name=$2 server=$3 port=$4 uuid=$5 flow=$6 tls_enabled=$7 server_name=$8 insecure=$9 reality_enabled=${10} public_key=${11} short_id=${12}
-
-  cat >>"$file" <<EOF
-  - name: $(yaml_quote "$name")
-    type: vless
-    server: $(yaml_quote "$server")
-    port: $port
-    uuid: $(yaml_quote "$uuid")
-    network: tcp
-    udp: true
-EOF
-
-  if [[ -n "$flow" && "$flow" != "null" ]]; then
-    printf '    flow: %s\n' "$(yaml_quote "$flow")" >>"$file"
-  fi
-
-  if [[ "$tls_enabled" == "true" || "$reality_enabled" == "true" ]]; then
-    cat >>"$file" <<EOF
-    tls: true
-    client-fingerprint: chrome
-EOF
-    [[ -n "$server_name" && "$server_name" != "null" ]] && printf '    servername: %s\n' "$(yaml_quote "$server_name")" >>"$file"
-    [[ "$insecure" == "true" ]] && printf '    skip-cert-verify: true\n' >>"$file"
-    if [[ "$reality_enabled" == "true" ]]; then
-      cat >>"$file" <<EOF
-    reality-opts:
-      public-key: $(yaml_quote "$public_key")
-      short-id: $(yaml_quote "$short_id")
-EOF
-    fi
-  fi
-}
-
-append_clash_hysteria2_proxy() {
-  local file=$1 name=$2 server=$3 port=$4 password=$5 sni=$6 obfs_password=$7
-
-  cat >>"$file" <<EOF
-  - name: $(yaml_quote "$name")
-    type: hysteria2
-    server: $(yaml_quote "$server")
-    port: $port
-    password: $(yaml_quote "$password")
-    sni: $(yaml_quote "$sni")
-    skip-cert-verify: true
-    udp: true
-EOF
-
-  if [[ -n "$obfs_password" && "$obfs_password" != "null" ]]; then
-    cat >>"$file" <<EOF
-    obfs: salamander
-    obfs-password: $(yaml_quote "$obfs_password")
-EOF
-  fi
-}
-
-append_clash_rule_lines() {
-  local file=$1
-
-  while IFS= read -r domain; do
-    [[ -n "$domain" ]] && printf '  - DOMAIN-SUFFIX,%s,AI分流\n' "$domain" >>"$file"
-  done < <(jq -r '.routing.ai.domain_suffix[]? // empty' "$STATE_FILE")
-
-  while IFS= read -r keyword; do
-    [[ -n "$keyword" ]] && printf '  - DOMAIN-KEYWORD,%s,AI分流\n' "$keyword" >>"$file"
-  done < <(jq -r '.routing.ai.domain_keyword[]? // empty' "$STATE_FILE")
-
-  while IFS= read -r cidr; do
-    [[ -n "$cidr" ]] || continue
-    if [[ "$cidr" == *:* ]]; then
-      printf '  - IP-CIDR6,%s,AI分流,no-resolve\n' "$cidr" >>"$file"
-    else
-      printf '  - IP-CIDR,%s,AI分流,no-resolve\n' "$cidr" >>"$file"
-    fi
-  done < <(jq -r '((.routing.ai.ip_cidr // []) + (.routing.ai.resolved_ip_cidr // [])) | unique | .[]?' "$STATE_FILE")
-
-  printf '  - MATCH,普通代理\n' >>"$file"
-}
-
-write_nekobox_clash_meta_config() {
-  local file server_address node_name normal_group_has_proxy=0 ai_enabled ai_type
-  local ss_port ss_method ss_server_password vless_port vless_server_name vless_public_key vless_short_id
-  local hy2_port hy2_sni hy2_obfs ai_name local_proxy_name
-  local -a normal_names=()
-
-  file="$(nekobox_clash_meta_file)"
-  server_address="$(state_get '.meta.server_address')"
-  node_name="$(state_get '.meta.node_name')"
-  ai_enabled="$(state_get '.routing.ai.enabled // false')"
-
-  cat >"$file" <<EOF
-mixed-port: 7890
-allow-lan: false
-mode: rule
-log-level: info
-ipv6: true
-
-proxies:
-EOF
-
-  if [[ "$(state_get '.protocols.shadowsocks.enabled')" == "true" ]]; then
-    ss_port="$(state_get '.protocols.shadowsocks.port')"
-    ss_method="$(state_get '.protocols.shadowsocks.method')"
-    ss_server_password="$(state_get '.protocols.shadowsocks.server_password')"
-    while IFS=$'\t' read -r name user_password; do
-      [[ -n "$name" ]] || continue
-      local_proxy_name="${node_name:-VPS}-SS-${name}"
-      append_clash_ss_proxy "$file" "$local_proxy_name" "$server_address" "$ss_port" "$ss_method" "${ss_server_password}:${user_password}"
-      normal_names+=("$local_proxy_name")
-      normal_group_has_proxy=1
-    done < <(jq -r '.protocols.shadowsocks.users[]? | [.name, .password] | @tsv' "$STATE_FILE")
-  fi
-
-  if [[ "$(state_get '.protocols.vless_reality.enabled')" == "true" ]]; then
-    vless_port="$(state_get '.protocols.vless_reality.port')"
-    vless_server_name="$(state_get '.protocols.vless_reality.server_name')"
-    vless_public_key="$(state_get '.protocols.vless_reality.public_key')"
-    vless_short_id="$(state_get '.protocols.vless_reality.short_id')"
-    while IFS=$'\t' read -r name uuid; do
-      [[ -n "$name" ]] || continue
-      local_proxy_name="${node_name:-VPS}-VLESS-${name}"
-      append_clash_vless_proxy "$file" "$local_proxy_name" "$server_address" "$vless_port" "$uuid" "xtls-rprx-vision" "true" "$vless_server_name" "false" "true" "$vless_public_key" "$vless_short_id"
-      normal_names+=("$local_proxy_name")
-      normal_group_has_proxy=1
-    done < <(jq -r '.protocols.vless_reality.users[]? | [.name, .uuid] | @tsv' "$STATE_FILE")
-  fi
-
-  if [[ "$(state_get '.protocols.hysteria2.enabled')" == "true" ]]; then
-    hy2_port="$(state_get '.protocols.hysteria2.port')"
-    hy2_sni="$(state_get '.protocols.hysteria2.tls_server_name')"
-    hy2_obfs="$(state_get '.protocols.hysteria2.obfs_password')"
-    while IFS=$'\t' read -r name password; do
-      [[ -n "$name" ]] || continue
-      local_proxy_name="${node_name:-VPS}-HY2-${name}"
-      append_clash_hysteria2_proxy "$file" "$local_proxy_name" "$server_address" "$hy2_port" "$password" "$hy2_sni" "$hy2_obfs"
-      normal_names+=("$local_proxy_name")
-      normal_group_has_proxy=1
-    done < <(jq -r '.protocols.hysteria2.users[]? | [.name, .password] | @tsv' "$STATE_FILE")
-  fi
-
-  if [[ "$ai_enabled" == "true" ]]; then
-    ai_name="AI落地节点"
-    ai_type="$(state_get '.routing.ai.outbound_type // "shadowsocks"')"
-    if [[ "$ai_type" == "vless" ]]; then
-      append_clash_vless_proxy \
-        "$file" "$ai_name" \
-        "$(state_get '.routing.ai.server')" \
-        "$(state_get '.routing.ai.port')" \
-        "$(state_get '.routing.ai.uuid')" \
-        "$(state_get '.routing.ai.flow // ""')" \
-        "$(state_get '.routing.ai.tls_enabled // false')" \
-        "$(state_get '.routing.ai.tls_server_name // ""')" \
-        "$(state_get '.routing.ai.tls_insecure // false')" \
-        "$(state_get '.routing.ai.reality_enabled // false')" \
-        "$(state_get '.routing.ai.reality_public_key // ""')" \
-        "$(state_get '.routing.ai.reality_short_id // ""')"
-    else
-      append_clash_ss_proxy \
-        "$file" "$ai_name" \
-        "$(state_get '.routing.ai.server')" \
-        "$(state_get '.routing.ai.port')" \
-        "$(state_get '.routing.ai.method')" \
-        "$(state_get '.routing.ai.password')"
-    fi
-  fi
-
-  cat >>"$file" <<EOF
-
-proxy-groups:
-  - name: 普通代理
-    type: select
-    proxies:
-EOF
-
-  if (( normal_group_has_proxy )); then
-    for local_proxy_name in "${normal_names[@]}"; do
-      printf '      - %s\n' "$(yaml_quote "$local_proxy_name")" >>"$file"
-    done
-  else
-    printf '      - DIRECT\n' >>"$file"
-  fi
-
-  cat >>"$file" <<EOF
-  - name: AI分流
-    type: select
-    proxies:
-EOF
-
-  if [[ "$ai_enabled" == "true" ]]; then
-    printf '      - %s\n' "$(yaml_quote "AI落地节点")" >>"$file"
-  else
-    printf '      - 普通代理\n' >>"$file"
-  fi
-
-  cat >>"$file" <<EOF
-
-rules:
-EOF
-  append_clash_rule_lines "$file"
-}
-
 write_nekobox_exports() {
-  local rule_file domain_file ip_file guide_file clash_file
+  local rule_file domain_file ip_file guide_file
   rule_file="$(nekobox_route_rule_file)"
   domain_file="$(nekobox_domain_rules_file)"
   ip_file="$(nekobox_ip_rules_file)"
   guide_file="$(nekobox_guide_file)"
-  clash_file="$(nekobox_clash_meta_file)"
 
   render_nekobox_route_rule_json >"$rule_file"
   render_nekobox_domain_rules >"$domain_file"
   render_nekobox_ip_rules >"$ip_file"
-  write_nekobox_clash_meta_config
 
   cat >"$guide_file" <<EOF
 NekoBox for Android AI 分流使用说明
@@ -1713,17 +1488,9 @@ NekoBox for Android AI 分流使用说明
 NekoBox 导入节点/订阅时通常只解析节点 outbound，订阅或服务端里的分流规则不会自动进入 NekoBox 路由。
 请在手机端 NekoBox 本地添加路由规则：
 
-推荐方案：
-1. 在 NekoBox 中导入 Clash Meta 配置：
-   $clash_file
-2. 配置中已经包含「普通代理」和「AI分流」两个出站组：
-   - AI 规则命中后走 AI落地节点
-   - 其他流量走普通代理
-
-备用方案：
 1. 先正常导入并保存你的节点。
 2. 进入该节点的「路由」或「自定义配置 / 自定义路由」页面。
-3. 使用文件：
+3. 推荐使用文件：
    $rule_file
    把里面的 JSON 作为 sing-box 自定义 route rule 使用，出站标签为 proxy。
 4. 如果你使用 NekoBox 的简易路由界面：
@@ -4321,24 +4088,19 @@ show_subscription_links() {
 }
 
 show_nekobox_routing_exports() {
-  local output rule_file domain_file ip_file guide_file clash_file
+  local output rule_file domain_file ip_file guide_file
 
-  refresh_ai_resolved_ip_cidrs
   write_client_exports
   rule_file="$(nekobox_route_rule_file)"
   domain_file="$(nekobox_domain_rules_file)"
   ip_file="$(nekobox_ip_rules_file)"
   guide_file="$(nekobox_guide_file)"
-  clash_file="$(nekobox_clash_meta_file)"
 
   output=$(
     cat <<EOF
 NekoBox 分流规则已导出：
 
-推荐：完整 Clash Meta 配置
-$clash_file
-
-备用：sing-box 自定义 route rule
+推荐：sing-box 自定义 route rule
 $rule_file
 
 简易路由域名规则
@@ -4663,7 +4425,7 @@ usage() {
   $SCRIPT_NAME add-ai-rule domain1 keyword2
                           新增 AI 分流规则
   $SCRIPT_NAME delete-ai-rule 删除 AI 分流规则
-  $SCRIPT_NAME nekobox-rules  导出 NekoBox Clash Meta 手机端分流配置
+  $SCRIPT_NAME nekobox-rules  导出 NekoBox 手机端分流规则
   $SCRIPT_NAME repair-install 重新安装 / 修复环境并保留现有规则
   $SCRIPT_NAME realm          打开 Realm 中转菜单
   $SCRIPT_NAME apply          重新生成配置并重载服务
@@ -4821,7 +4583,7 @@ main() {
       init_state_file
       delete_ai_routing_rule
       ;;
-    nekobox-rules|nekobox-clash|export-nekobox|nekobox)
+    nekobox-rules|export-nekobox|nekobox)
       require_linux
       require_root
       ensure_dirs

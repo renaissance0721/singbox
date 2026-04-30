@@ -1941,7 +1941,6 @@ apply_config() {
   fi
 
   normalize_protocol_listen_addresses
-  refresh_ai_resolved_ip_cidrs
   validate_state || return 1
 
   tmp_config="$(mktemp "$TMP_DIR/singbox-config.XXXXXX.json")"

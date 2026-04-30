@@ -372,6 +372,47 @@ restart_sing_box() {
   fi
 }
 
+sing_box_v2ray_api_unavailable() {
+  local tmp_config check_output
+
+  have_cmd sing-box || return 1
+
+  tmp_config="$(mktemp "$TMP_DIR/sbox-v2ray-api-check.XXXXXX.json")"
+  cat >"$tmp_config" <<EOF
+{
+  "log": {
+    "level": "error"
+  },
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "final": "direct"
+  },
+  "experimental": {
+    "v2ray_api": {
+      "listen": "127.0.0.1:10085",
+      "stats": {
+        "enabled": true,
+        "users": []
+      }
+    }
+  }
+}
+EOF
+
+  if check_output="$(sing-box check -c "$tmp_config" 2>&1)"; then
+    rm -f "$tmp_config"
+    return 1
+  fi
+  rm -f "$tmp_config"
+
+  [[ "$check_output" == *"v2ray api is not included"* || "$check_output" == *"with_v2ray_api"* ]]
+}
+
 stop_sing_box() {
   if service_exists; then
     systemctl stop sing-box >/dev/null 2>&1 || true
@@ -1928,6 +1969,15 @@ configure_traffic_stats_api() {
   fi
 
   desired_listen="$(prompt_nonempty "V2Ray API 监听地址" "请输入 V2Ray API 监听地址" "$current_listen")" || return 1
+  if sing_box_v2ray_api_unavailable; then
+    state_jq --arg ts "$(utc_now)" '
+      .traffic_stats.enabled = false |
+      .meta.updated_at = $ts
+    '
+    ui_msg "当前 sing-box 未包含 with_v2ray_api，不能启用 V2Ray API 流量统计。已保持关闭；客户端到期时间和手动流量上限仍会保留。"
+    return 1
+  fi
+
   state_jq --arg listen "$desired_listen" --arg ts "$(utc_now)" '
     .traffic_stats.enabled = true |
     .traffic_stats.v2ray_api_listen = $listen |
@@ -2793,6 +2843,13 @@ apply_config() {
   normalize_protocol_listen_addresses
   refresh_ai_resolved_ip_cidrs
   refresh_client_traffic_usage >/dev/null 2>&1 || true
+  if [[ "$(state_get '.traffic_stats.enabled // false')" == "true" ]] && sing_box_v2ray_api_unavailable; then
+    state_jq --arg ts "$(utc_now)" '
+      .traffic_stats.enabled = false |
+      .meta.updated_at = $ts
+    '
+    warn "当前 sing-box 未包含 with_v2ray_api，已自动关闭 V2Ray API 流量统计以避免服务启动失败。"
+  fi
   validate_state || return 1
 
   tmp_config="$(mktemp "$TMP_DIR/singbox-config.XXXXXX.json")"

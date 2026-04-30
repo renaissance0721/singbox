@@ -1649,8 +1649,6 @@ select_protocol_user() {
   printf '%s\n' "${users[$selected_index]}"
 }
 
-<<<<<<< HEAD
-<<<<<<< HEAD
 select_client_with_protocol() {
   local title=$1
   local prompt=$2
@@ -2079,10 +2077,6 @@ client_limit_submenu() {
   done
 }
 
-=======
->>>>>>> parent of 9c992e4 (Update index.sh)
-=======
->>>>>>> parent of 9c992e4 (Update index.sh)
 ensure_hysteria_cert() {
   local server_name cert_path key_path san_type openssl_conf
   server_name="$(state_get '.protocols.hysteria2.tls_server_name')"
@@ -2737,10 +2731,7 @@ apply_config() {
   fi
 
   normalize_protocol_listen_addresses
-<<<<<<< HEAD
   refresh_ai_resolved_ip_cidrs
-<<<<<<< HEAD
-<<<<<<< HEAD
   refresh_client_traffic_usage >/dev/null 2>&1 || true
   if [[ "$(state_get '.traffic_stats.enabled // false')" == "true" ]] && sing_box_v2ray_api_unavailable; then
     state_jq --arg ts "$(utc_now)" '
@@ -2749,12 +2740,6 @@ apply_config() {
     '
     warn "当前 sing-box 未包含 with_v2ray_api，已自动关闭 V2Ray API 流量统计以避免服务启动失败。"
   fi
-=======
->>>>>>> parent of 9c992e4 (Update index.sh)
-=======
->>>>>>> parent of 9c992e4 (Update index.sh)
-=======
->>>>>>> parent of 58f9387 (Strengthen mobile AI routing fallback)
   validate_state || return 1
 
   tmp_config="$(mktemp "$TMP_DIR/singbox-config.XXXXXX.json")"
@@ -3203,7 +3188,6 @@ configure_ai_routing() {
   apply_config
 }
 
-<<<<<<< HEAD
 show_ai_routing_rules() {
   local rules_text summary
   rules_text="$(jq -r '
@@ -3327,8 +3311,59 @@ delete_ai_routing_rule() {
   apply_config
 }
 
-=======
->>>>>>> parent of 20e5819 (Update index.sh)
+ai_routing_menu_text() {
+  cat <<EOF
+AI 分流状态：$(state_get '.routing.ai.enabled // false')
+AI 分流出站：$(state_get '.routing.ai.outbound_type // "shadowsocks"')
+AI 分流规则数：$(state_get '((.routing.ai.domain_suffix // []) + (.routing.ai.domain_keyword // [])) | length')
+
+请选择要执行的操作（输入 0 返回上一级，输入 00 退出脚本）
+EOF
+}
+
+ai_routing_submenu() {
+  local choice menu_text
+
+  while true; do
+    menu_text="$(ai_routing_menu_text)"
+    choice="$(ui_menu "一键AI分流" "$menu_text" \
+      "1" "配置 AI 分流" \
+      "2" "查看 AI 分流规则" \
+      "3" "新增 AI 分流规则" \
+      "4" "删除 AI 分流规则" \
+      "5" "导出 NekoBox 分流规则" \
+      "0" "返回上一级菜单" \
+      "00" "退出脚本")" || return 1
+
+    case "$choice" in
+      1)
+        configure_ai_routing
+        ;;
+      2)
+        show_ai_routing_rules
+        ;;
+      3)
+        append_ai_routing_rules
+        ;;
+      4)
+        delete_ai_routing_rule
+        ;;
+      5)
+        show_nekobox_routing_exports
+        ;;
+      0)
+        return 0
+        ;;
+      00)
+        exit 0
+        ;;
+      *)
+        ui_msg "无效选项，请重新选择。"
+        ;;
+    esac
+  done
+}
+
 add_client() {
   local protocol_choice name value
   protocol_choice="$(ui_protocol_menu)" || return 1
@@ -4109,8 +4144,6 @@ main_menu() {
       "7" "新增客户端" \
       "8" "删除客户端" \
       "9" "查看客户端信息" \
-<<<<<<< HEAD
-<<<<<<< HEAD
       "10" "客户端流量 / 到期管理" \
       "11" "查看订阅链接" \
       "12" "重新生成配置并重载服务" \
@@ -4121,31 +4154,6 @@ main_menu() {
       "17" "重新安装 / 修复（保留规则）" \
       "18" "全新重装（删除所有配置）" \
       "19" "卸载" \
-=======
-=======
->>>>>>> parent of 9c992e4 (Update index.sh)
-      "10" "查看订阅链接" \
-      "11" "重新生成配置并重载服务" \
-      "12" "查看当前概览" \
-      "13" "查看服务状态" \
-      "14" "配置 AI 分流" \
-<<<<<<< HEAD
-      "15" "查看 AI 分流规则" \
-      "16" "新增 AI 分流规则" \
-      "17" "删除 AI 分流规则" \
-      "18" "导出 NekoBox 分流规则" \
-      "19" "Realm 中转" \
-      "20" "重新安装 / 修复（保留规则）" \
-      "21" "卸载" \
-<<<<<<< HEAD
->>>>>>> parent of 9c992e4 (Update index.sh)
-=======
->>>>>>> parent of 9c992e4 (Update index.sh)
-=======
-      "15" "Realm 中转" \
-      "16" "重新安装 / 修复（保留规则）" \
-      "17" "卸载" \
->>>>>>> parent of 20e5819 (Update index.sh)
       "0" "退出")" || break
 
     case "$choice" in
@@ -4177,60 +4185,34 @@ main_menu() {
         show_client_info
         ;;
       10)
-        show_subscription_links
+        client_limit_submenu
         ;;
       11)
-        apply_config
+        show_subscription_links
         ;;
       12)
-        show_overview
+        apply_config
         ;;
       13)
-        show_service_status
+        show_overview
         ;;
       14)
-        configure_ai_routing
+        show_service_status
         ;;
       15)
-<<<<<<< HEAD
-        show_ai_routing_rules
+        ai_routing_submenu
         ;;
       16)
-        append_ai_routing_rules
-        ;;
-      17)
-        delete_ai_routing_rule
-        ;;
-      18)
-        show_nekobox_routing_exports
-        ;;
-      19)
         prepare_realm_menu && realm_submenu
         ;;
-      20)
+      17)
         export SBOX_REPAIR_OPEN_PANEL=1
         repair_install
         ;;
-<<<<<<< HEAD
-<<<<<<< HEAD
       18)
         fresh_install
         ;;
       19)
-=======
-      21)
->>>>>>> parent of 9c992e4 (Update index.sh)
-=======
-      21)
->>>>>>> parent of 9c992e4 (Update index.sh)
-=======
-        prepare_realm_menu && realm_submenu
-        ;;
-      16)
-        repair_install
-        ;;
-      17)
->>>>>>> parent of 20e5819 (Update index.sh)
         uninstall_sbox
         ;;
       0)
@@ -4255,8 +4237,6 @@ usage() {
   $SCRIPT_NAME fresh-install  删除全部配置后全新安装（可加 --yes 跳过确认）
   $SCRIPT_NAME add-client     打开新增客户端流程
   $SCRIPT_NAME remove-client  打开删除客户端流程
-<<<<<<< HEAD
-<<<<<<< HEAD
   $SCRIPT_NAME traffic        查看客户端流量使用情况
   $SCRIPT_NAME client-limits  设置客户端总流量和到期时间
   $SCRIPT_NAME traffic-api    开启 / 关闭 V2Ray API 流量统计
@@ -4267,19 +4247,12 @@ usage() {
   $SCRIPT_NAME enforce-clients
                           刷新客户端流量并执行到期 / 超额限制
   $SCRIPT_NAME ai             打开一键AI分流菜单
-=======
->>>>>>> parent of 9c992e4 (Update index.sh)
-=======
->>>>>>> parent of 9c992e4 (Update index.sh)
   $SCRIPT_NAME ai-route       配置 AI 分流到远端 SS / VLESS 落地节点
-<<<<<<< HEAD
   $SCRIPT_NAME ai-rules       查看 AI 分流规则
   $SCRIPT_NAME add-ai-rule domain1 keyword2
                           新增 AI 分流规则
   $SCRIPT_NAME delete-ai-rule 删除 AI 分流规则
   $SCRIPT_NAME nekobox-rules  导出 NekoBox 手机端分流规则
-=======
->>>>>>> parent of 20e5819 (Update index.sh)
   $SCRIPT_NAME repair-install 重新安装 / 修复环境并保留现有规则
   $SCRIPT_NAME realm          打开 Realm 中转菜单
   $SCRIPT_NAME apply          重新生成配置并重载服务
@@ -4293,20 +4266,11 @@ usage() {
   1. 面板使用纯命令行数字输入，不依赖方向键。
   2. Hysteria2 默认使用自签名证书。
   3. 非交互安装可通过 SINGBOX_SERVER_ADDRESS=your.domain 指定节点地址。
-<<<<<<< HEAD
   4. 一键安装会从源码编译带 with_v2ray_api 的 sing-box，便于后续启用客户端流量统计。
   5. AI 分流支持 Shadowsocks 和 VLESS，落地节点地址可以是域名、IPv4 或 IPv6。
   6. repair-install 会重装 / 更新脚本和 sing-box 核心，但不会删除状态文件、客户端或分流规则。
   7. 一键安装只安装环境；当你启用协议或新增客户端后，才会生成对应的协议链接。
   8. 客户端流量统计依赖 grpcurl、v2ray 或 xray 查询命令；到期 / 超额会通过 auth_user 拒绝规则限制。
-=======
-  4. AI 分流支持 Shadowsocks 和 VLESS，落地节点地址可以是域名、IPv4 或 IPv6。
-  5. repair-install 会重装 / 更新脚本和 sing-box 核心，但不会删除状态文件、客户端或分流规则。
-  6. 一键安装只安装环境；当你启用协议或新增客户端后，才会生成对应的协议链接。
-<<<<<<< HEAD
->>>>>>> parent of 9c992e4 (Update index.sh)
-=======
->>>>>>> parent of 9c992e4 (Update index.sh)
 EOF
 }
 
@@ -4355,8 +4319,6 @@ main() {
       init_state_file
       remove_client
       ;;
-<<<<<<< HEAD
-<<<<<<< HEAD
     traffic|client-traffic|show-traffic)
       require_linux
       require_root
@@ -4402,10 +4364,6 @@ main() {
       init_state_file
       ai_routing_submenu
       ;;
-=======
->>>>>>> parent of 9c992e4 (Update index.sh)
-=======
->>>>>>> parent of 9c992e4 (Update index.sh)
     ai-route)
       require_linux
       require_root
@@ -4414,7 +4372,6 @@ main() {
       init_state_file
       configure_ai_routing
       ;;
-<<<<<<< HEAD
     ai-rules|show-ai-rules)
       require_linux
       require_root
@@ -4445,8 +4402,6 @@ main() {
       init_state_file
       show_nekobox_routing_exports
       ;;
-=======
->>>>>>> parent of 20e5819 (Update index.sh)
     repair-install|reinstall)
       require_linux
       require_root

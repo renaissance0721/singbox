@@ -10,6 +10,7 @@ LEGACY_PATH="/usr/local/bin/singbox-manager"
 INDEX_URL="${INDEX_URL:-https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/index.sh}"
 SERVER_ADDRESS="${SINGBOX_SERVER_ADDRESS:-${SERVER_ADDRESS:-}}"
 INSTALL_COMMAND="quick-install"
+INSTALL_ARGS=()
 
 log() {
   printf '[*] %s\n' "$*" >&2
@@ -54,18 +55,21 @@ attach_tty() {
 usage() {
   cat <<EOF
 用法:
-  bash install.sh [--server-address <domain-or-ip>]
+  bash install.sh [--server-address <domain-or-ip>] [--fresh]
 
 示例:
   bash install.sh
+  bash install.sh --fresh
   bash install.sh --repair
   bash install.sh --server-address node.example.com
   curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | sudo bash
+  curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | sudo bash -s -- --fresh
   curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | sudo bash -s -- --repair
   curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | sudo bash -s -- --server-address node.example.com
 
 参数:
   --server-address  指定节点对外地址，适合非交互安装
+  --fresh           删除旧配置后全新安装
   -h, --help        查看帮助
 EOF
 }
@@ -79,6 +83,11 @@ while (( $# > 0 )); do
       ;;
     --repair|--reinstall)
       INSTALL_COMMAND="repair-install"
+      shift
+      ;;
+    --fresh|--clean)
+      INSTALL_COMMAND="fresh-install"
+      INSTALL_ARGS=("--yes")
       shift
       ;;
     -h|--help)
@@ -108,7 +117,7 @@ else
   log "未显式指定节点地址，将尝试自动探测公网 IP。"
 fi
 
-"$TARGET_PATH" "$INSTALL_COMMAND"
+"$TARGET_PATH" "$INSTALL_COMMAND" "${INSTALL_ARGS[@]}"
 
 printf '\n安装完成，正在打开 sbox 管理面板...\n\n'
 

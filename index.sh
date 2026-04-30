@@ -36,6 +36,7 @@ REALM_STATE_FILE="${REALM_STATE_FILE:-$STATE_DIR/realm-state.json}"
 REALM_BIN="${REALM_BIN:-/usr/local/bin/realm}"
 REALM_SERVICE_FILE="${REALM_SERVICE_FILE:-/etc/systemd/system/realm.service}"
 MANAGER_SCRIPT_PATH="${MANAGER_SCRIPT_PATH:-/usr/local/bin/sbox}"
+PROJECT_INSTALL_DIR="${PROJECT_INSTALL_DIR:-/usr/local/share/sbox}"
 SCRIPT_REPO_OWNER="${SCRIPT_REPO_OWNER:-renaissance0721}"
 SCRIPT_REPO_NAME="${SCRIPT_REPO_NAME:-singbox}"
 SCRIPT_REPO_BRANCH="${SCRIPT_REPO_BRANCH:-main}"
@@ -282,17 +283,17 @@ install_dependencies() {
     apt)
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -y
-      apt-get install -y curl jq openssl ca-certificates whiptail uuid-runtime iproute2
+      apt-get install -y curl jq openssl ca-certificates whiptail uuid-runtime iproute2 git tar gzip
       ;;
     dnf)
-      dnf install -y curl jq openssl ca-certificates newt util-linux iproute
+      dnf install -y curl jq openssl ca-certificates newt util-linux iproute git tar gzip
       ;;
     yum)
       yum install -y epel-release || true
-      yum install -y curl jq openssl ca-certificates newt util-linux iproute
+      yum install -y curl jq openssl ca-certificates newt util-linux iproute git tar gzip
       ;;
     *)
-      die "暂不支持自动安装依赖，请手动安装 curl、jq、openssl、whiptail、uuidgen 后再运行。"
+      die "暂不支持自动安装依赖，请手动安装 curl、jq、openssl、whiptail、uuidgen、git、tar、gzip 后再运行。"
       ;;
   esac
 
@@ -2047,16 +2048,16 @@ repair_install() {
 
   manager_target="$(manager_script_target_path)"
   if [[ "${SBOX_REPAIR_RESUMED:-0}" != "1" ]]; then
-    if install_manager_script_from_repo; then
-      log "管理脚本已重新安装 / 更新到 ${manager_target}。"
+    if install_manager_project_from_repo; then
+      log "已从 GitHub 仓库拉取最新项目并更新到 ${manager_target}。"
       log "将使用新安装的脚本继续修复，以应用最新逻辑。"
       export SBOX_REPAIR_RESUMED=1
       exec "$manager_target" repair-install
     else
-      warn "管理脚本更新失败，将继续修复 sing-box 核心与配置。"
+      warn "从 GitHub 仓库更新项目失败，将继续使用当前脚本修复 sing-box 核心与配置。"
     fi
   else
-    log "已切换到新安装的管理脚本，继续修复 sing-box 核心与配置。"
+    log "已切换到 GitHub 最新脚本，继续修复 sing-box 核心与配置。"
   fi
 
   install_sing_box
@@ -2999,36 +3000,69 @@ manager_script_target_path() {
   printf '%s\n' "$MANAGER_SCRIPT_PATH"
 }
 
-install_manager_script_from_repo() {
-  local target_path tmp_file
-  local -a urls=(
-    "https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/${SCRIPT_REPO_BRANCH}/index.sh"
-    "https://github.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/raw/${SCRIPT_REPO_BRANCH}/index.sh"
-    "https://cdn.jsdelivr.net/gh/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}@${SCRIPT_REPO_BRANCH}/index.sh"
-  )
+fetch_latest_project_from_repo() {
+  local tmp_dir repo_dir archive_path extracted_dir
+  local repo_url="https://github.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}.git"
+  local archive_url="https://github.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/archive/refs/heads/${SCRIPT_REPO_BRANCH}.tar.gz"
 
-  target_path="$(manager_script_target_path)"
-  tmp_file="$(mktemp "$TMP_DIR/sbox-update.XXXXXX")"
-  if ! download_to_file "$tmp_file" "${urls[@]}"; then
-    rm -f "$tmp_file"
+  tmp_dir="$(mktemp -d "$TMP_DIR/sbox-repo.XXXXXX")"
+  repo_dir="$tmp_dir/repo"
+
+  if have_cmd git && git clone --depth 1 --branch "$SCRIPT_REPO_BRANCH" "$repo_url" "$repo_dir" >/dev/null 2>&1; then
+    printf '%s\n' "$repo_dir"
+    return 0
+  fi
+
+  archive_path="$tmp_dir/project.tar.gz"
+  if ! download_to_file "$archive_path" "$archive_url"; then
+    rm -rf "$tmp_dir"
     return 1
   fi
 
-  mkdir -p "$(dirname "$target_path")"
-  install -m 755 "$tmp_file" "$target_path"
+  if ! tar -xzf "$archive_path" -C "$tmp_dir"; then
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+
+  extracted_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d -name "${SCRIPT_REPO_NAME}-*" | head -n 1)"
+  if [[ -z "$extracted_dir" || ! -f "$extracted_dir/index.sh" ]]; then
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+
+  printf '%s\n' "$extracted_dir"
+}
+
+install_manager_project_from_repo() {
+  local target_path project_dir
+
+  target_path="$(manager_script_target_path)"
+  project_dir="$(fetch_latest_project_from_repo)" || return 1
+
+  if ! bash -n "$project_dir/index.sh"; then
+    rm -rf "$(dirname "$project_dir")"
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$target_path")" "$PROJECT_INSTALL_DIR"
+  install -m 755 "$project_dir/index.sh" "$target_path"
+  [[ -f "$project_dir/install.sh" ]] && install -m 755 "$project_dir/install.sh" "$PROJECT_INSTALL_DIR/install.sh"
+  [[ -f "$project_dir/README.md" ]] && install -m 644 "$project_dir/README.md" "$PROJECT_INSTALL_DIR/README.md"
+  [[ -f "$project_dir/LICENSE" ]] && install -m 644 "$project_dir/LICENSE" "$PROJECT_INSTALL_DIR/LICENSE"
+
   if [[ "$target_path" == "/usr/local/bin/sbox" ]]; then
     rm -f /usr/local/bin/singbox-manager 2>/dev/null || true
   fi
-  rm -f "$tmp_file"
+  rm -rf "$(dirname "$project_dir")"
 }
 
 update_manager_script() {
-  if ! install_manager_script_from_repo; then
+  if ! install_manager_project_from_repo; then
     ui_msg "更新脚本失败，请稍后重试。"
     return 1
   fi
 
-  ui_msg "脚本已更新完成。"
+  ui_msg "脚本已从 GitHub 仓库更新完成。"
 }
 
 realm_submenu() {

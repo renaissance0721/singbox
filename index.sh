@@ -1118,9 +1118,7 @@ init_state_file() {
         "claude",
         "perplexity",
         "gemini"
-      ],
-      "ip_cidr": [],
-      "resolved_ip_cidr": []
+      ]
     }
   }
 }
@@ -1151,8 +1149,6 @@ migrate_state_schema() {
     and (.routing.ai.reality_enabled? != null)
     and (.routing.ai.reality_public_key? != null)
     and (.routing.ai.reality_short_id? != null)
-    and (.routing.ai.ip_cidr? != null)
-    and (.routing.ai.resolved_ip_cidr? != null)
   ' "$STATE_FILE" >/dev/null 2>&1; then
     return 0
   fi
@@ -1202,35 +1198,17 @@ migrate_state_schema() {
       "perplexity",
       "gemini"
     ]) |
-    .routing.ai.ip_cidr = (.routing.ai.ip_cidr // []) |
-    .routing.ai.resolved_ip_cidr = (.routing.ai.resolved_ip_cidr // []) |
     .meta.updated_at = $ts
   '
 }
 
 format_ai_rule_list() {
-  jq -r '((.routing.ai.domain_suffix // []) + (.routing.ai.domain_keyword // []) + (.routing.ai.ip_cidr // [])) | join(", ")' "$STATE_FILE"
+  jq -r '((.routing.ai.domain_suffix // []) + (.routing.ai.domain_keyword // [])) | join(", ")' "$STATE_FILE"
 }
 
 build_ai_rules_json() {
   local input=$1
   jq -nc --arg input "$input" '
-    def is_ipv4:
-      test("^([0-9]{1,3}\\.){3}[0-9]{1,3}$");
-    def is_ipv4_cidr:
-      test("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$");
-    def is_ipv6:
-      (contains(":") and test("^[0-9a-f:]+$"));
-    def is_ipv6_cidr:
-      test("^[0-9a-f:]+/[0-9]{1,3}$");
-    def is_ip_rule:
-      is_ipv4 or is_ipv4_cidr or is_ipv6 or is_ipv6_cidr;
-    def to_ip_cidr:
-      if is_ipv4 then . + "/32"
-      elif is_ipv6 then . + "/128"
-      elif is_ipv4_cidr or is_ipv6_cidr then .
-      else empty
-      end;
     def normalized_items:
       (. // "" | tostring | ascii_downcase)
       | gsub("，|、|；"; ",")
@@ -1241,11 +1219,11 @@ build_ai_rules_json() {
           | gsub("^\\s+|\\s+$"; "")
           | sub("^[a-z][a-z0-9+.-]*://"; "")
           | sub("^//"; "")
-          | if ((is_ipv4_cidr or is_ipv6_cidr) | not) then split("/")[0] else . end
+          | split("/")[0]
           | (. // "" | tostring)
           | sub("^\\["; "")
           | sub("\\]$"; "")
-          | if contains(".") then sub(":[0-9]+$"; "") else . end
+          | sub(":[0-9]+$"; "")
           | sub("^\\*\\."; "")
           | sub("^\\."; "")
         )
@@ -1254,125 +1232,10 @@ build_ai_rules_json() {
 
     ($input | normalized_items) as $items |
     {
-      domain_suffix: ($items | map(select((is_ip_rule | not) and contains(".")))),
-      domain_keyword: ($items | map(select((is_ip_rule | not) and (contains(".") | not)))),
-      ip_cidr: ($items | map(select(is_ip_rule) | to_ip_cidr))
+      domain_suffix: ($items | map(select(contains(".")))),
+      domain_keyword: ($items | map(select(contains(".") | not)))
     }
   '
-}
-
-ip_to_cidr() {
-  local ip=$1
-  ip="${ip%$'\r'}"
-  ip="${ip%$'\n'}"
-
-  if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-    printf '%s/32\n' "$ip"
-  elif [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
-    printf '%s\n' "$ip"
-  elif [[ "$ip" == *:* && "$ip" =~ ^[0-9A-Fa-f:.]+$ ]]; then
-    printf '%s/128\n' "$ip"
-  elif [[ "$ip" == *:* && "$ip" =~ ^[0-9A-Fa-f:.]+/[0-9]{1,3}$ ]]; then
-    printf '%s\n' "$ip"
-  fi
-}
-
-ai_resolve_domain_candidates() {
-  local domain=$1
-
-  printf '%s\n' "$domain"
-
-  case "$domain" in
-    openai.com)
-      printf '%s\n' \
-        "api.openai.com" \
-        "auth.openai.com" \
-        "auth0.openai.com" \
-        "chat.openai.com" \
-        "ios.chat.openai.com" \
-        "android.chat.openai.com"
-      ;;
-    chatgpt.com)
-      printf '%s\n' \
-        "chatgpt.com" \
-        "www.chatgpt.com"
-      ;;
-    anthropic.com)
-      printf '%s\n' \
-        "api.anthropic.com" \
-        "console.anthropic.com"
-      ;;
-    claude.ai)
-      printf '%s\n' \
-        "claude.ai" \
-        "api.claude.ai"
-      ;;
-    gemini.google.com)
-      printf '%s\n' \
-        "gemini.google.com"
-      ;;
-    generativelanguage.googleapis.com)
-      printf '%s\n' \
-        "generativelanguage.googleapis.com"
-      ;;
-    aistudio.google.com)
-      printf '%s\n' \
-        "aistudio.google.com"
-      ;;
-    perplexity.ai)
-      printf '%s\n' \
-        "perplexity.ai" \
-        "www.perplexity.ai" \
-        "api.perplexity.ai"
-      ;;
-    poe.com)
-      printf '%s\n' \
-        "poe.com" \
-        "www.poe.com"
-      ;;
-  esac
-
-  if [[ "$domain" == *.* ]]; then
-    printf '%s\n' "www.${domain}" "api.${domain}"
-  fi
-}
-
-refresh_ai_resolved_ip_cidrs() {
-  local tmp_raw tmp_sorted cidrs_json domain resolve_domain ip cidr resolved_count
-
-  [[ "$(state_get '.routing.ai.enabled // false')" == "true" ]] || return 0
-  have_cmd getent || return 0
-
-  tmp_raw="$(mktemp "$TMP_DIR/sbox-ai-ip-raw.XXXXXX")"
-  tmp_sorted="$(mktemp "$TMP_DIR/sbox-ai-ip.XXXXXX")"
-
-  while IFS= read -r domain; do
-    [[ -n "$domain" && "$domain" != "null" ]] || continue
-    while IFS= read -r resolve_domain; do
-      [[ -n "$resolve_domain" ]] || continue
-      while IFS= read -r ip; do
-        [[ -n "$ip" ]] || continue
-        cidr="$(ip_to_cidr "$ip")"
-        [[ -n "$cidr" ]] && printf '%s\n' "$cidr" >>"$tmp_raw"
-      done < <(getent ahosts "$resolve_domain" 2>/dev/null | awk '{print $1}' || true)
-    done < <(ai_resolve_domain_candidates "$domain" | sort -u)
-  done < <(jq -r '.routing.ai.domain_suffix[]? // empty' "$STATE_FILE")
-
-  sort -u "$tmp_raw" >"$tmp_sorted"
-  resolved_count="$(wc -l <"$tmp_sorted" | tr -d '[:space:]')"
-
-  if [[ "${resolved_count:-0}" -gt 0 ]]; then
-    cidrs_json="$(jq -R -s 'split("\n") | map(select(length > 0))' "$tmp_sorted")"
-    state_jq --argjson cidrs "$cidrs_json" --arg ts "$(utc_now)" '
-      .routing.ai.resolved_ip_cidr = $cidrs |
-      .meta.updated_at = $ts
-    '
-    log "AI 分流已刷新 ${resolved_count} 条域名解析 IP 兜底规则。"
-  else
-    warn "未解析到 AI 分流域名 IP，保留上一次的 IP 兜底规则。"
-  fi
-
-  rm -f "$tmp_raw" "$tmp_sorted"
 }
 
 init_realm_state_file() {
@@ -2438,7 +2301,7 @@ validate_state() {
         [[ -n "$ai_reality_public_key" && "$ai_reality_public_key" != "null" ]] || errors+=$'AI 分流 VLESS Reality public key 不能为空。\n'
       fi
     fi
-    [[ "$(state_get '((.routing.ai.domain_suffix // []) + (.routing.ai.domain_keyword // []) + (.routing.ai.ip_cidr // []) + (.routing.ai.resolved_ip_cidr // [])) | length')" -gt 0 ]] || errors+=$'AI 分流规则不能为空。\n'
+    [[ "$(state_get '((.routing.ai.domain_suffix // []) + (.routing.ai.domain_keyword // [])) | length')" -gt 0 ]] || errors+=$'AI 分流域名规则不能为空。\n'
   fi
 
   if [[ -n "$errors" ]]; then
@@ -2456,8 +2319,7 @@ render_config() {
     {
       domain: ($suffix | map(select(contains("."))) | unique),
       domain_suffix: ($suffix | map(select(contains("."))) | map(if startswith(".") then . else "." + . end) | unique),
-      domain_keyword: (.routing.ai.domain_keyword // [] | unique),
-      ip_cidr: (((.routing.ai.ip_cidr // []) + (.routing.ai.resolved_ip_cidr // [])) | unique)
+      domain_keyword: (.routing.ai.domain_keyword // [] | unique)
     };
 
   {
@@ -2623,30 +2485,10 @@ render_config() {
         ),
         (
           if (.routing.ai.enabled // false) then
-            {
-              network: "udp",
-              port: 443,
-              action: "reject",
-              method: "default"
-            }
-          else empty
-          end
-        ),
-        (
-          if (.routing.ai.enabled // false) then
             ai_route_matcher + {
               protocol: "quic",
               action: "reject",
               method: "default"
-            }
-          else empty
-          end
-        ),
-        (
-          if (.routing.ai.enabled // false) then
-            ai_route_matcher + {
-              action: "route-options",
-              udp_disable_domain_unmapping: true
             }
           else empty
           end
@@ -2895,6 +2737,7 @@ apply_config() {
   fi
 
   normalize_protocol_listen_addresses
+<<<<<<< HEAD
   refresh_ai_resolved_ip_cidrs
 <<<<<<< HEAD
 <<<<<<< HEAD
@@ -2910,6 +2753,8 @@ apply_config() {
 >>>>>>> parent of 9c992e4 (Update index.sh)
 =======
 >>>>>>> parent of 9c992e4 (Update index.sh)
+=======
+>>>>>>> parent of 58f9387 (Strengthen mobile AI routing fallback)
   validate_state || return 1
 
   tmp_config="$(mktemp "$TMP_DIR/singbox-config.XXXXXX.json")"
@@ -3269,12 +3114,12 @@ configure_ai_routing() {
 
   server="$(prompt_nonempty "AI 分流落地节点地址" "请输入落地节点地址（域名、IPv4 或 IPv6）" "$current_server")" || return 1
   port="$(prompt_number "AI 分流落地端口" "请输入落地节点端口" "$current_port" 1 65535)" || return 1
-  rules_input="$(prompt_nonempty "AI 分流站点规则" "请输入要走落地的域名、网址、关键词或 IP/CIDR，用逗号/空格分隔；例如 gemini, gpt, claude.ai, 1.2.3.4/32" "$current_rules")" || return 1
+  rules_input="$(prompt_nonempty "AI 分流站点规则" "请输入要走落地的域名、网址或关键词，用逗号/空格分隔；例如 gemini, gpt, claude" "$current_rules")" || return 1
   if ! rules_json="$(build_ai_rules_json "$rules_input")"; then
     ui_msg "AI 分流站点规则解析失败，请检查输入内容后重试。"
     return 1
   fi
-  if ! rules_count="$(printf '%s' "$rules_json" | jq -r '((.domain_suffix // []) + (.domain_keyword // []) + (.ip_cidr // [])) | length')"; then
+  if ! rules_count="$(printf '%s' "$rules_json" | jq -r '((.domain_suffix // []) + (.domain_keyword // [])) | length')"; then
     ui_msg "AI 分流站点规则解析失败，请检查输入内容后重试。"
     return 1
   fi
@@ -3304,8 +3149,6 @@ configure_ai_routing() {
       .routing.ai.network = "tcp" |
       .routing.ai.domain_suffix = $rules.domain_suffix |
       .routing.ai.domain_keyword = $rules.domain_keyword |
-      .routing.ai.ip_cidr = ($rules.ip_cidr // []) |
-      .routing.ai.resolved_ip_cidr = [] |
       .meta.updated_at = $ts
     '
   else
@@ -3353,8 +3196,6 @@ configure_ai_routing() {
       .routing.ai.reality_short_id = $reality_short_id |
       .routing.ai.domain_suffix = $rules.domain_suffix |
       .routing.ai.domain_keyword = $rules.domain_keyword |
-      .routing.ai.ip_cidr = ($rules.ip_cidr // []) |
-      .routing.ai.resolved_ip_cidr = [] |
       .meta.updated_at = $ts
     '
   fi
@@ -3367,9 +3208,7 @@ show_ai_routing_rules() {
   rules_text="$(jq -r '
     [
       (.routing.ai.domain_suffix // [] | map("domain_suffix: " + .)[]?),
-      (.routing.ai.domain_keyword // [] | map("domain_keyword: " + .)[]?),
-      (.routing.ai.ip_cidr // [] | map("ip_cidr: " + .)[]?),
-      (.routing.ai.resolved_ip_cidr // [] | map("resolved_ip_cidr: " + .)[]?)
+      (.routing.ai.domain_keyword // [] | map("domain_keyword: " + .)[]?)
     ] | if length == 0 then "当前没有 AI 分流站点规则。" else join("\n") end
   ' "$STATE_FILE")"
 
@@ -3401,14 +3240,14 @@ append_ai_routing_rules() {
   if (( $# > 0 )); then
     rules_input="$*"
   else
-    rules_input="$(prompt_nonempty "新增 AI 分流规则" "请输入要追加的域名、网址、关键词或 IP/CIDR，用逗号/空格分隔；例如 openai.com, gemini, claude.ai, 1.2.3.4/32" "")" || return 1
+    rules_input="$(prompt_nonempty "新增 AI 分流规则" "请输入要追加的域名、网址或关键词，用逗号/空格分隔；例如 openai.com, gemini, claude.ai" "")" || return 1
   fi
 
   if ! rules_json="$(build_ai_rules_json "$rules_input")"; then
     ui_msg "AI 分流规则解析失败，请检查输入内容后重试。"
     return 1
   fi
-  if ! rules_count="$(printf '%s' "$rules_json" | jq -r '((.domain_suffix // []) + (.domain_keyword // []) + (.ip_cidr // [])) | length')"; then
+  if ! rules_count="$(printf '%s' "$rules_json" | jq -r '((.domain_suffix // []) + (.domain_keyword // [])) | length')"; then
     ui_msg "AI 分流规则解析失败，请检查输入内容后重试。"
     return 1
   fi
@@ -3420,7 +3259,6 @@ append_ai_routing_rules() {
   state_jq --argjson rules "$rules_json" --arg ts "$(utc_now)" '
     .routing.ai.domain_suffix = (((.routing.ai.domain_suffix // []) + ($rules.domain_suffix // [])) | unique) |
     .routing.ai.domain_keyword = (((.routing.ai.domain_keyword // []) + ($rules.domain_keyword // [])) | unique) |
-    .routing.ai.ip_cidr = (((.routing.ai.ip_cidr // []) + ($rules.ip_cidr // [])) | unique) |
     .meta.updated_at = $ts
   '
 
@@ -3433,7 +3271,7 @@ delete_ai_routing_rule() {
   local -a rule_values=()
   local -a options=()
 
-  total_count="$(state_get '((.routing.ai.domain_suffix // []) + (.routing.ai.domain_keyword // []) + (.routing.ai.ip_cidr // [])) | length')"
+  total_count="$(state_get '((.routing.ai.domain_suffix // []) + (.routing.ai.domain_keyword // [])) | length')"
   if [[ "$total_count" -eq 0 ]]; then
     ui_msg "当前没有可删除的 AI 分流站点规则。"
     return 0
@@ -3446,8 +3284,7 @@ delete_ai_routing_rule() {
     options+=("${#rule_values[@]}" "${selected_kind}: ${selected_rule}")
   done < <(jq -r '
     (.routing.ai.domain_suffix // [] | .[] | ["domain_suffix", .] | @tsv),
-    (.routing.ai.domain_keyword // [] | .[] | ["domain_keyword", .] | @tsv),
-    (.routing.ai.ip_cidr // [] | .[] | ["ip_cidr", .] | @tsv)
+    (.routing.ai.domain_keyword // [] | .[] | ["domain_keyword", .] | @tsv)
   ' "$STATE_FILE")
 
   options+=("0" "返回")
@@ -3473,16 +3310,12 @@ delete_ai_routing_rule() {
       .routing.ai.enabled = false |
       .routing.ai.domain_suffix = [] |
       .routing.ai.domain_keyword = [] |
-      .routing.ai.ip_cidr = [] |
-      .routing.ai.resolved_ip_cidr = [] |
       .meta.updated_at = $ts
     '
   else
     state_jq --arg kind "$selected_kind" --arg rule "$selected_rule" --arg ts "$(utc_now)" '
       if $kind == "domain_suffix" then
         .routing.ai.domain_suffix |= map(select(. != $rule))
-      elif $kind == "ip_cidr" then
-        .routing.ai.ip_cidr |= map(select(. != $rule))
       else
         .routing.ai.domain_keyword |= map(select(. != $rule))
       end |

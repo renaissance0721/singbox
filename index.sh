@@ -21,7 +21,7 @@ set -Eeuo pipefail
 
 ORIGINAL_ARGS=("$@")
 SELF_PATH="${BASH_SOURCE[0]}"
-SCRIPT_VERSION="0.2.0"
+SCRIPT_VERSION="0.2.1"
 SCRIPT_NAME="${0##*/}"
 APP_TITLE="Sing-box 管理面板 | 输入 sbox 快捷打开脚本"
 STATE_DIR="${STATE_DIR:-/etc/sing-box-manager}"
@@ -428,6 +428,42 @@ install_grpcurl_if_missing() {
   GOBIN=/usr/local/bin "$go_bin" install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest || warn "grpcurl 安装失败；后续仍可手动安装 grpcurl、v2ray 或 xray 查询流量。"
 }
 
+file_checksum() {
+  local file=$1
+  if have_cmd sha256sum; then
+    sha256sum "$file" 2>/dev/null | awk '{print $1}'
+  elif have_cmd cksum; then
+    cksum "$file" 2>/dev/null | awk '{print $1 ":" $2}'
+  else
+    printf 'unknown\n'
+  fi
+}
+
+replace_sing_box_binary() {
+  local source_bin=$1
+  local target_path=$2
+  local tmp_target backup_bin before_sum after_sum version_text
+
+  mkdir -p "$(dirname "$target_path")"
+  before_sum="missing"
+  if [[ -e "$target_path" ]]; then
+    before_sum="$(file_checksum "$target_path")"
+    backup_bin="${target_path}.bak.$(date +%Y%m%d-%H%M%S)"
+    cp -a "$target_path" "$backup_bin"
+    printf '%s\n' "$backup_bin"
+  fi
+
+  tmp_target="${target_path}.new.$$"
+  install -m 755 "$source_bin" "$tmp_target"
+  mv -f "$tmp_target" "$target_path"
+  chmod 755 "$target_path"
+  sync "$target_path" 2>/dev/null || sync 2>/dev/null || true
+
+  after_sum="$(file_checksum "$target_path")"
+  version_text="$("$target_path" version 2>/dev/null | head -n 1 || true)"
+  log "已替换 ${target_path}：${before_sum} -> ${after_sum}；${version_text:-version unknown}"
+}
+
 install_sing_box_with_v2ray_api() {
   local target_bin cli_bin service_bin backup_bin tmp_dir src_dir build_ref go_bin build_tags ldflags tmp_bin check_output listen_addr success_text
   local path backup_paths=""
@@ -511,14 +547,10 @@ EOF
 
   stop_sing_box
   for path in "${install_paths[@]}"; do
-    mkdir -p "$(dirname "$path")"
-    backup_bin=""
-    if [[ -f "$path" ]]; then
-      backup_bin="${path}.bak.$(date +%Y%m%d-%H%M%S)"
-      cp "$path" "$backup_bin"
+    backup_bin="$(replace_sing_box_binary "$tmp_bin" "$path" | tail -n 1)"
+    if [[ -n "$backup_bin" ]]; then
       backup_paths+=$'\n'"$backup_bin"
     fi
-    install -m 755 "$tmp_bin" "$path"
   done
   hash -r 2>/dev/null || true
   rm -rf "$tmp_dir"

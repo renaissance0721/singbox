@@ -21,7 +21,7 @@ set -Eeuo pipefail
 
 ORIGINAL_ARGS=("$@")
 SELF_PATH="${BASH_SOURCE[0]}"
-SCRIPT_VERSION="0.2.3"
+SCRIPT_VERSION="0.2.4"
 SCRIPT_NAME="${0##*/}"
 APP_TITLE="Sing-box 管理面板 | 输入 sbox 快捷打开脚本"
 STATE_DIR="${STATE_DIR:-/etc/sing-box-manager}"
@@ -428,6 +428,33 @@ install_grpcurl_if_missing() {
   GOBIN=/usr/local/bin "$go_bin" install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest || warn "grpcurl 安装失败；后续仍可手动安装 grpcurl、v2ray 或 xray 查询流量。"
 }
 
+ensure_build_swap() {
+  local mem_kb swap_kb swap_file="/swapfile-sbox-build"
+
+  [[ "${SBOX_SKIP_BUILD_SWAP:-0}" == "1" ]] && return 0
+  [[ -r /proc/meminfo ]] || return 0
+
+  mem_kb="$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo)"
+  swap_kb="$(awk '/^SwapTotal:/ {print $2; exit}' /proc/meminfo)"
+  [[ -n "$mem_kb" && -n "$swap_kb" ]] || return 0
+
+  if (( mem_kb >= 1500000 || swap_kb >= 1000000 )); then
+    return 0
+  fi
+
+  log "检测到内存较小且 swap 不足，创建 2G 临时编译 swap：$swap_file"
+  if [[ ! -f "$swap_file" ]]; then
+    if have_cmd fallocate; then
+      fallocate -l 2G "$swap_file" || dd if=/dev/zero of="$swap_file" bs=1M count=2048
+    else
+      dd if=/dev/zero of="$swap_file" bs=1M count=2048
+    fi
+    chmod 600 "$swap_file"
+    mkswap "$swap_file" >/dev/null
+  fi
+  swapon "$swap_file" 2>/dev/null || true
+}
+
 file_checksum() {
   local file=$1
   if have_cmd sha256sum; then
@@ -478,6 +505,7 @@ install_sing_box_with_v2ray_api() {
   fi
   install_build_dependencies
   install_go_toolchain
+  ensure_build_swap
 
   go_bin="$(command -v go 2>/dev/null || true)"
   [[ -n "$go_bin" && -x "$go_bin" ]] || die "Go 安装失败，未找到 go 命令。"
@@ -520,9 +548,17 @@ install_sing_box_with_v2ray_api() {
 
   log "开始编译 sing-box ${build_ref}（包含 with_v2ray_api）..."
   if [[ -n "$ldflags" ]]; then
-    (cd "$src_dir" && GOTOOLCHAIN=auto "$go_bin" build -v -trimpath -tags "$build_tags" -ldflags "$ldflags" -o "$tmp_bin" ./cmd/sing-box)
+    if ! (cd "$src_dir" && GOTOOLCHAIN=auto "$go_bin" build -v -trimpath -tags "$build_tags" -ldflags "$ldflags" -o "$tmp_bin" ./cmd/sing-box); then
+      rm -rf "$tmp_dir"
+      ui_msg "编译 sing-box 失败。请查看本次安装日志，常见原因是内存不足、磁盘空间不足或网络下载 Go 依赖失败。"
+      return 1
+    fi
   else
-    (cd "$src_dir" && GOTOOLCHAIN=auto "$go_bin" build -v -trimpath -tags "$build_tags" -o "$tmp_bin" ./cmd/sing-box)
+    if ! (cd "$src_dir" && GOTOOLCHAIN=auto "$go_bin" build -v -trimpath -tags "$build_tags" -o "$tmp_bin" ./cmd/sing-box); then
+      rm -rf "$tmp_dir"
+      ui_msg "编译 sing-box 失败。请查看本次安装日志，常见原因是内存不足、磁盘空间不足或网络下载 Go 依赖失败。"
+      return 1
+    fi
   fi
   [[ -x "$tmp_bin" ]] || {
     rm -rf "$tmp_dir"
@@ -3383,7 +3419,7 @@ fresh_install() {
   rm -f "$REALM_SERVICE_FILE" /lib/systemd/system/realm.service /usr/lib/systemd/system/realm.service /etc/systemd/system/multi-user.target.wants/realm.service 2>/dev/null || true
   rm -f "$CLIENT_ENFORCE_SERVICE_FILE" "$CLIENT_ENFORCE_TIMER_FILE" 2>/dev/null || true
   rm -rf /etc/sing-box "$REALM_DIR" "$STATE_DIR" 2>/dev/null || true
-  rm -f /usr/bin/sing-box /usr/local/bin/sing-box "$REALM_BIN" 2>/dev/null || true
+  rm -f "$REALM_BIN" 2>/dev/null || true
 
   if have_cmd systemctl; then
     systemctl daemon-reload >/dev/null 2>&1 || true
@@ -3395,6 +3431,8 @@ fresh_install() {
   ensure_dirs
   init_state_file
   quick_install
+
+  rm -f /usr/bin/sing-box.bak.* /usr/local/bin/sing-box.bak.* 2>/dev/null || true
 
   check_bin="$(sing_box_check_bin 2>/dev/null || true)"
   if [[ -z "$check_bin" ]] || sing_box_v2ray_api_unavailable "$check_bin"; then

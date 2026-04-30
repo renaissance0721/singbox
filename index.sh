@@ -3183,11 +3183,6 @@ apply_realm_config() {
 write_client_exports() {
   local all_file server_address host links_file node_name link display_name
   all_file="$CLIENT_DIR/all-clients.txt"
-
-  if [[ "$(enabled_protocol_count)" -gt 0 ]]; then
-    set_server_address_if_empty || return 1
-  fi
-
   server_address="$(state_get '.meta.server_address')"
   host="$(format_uri_host "$server_address")"
   node_name="$(state_get '.meta.node_name')"
@@ -3305,7 +3300,6 @@ apply_config() {
     return 0
   fi
 
-  set_server_address_if_empty || return 1
   normalize_protocol_listen_addresses
   refresh_ai_resolved_ip_cidrs
   refresh_client_traffic_usage >/dev/null 2>&1 || true

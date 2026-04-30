@@ -2042,6 +2042,9 @@ repair_install() {
   local manager_target
   require_linux
   require_root
+  if is_interactive; then
+    export SBOX_REPAIR_OPEN_PANEL="${SBOX_REPAIR_OPEN_PANEL:-1}"
+  fi
   ensure_dirs
   init_state_file
   install_dependencies

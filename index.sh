@@ -299,348 +299,90 @@ install_dependencies() {
   init_ui
 }
 
-install_build_dependencies() {
-  detect_pkg_manager
-
-  case "$PKG_MANAGER" in
-    apt)
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update -y
-      apt-get install -y curl jq openssl ca-certificates whiptail uuid-runtime iproute2 git build-essential tar gzip
-      ;;
-    dnf)
-      dnf install -y curl jq openssl ca-certificates newt util-linux iproute git make gcc gcc-c++ tar gzip
-      ;;
-    yum)
-      yum install -y epel-release || true
-      yum install -y curl jq openssl ca-certificates newt util-linux iproute git make gcc gcc-c++ tar gzip
-      ;;
-    *)
-      die "暂不支持自动安装编译依赖，请手动安装 curl、git、Go、gcc、make、tar、jq 后再运行。"
-      ;;
-  esac
-
-  init_ui
-}
-
-detect_go_arch() {
-  case "$(uname -m)" in
-    x86_64|amd64)
-      printf 'amd64\n'
-      ;;
-    aarch64|arm64)
-      printf 'arm64\n'
-      ;;
-    armv6l|armv7l)
-      printf 'armv6l\n'
-      ;;
-    i386|i686)
-      printf '386\n'
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-latest_go_version() {
-  local version
-  version="${SINGBOX_GO_VERSION:-}"
-  if [[ -z "$version" ]] && have_cmd curl; then
-    version="$(curl -fsSL --max-time 10 https://go.dev/VERSION?m=text 2>/dev/null | head -n 1 | sed 's/^go//' || true)"
-  fi
-  printf '%s\n' "${version:-1.26.2}"
-}
-
-version_at_least() {
-  local current=$1
-  local required=$2
-  [[ "$(printf '%s\n%s\n' "$required" "$current" | sort -V | head -n 1)" == "$required" ]]
-}
-
-go_version_value() {
-  go version 2>/dev/null | awk '{print $3}' | sed 's/^go//'
-}
-
-install_go_toolchain() {
-  local go_version go_arch archive_url archive_path current_go_version
-
-  if [[ -x /usr/local/go/bin/go ]]; then
-    export PATH="/usr/local/go/bin:$PATH"
-  fi
-  if have_cmd go; then
-    current_go_version="$(go_version_value)"
-    if [[ -n "$current_go_version" ]] && version_at_least "$current_go_version" "1.23.1"; then
-      log "检测到 Go ${current_go_version}，直接用于编译。"
-      return 0
-    fi
-  fi
-
-  go_arch="$(detect_go_arch)" || die "当前架构暂不支持自动安装 Go：$(uname -m)"
-  go_version="$(latest_go_version)"
-  archive_url="https://go.dev/dl/go${go_version}.linux-${go_arch}.tar.gz"
-  archive_path="$TMP_DIR/go${go_version}.linux-${go_arch}.tar.gz"
-
-  log "安装 Go ${go_version} (${go_arch})..."
-  curl -fsSL "$archive_url" -o "$archive_path"
-  rm -rf /usr/local/go
-  tar -C /usr/local -xzf "$archive_path"
-  rm -f "$archive_path"
-  export PATH="/usr/local/go/bin:$PATH"
-  printf 'export PATH="/usr/local/go/bin:$PATH"\n' >/etc/profile.d/go.sh
-}
-
-sing_box_version_value() {
-  local target_bin=${1:-sing-box}
-  "$target_bin" version 2>/dev/null | awk '/^sing-box version / {print $3; exit}'
-}
-
-resolve_sing_box_build_ref() {
-  local src_dir=$1
-  local target_bin=${2:-}
-  local current_version desired_ref
-
-  desired_ref="${SINGBOX_BUILD_VERSION:-}"
-  if [[ -n "$desired_ref" ]]; then
-    desired_ref="${desired_ref#v}"
-    printf 'v%s\n' "$desired_ref"
-    return 0
-  fi
-
-  current_version="$(sing_box_version_value "${target_bin:-$(command -v sing-box 2>/dev/null || printf 'sing-box')}")"
-  if [[ -n "$current_version" ]] && git -C "$src_dir" rev-parse "v${current_version}^{commit}" >/dev/null 2>&1; then
-    printf 'v%s\n' "$current_version"
-    return 0
-  fi
-
-  git -C "$src_dir" tag -l 'v*' --sort=-version:refname | grep -v -- '-' | head -n 1
-}
-
-install_grpcurl_if_missing() {
-  local go_bin=${1:-/usr/local/go/bin/go}
-
-  have_cmd grpcurl && return 0
-  [[ -x "$go_bin" ]] || return 0
-
-  log "安装 grpcurl，用于读取 V2Ray API 流量统计..."
-  GOBIN=/usr/local/bin "$go_bin" install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest || warn "grpcurl 安装失败；后续仍可手动安装 grpcurl、v2ray 或 xray 查询流量。"
-}
-
-ensure_build_swap() {
-  local mem_kb swap_kb swap_file="/swapfile-sbox-build"
-
-  [[ "${SBOX_SKIP_BUILD_SWAP:-0}" == "1" ]] && return 0
-  [[ -r /proc/meminfo ]] || return 0
-
-  mem_kb="$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo)"
-  swap_kb="$(awk '/^SwapTotal:/ {print $2; exit}' /proc/meminfo)"
-  [[ -n "$mem_kb" && -n "$swap_kb" ]] || return 0
-
-  if (( mem_kb >= 1500000 || swap_kb >= 1000000 )); then
-    return 0
-  fi
-
-  log "检测到内存较小且 swap 不足，创建 2G 临时编译 swap：$swap_file"
-  if [[ ! -f "$swap_file" ]]; then
-    if have_cmd fallocate; then
-      fallocate -l 2G "$swap_file" || dd if=/dev/zero of="$swap_file" bs=1M count=2048
-    else
-      dd if=/dev/zero of="$swap_file" bs=1M count=2048
-    fi
-    chmod 600 "$swap_file"
-    mkswap "$swap_file" >/dev/null
-  fi
-  swapon "$swap_file" 2>/dev/null || true
-}
-
-file_checksum() {
-  local file=$1
-  if have_cmd sha256sum; then
-    sha256sum "$file" 2>/dev/null | awk '{print $1}'
-  elif have_cmd cksum; then
-    cksum "$file" 2>/dev/null | awk '{print $1 ":" $2}'
-  else
-    printf 'unknown\n'
-  fi
-}
-
-replace_sing_box_binary() {
-  local source_bin=$1
-  local target_path=$2
-  local tmp_target backup_bin before_sum after_sum version_text
-
-  mkdir -p "$(dirname "$target_path")"
-  before_sum="missing"
-  if [[ -e "$target_path" ]]; then
-    before_sum="$(file_checksum "$target_path")"
-    backup_bin="${target_path}.bak.$(date +%Y%m%d-%H%M%S)"
-    cp -a "$target_path" "$backup_bin"
-    printf '%s\n' "$backup_bin"
-  fi
-
-  tmp_target="${target_path}.new.$$"
-  install -m 755 "$source_bin" "$tmp_target"
-  mv -f "$tmp_target" "$target_path"
-  chmod 755 "$target_path"
-  sync "$target_path" 2>/dev/null || sync 2>/dev/null || true
-
-  after_sum="$(file_checksum "$target_path")"
-  version_text="$("$target_path" version 2>/dev/null | head -n 1 || true)"
-  log "已替换 ${target_path}：${before_sum} -> ${after_sum}；${version_text:-version unknown}"
-}
-
-install_sing_box_with_v2ray_api() {
-  local install_mode=${1:-interactive}
-  local target_bin cli_bin service_bin backup_bin tmp_dir src_dir build_ref go_bin build_tags ldflags tmp_bin check_output listen_addr success_text
-  local path backup_paths=""
-  local -a install_paths=()
-
-  require_linux
-  require_root
-  ensure_dirs
-  if [[ "$install_mode" != "core" ]]; then
-    init_state_file
-  fi
-  install_build_dependencies
-  install_go_toolchain
-  ensure_build_swap
-
-  go_bin="$(command -v go 2>/dev/null || true)"
-  [[ -n "$go_bin" && -x "$go_bin" ]] || die "Go 安装失败，未找到 go 命令。"
-
-  service_bin="$(sing_box_service_exec_path 2>/dev/null || true)"
-  cli_bin="$(command -v sing-box 2>/dev/null || true)"
-  target_bin="${service_bin:-${cli_bin:-/usr/bin/sing-box}}"
-  install_paths+=("$target_bin")
-  if [[ -n "$cli_bin" && "$cli_bin" != "$target_bin" ]]; then
-    install_paths+=("$cli_bin")
-  fi
-
-  tmp_dir="$(mktemp -d "$TMP_DIR/sbox-build.XXXXXX")"
-  src_dir="$tmp_dir/sing-box"
-  tmp_bin="$tmp_dir/sing-box-bin"
-
-  log "拉取 sing-box 源码..."
-  git clone https://github.com/SagerNet/sing-box.git "$src_dir" >/dev/null 2>&1 || {
-    rm -rf "$tmp_dir"
-    die "拉取 sing-box 源码失败。"
-  }
-  git -C "$src_dir" fetch --tags --force >/dev/null 2>&1 || true
-
-  build_ref="$(resolve_sing_box_build_ref "$src_dir" "$target_bin")"
-  [[ -n "$build_ref" ]] || {
-    rm -rf "$tmp_dir"
-    die "无法确定 sing-box 构建版本。"
-  }
-  git -C "$src_dir" checkout "$build_ref" >/dev/null 2>&1 || {
-    rm -rf "$tmp_dir"
-    die "切换 sing-box 源码版本 ${build_ref} 失败。"
-  }
-
-  build_tags="$(tr '\n' ' ' <"$src_dir/release/DEFAULT_BUILD_TAGS" 2>/dev/null || true)"
-  case " $build_tags " in
-    *" with_v2ray_api "*) ;;
-    *) build_tags="${build_tags} with_v2ray_api" ;;
-  esac
-  ldflags="$(tr '\n' ' ' <"$src_dir/release/LDFLAGS" 2>/dev/null || true)"
-
-  log "开始编译 sing-box ${build_ref}（包含 with_v2ray_api）..."
-  if [[ -n "$ldflags" ]]; then
-    if ! (cd "$src_dir" && GOTOOLCHAIN=auto "$go_bin" build -v -trimpath -tags "$build_tags" -ldflags "$ldflags" -o "$tmp_bin" ./cmd/sing-box); then
-      rm -rf "$tmp_dir"
-      ui_msg "编译 sing-box 失败。请查看本次安装日志，常见原因是内存不足、磁盘空间不足或网络下载 Go 依赖失败。"
-      return 1
-    fi
-  else
-    if ! (cd "$src_dir" && GOTOOLCHAIN=auto "$go_bin" build -v -trimpath -tags "$build_tags" -o "$tmp_bin" ./cmd/sing-box); then
-      rm -rf "$tmp_dir"
-      ui_msg "编译 sing-box 失败。请查看本次安装日志，常见原因是内存不足、磁盘空间不足或网络下载 Go 依赖失败。"
-      return 1
-    fi
-  fi
-  [[ -x "$tmp_bin" ]] || {
-    rm -rf "$tmp_dir"
-    die "编译 sing-box 失败。"
-  }
-
-  if ! check_output="$("$tmp_bin" check -c <(cat <<'EOF'
-{
-  "log": {"level": "error"},
-  "outbounds": [{"type": "direct", "tag": "direct"}],
-  "route": {"final": "direct"},
-  "experimental": {
-    "v2ray_api": {
-      "listen": "127.0.0.1:10085",
-      "stats": {"enabled": true, "users": []}
-    }
-  }
-}
+install_sing_box_apt_repo() {
+  mkdir -p /etc/apt/keyrings || return 1
+  curl -fsSL https://sing-box.app/gpg.key -o /etc/apt/keyrings/sagernet.asc || return 1
+  chmod a+r /etc/apt/keyrings/sagernet.asc || return 1
+  cat >/etc/apt/sources.list.d/sagernet.sources <<'EOF' || return 1
+Types: deb
+URIs: https://deb.sagernet.org/
+Suites: *
+Components: *
+Enabled: yes
+Signed-By: /etc/apt/keyrings/sagernet.asc
 EOF
-) 2>&1)"; then
-    rm -rf "$tmp_dir"
-    ui_show_text "sing-box 编译验证失败" "$check_output"
+
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y || return 1
+  apt-get install -y sing-box || return 1
+}
+
+install_sing_box_rpm_repo() {
+  local manager=$1
+
+  if [[ "$manager" == "dnf" ]]; then
+    dnf install -y dnf-plugins-core >/dev/null 2>&1 || true
+    dnf config-manager addrepo --from-repofile=https://sing-box.app/sing-box.repo >/dev/null 2>&1 ||
+      dnf config-manager --add-repo https://sing-box.app/sing-box.repo >/dev/null 2>&1 ||
+      return 1
+    dnf install -y sing-box || return 1
+    return $?
+  fi
+
+  yum install -y yum-utils >/dev/null 2>&1 || true
+  if have_cmd yum-config-manager; then
+    yum-config-manager --add-repo https://sing-box.app/sing-box.repo >/dev/null 2>&1 || return 1
+    yum install -y sing-box || return 1
+    return $?
+  fi
+
+  return 1
+}
+
+install_sing_box_official_script() {
+  local tmp_script
+  tmp_script="$(mktemp "$TMP_DIR/sing-box-official-install.XXXXXX.sh")"
+  if ! download_to_file "$tmp_script" "https://sing-box.app/install.sh"; then
+    rm -f "$tmp_script"
     return 1
   fi
 
-  stop_sing_box
-  for path in "${install_paths[@]}"; do
-    backup_bin="$(replace_sing_box_binary "$tmp_bin" "$path" | tail -n 1)"
-    if [[ -n "$backup_bin" ]]; then
-      backup_paths+=$'\n'"$backup_bin"
-    fi
-  done
-  hash -r 2>/dev/null || true
-  rm -rf "$tmp_dir"
-  ensure_sing_box_service
-  install_grpcurl_if_missing "$go_bin"
-
-  for path in "${install_paths[@]}"; do
-    if sing_box_v2ray_api_unavailable "$path"; then
-      ui_show_text "sing-box 替换失败" "已尝试替换 ${path}，但该路径下的 sing-box 仍不支持 with_v2ray_api。\n\n请检查安装日志、磁盘空间、文件权限，或在更高配置机器上编译后手动上传替换。"
-      return 1
-    fi
-  done
-
-  if [[ "$install_mode" == "core" ]]; then
-    if has_systemd; then
-      systemctl enable sing-box >/dev/null 2>&1 || true
-    fi
-    log "已安装支持 with_v2ray_api 的 sing-box：$(IFS=', '; printf '%s' "${install_paths[*]}")"
-    return 0
-  fi
-
-  listen_addr="$(state_get '.traffic_stats.v2ray_api_listen // "127.0.0.1:10085"')"
-  if ui_yesno "已安装支持流量统计的 sing-box。是否立即启用 V2Ray API 流量统计？监听地址：${listen_addr}"; then
-    state_jq --arg listen "$listen_addr" --arg ts "$(utc_now)" '
-      .traffic_stats.enabled = true |
-      .traffic_stats.v2ray_api_listen = $listen |
-      .meta.updated_at = $ts
-    '
-  fi
-
-  ensure_client_enforce_timer
-  apply_config || {
-    if [[ -n "$backup_paths" ]]; then
-      warn "新 sing-box 应用配置失败，已保留备份：$backup_paths"
-    fi
+  sh "$tmp_script" || {
+    rm -f "$tmp_script"
     return 1
   }
-
-  success_text="已切换到支持 with_v2ray_api 的 sing-box：$(IFS=', '; printf '%s' "${install_paths[*]}")"
-  if [[ -n "$backup_paths" ]]; then
-    success_text+=$'\n'"旧版本备份：$backup_paths"
-  fi
-  ui_msg "$success_text"
+  rm -f "$tmp_script"
 }
 
 install_sing_box() {
-  if have_cmd sing-box; then
-    log "检测到 sing-box 已安装，将编译并替换为支持 with_v2ray_api 的版本..."
-  else
-    log "开始从源码编译安装支持 with_v2ray_api 的 sing-box..."
+  local installed=0 version_text=""
+
+  detect_pkg_manager
+  log "安装官方原生 sing-box 软件包..."
+
+  case "$PKG_MANAGER" in
+    apt)
+      install_sing_box_apt_repo && installed=1
+      ;;
+    dnf|yum)
+      install_sing_box_rpm_repo "$PKG_MANAGER" && installed=1
+      ;;
+  esac
+
+  if (( ! installed )); then
+    log "官方仓库安装未完成，改用 sing-box 官方安装脚本。"
+    install_sing_box_official_script || die "安装官方 sing-box 失败。"
   fi
 
-  install_sing_box_with_v2ray_api core
+  hash -r 2>/dev/null || true
+  have_cmd sing-box || die "安装完成后仍未找到 sing-box 命令。"
+  ensure_sing_box_service
+  if has_systemd; then
+    systemctl enable sing-box >/dev/null 2>&1 || true
+  fi
+
+  version_text="$(sing-box version 2>/dev/null | head -n 1 || true)"
+  log "sing-box 已安装：${version_text:-version unknown}"
 }
 
 has_systemd() {
@@ -744,125 +486,6 @@ restart_sing_box() {
   else
     warn "未检测到 sing-box systemd 服务，请手动启动 sing-box。"
   fi
-}
-
-sing_box_v2ray_api_unavailable() {
-  local target_bin tmp_config check_output
-
-  target_bin="${1:-}"
-  if [[ -z "$target_bin" ]]; then
-    target_bin="$(sing_box_check_bin 2>/dev/null || true)"
-  fi
-  [[ -n "$target_bin" && -x "$target_bin" ]] || return 1
-
-  tmp_config="$(mktemp "$TMP_DIR/sbox-v2ray-api-check.XXXXXX.json")"
-  cat >"$tmp_config" <<EOF
-{
-  "log": {
-    "level": "error"
-  },
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct"
-    }
-  ],
-  "route": {
-    "final": "direct"
-  },
-  "experimental": {
-    "v2ray_api": {
-      "listen": "127.0.0.1:10085",
-      "stats": {
-        "enabled": true,
-        "users": []
-      }
-    }
-  }
-}
-EOF
-
-  if check_output="$("$target_bin" check -c "$tmp_config" 2>&1)"; then
-    rm -f "$tmp_config"
-    return 1
-  fi
-  rm -f "$tmp_config"
-
-  [[ "$check_output" == *"v2ray api is not included"* || "$check_output" == *"with_v2ray_api"* ]]
-}
-
-show_v2ray_api_diagnostics() {
-  local cli_bin service_bin check_bin path tmp_config check_output status output version_text
-  local -a paths=()
-
-  cli_bin="$(command -v sing-box 2>/dev/null || true)"
-  service_bin="$(sing_box_service_exec_path 2>/dev/null || true)"
-  check_bin="$(sing_box_check_bin 2>/dev/null || true)"
-
-  [[ -n "$service_bin" ]] && paths+=("$service_bin")
-  [[ -n "$cli_bin" ]] && paths+=("$cli_bin")
-  [[ -x /usr/bin/sing-box ]] && paths+=("/usr/bin/sing-box")
-  [[ -x /usr/local/bin/sing-box ]] && paths+=("/usr/local/bin/sing-box")
-
-  tmp_config="$(mktemp "$TMP_DIR/sbox-v2ray-api-diagnose.XXXXXX.json")"
-  cat >"$tmp_config" <<EOF
-{
-  "log": {
-    "level": "error"
-  },
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct"
-    }
-  ],
-  "route": {
-    "final": "direct"
-  },
-  "experimental": {
-    "v2ray_api": {
-      "listen": "127.0.0.1:10085",
-      "stats": {
-        "enabled": true,
-        "users": []
-      }
-    }
-  }
-}
-EOF
-
-  output=$(
-    cat <<EOF
-[Paths]
-command -v sing-box = ${cli_bin:-未找到}
-systemd ExecStart = ${service_bin:-未找到}
-配置检查使用 = ${check_bin:-未找到}
-
-[Service]
-$(systemctl cat sing-box 2>/dev/null | sed -n '/ExecStart=/p' || true)
-
-[V2Ray API Check]
-EOF
-  )
-
-  while IFS= read -r path; do
-    [[ -n "$path" && -x "$path" ]] || continue
-    version_text="$("$path" version 2>/dev/null | head -n 1 || true)"
-    if check_output="$("$path" check -c "$tmp_config" 2>&1)"; then
-      status="支持 with_v2ray_api"
-      check_output="check ok"
-    else
-      status="不支持或检查失败"
-    fi
-    output+=$'\n'"- $path"
-    output+=$'\n'"  version: ${version_text:-未知}"
-    output+=$'\n'"  status: $status"
-    output+=$'\n'"  output: $check_output"
-  done < <(printf '%s\n' "${paths[@]}" | awk 'NF && !seen[$0]++')
-
-  rm -f "$tmp_config"
-
-  ui_show_text "V2Ray API 诊断" "$output"
 }
 
 stop_sing_box() {
@@ -1136,6 +759,18 @@ state_jq() {
   mv "$tmp_file" "$STATE_FILE"
 }
 
+cleanup_removed_traffic_state() {
+  state_jq --arg ts "$(utc_now)" '
+    def cleanup_users:
+      map(del(.traffic_limit_gb, .traffic_used_bytes, .traffic_last_api_bytes, .expires_at));
+    del(.traffic_stats) |
+    .protocols.shadowsocks.users = ((.protocols.shadowsocks.users // []) | cleanup_users) |
+    .protocols.vless_reality.users = ((.protocols.vless_reality.users // []) | cleanup_users) |
+    .protocols.hysteria2.users = ((.protocols.hysteria2.users // []) | cleanup_users) |
+    .meta.updated_at = $ts
+  '
+}
+
 migrate_state_schema() {
   if jq -e '
     (.routing.ai.enabled? != null)
@@ -1150,6 +785,7 @@ migrate_state_schema() {
     and (.routing.ai.reality_public_key? != null)
     and (.routing.ai.reality_short_id? != null)
   ' "$STATE_FILE" >/dev/null 2>&1; then
+    cleanup_removed_traffic_state
     return 0
   fi
 
@@ -1200,6 +836,8 @@ migrate_state_schema() {
     ]) |
     .meta.updated_at = $ts
   '
+
+  cleanup_removed_traffic_state
 }
 
 format_ai_rule_list() {
@@ -1647,434 +1285,6 @@ select_protocol_user() {
   selected_index=$((choice - 1))
   (( selected_index >= 0 && selected_index < ${#users[@]} )) || return 1
   printf '%s\n' "${users[$selected_index]}"
-}
-
-select_client_with_protocol() {
-  local title=$1
-  local prompt=$2
-  local choice selected_index name
-  local -a protocols=()
-  local -a names=()
-  local -a options=()
-
-  while IFS= read -r name; do
-    [[ -n "$name" ]] || continue
-    protocols+=("shadowsocks")
-    names+=("$name")
-    options+=("${#names[@]}" "Shadowsocks 2022 / ${name}")
-  done < <(jq -r '.protocols.shadowsocks.users[]?.name' "$STATE_FILE")
-
-  while IFS= read -r name; do
-    [[ -n "$name" ]] || continue
-    protocols+=("vless_reality")
-    names+=("$name")
-    options+=("${#names[@]}" "VLESS + Reality / ${name}")
-  done < <(jq -r '.protocols.vless_reality.users[]?.name' "$STATE_FILE")
-
-  while IFS= read -r name; do
-    [[ -n "$name" ]] || continue
-    protocols+=("hysteria2")
-    names+=("$name")
-    options+=("${#names[@]}" "Hysteria2 / ${name}")
-  done < <(jq -r '.protocols.hysteria2.users[]?.name' "$STATE_FILE")
-
-  if (( ${#names[@]} == 0 )); then
-    ui_msg "当前还没有客户端。"
-    return 1
-  fi
-
-  options+=("0" "返回")
-  choice="$(ui_menu "$title" "$prompt" "${options[@]}")" || return 1
-  [[ "$choice" == "0" ]] && return 1
-  [[ "$choice" =~ ^[0-9]+$ ]] || return 1
-
-  selected_index=$((choice - 1))
-  (( selected_index >= 0 && selected_index < ${#names[@]} )) || return 1
-  printf '%s\t%s\n' "${protocols[$selected_index]}" "${names[$selected_index]}"
-}
-
-stats_value_to_bytes() {
-  local value=${1:-0}
-  local unit=${2:-B}
-  awk -v value="$value" -v unit="$unit" '
-    BEGIN {
-      unit = toupper(unit)
-      gsub(/ /, "", unit)
-      if (unit == "" || unit == "B") multiplier = 1
-      else if (unit == "KB" || unit == "KIB") multiplier = 1024
-      else if (unit == "MB" || unit == "MIB") multiplier = 1024 * 1024
-      else if (unit == "GB" || unit == "GIB") multiplier = 1024 * 1024 * 1024
-      else if (unit == "TB" || unit == "TIB") multiplier = 1024 * 1024 * 1024 * 1024
-      else multiplier = 1
-      printf "%.0f", value * multiplier
-    }
-  '
-}
-
-query_v2ray_stats_text() {
-  local listen
-  listen="$(state_get '.traffic_stats.v2ray_api_listen // "127.0.0.1:10085"')"
-
-  if have_cmd grpcurl; then
-    grpcurl -plaintext -d '{"pattern":"user>>>","reset":false}' "$listen" v2ray.core.app.stats.command.StatsService/QueryStats 2>/dev/null && return 0
-  fi
-
-  if have_cmd v2ray; then
-    v2ray api stats --server="$listen" 2>/dev/null && return 0
-  fi
-
-  if have_cmd xray; then
-    xray api stats --server="$listen" 2>/dev/null && return 0
-  fi
-
-  return 1
-}
-
-parse_v2ray_stats_to_json() {
-  local input_file=$1
-  local tmp_tsv line name bytes prefix number unit
-
-  if jq -e . "$input_file" >/dev/null 2>&1; then
-    jq '
-      [
-        .. | objects
-        | select(has("name") and has("value"))
-        | select(.name | test("^user>>>.*>>>traffic>>>(uplink|downlink)$"))
-        | {
-            name: (.name | capture("^user>>>(?<user>.*)>>>traffic>>>(uplink|downlink)$").user),
-            bytes: ((.value // 0) | tonumber)
-          }
-      ]
-      | group_by(.name)
-      | map({name: .[0].name, bytes: (map(.bytes) | add)})
-    ' "$input_file"
-    return 0
-  fi
-
-  tmp_tsv="$(mktemp "$TMP_DIR/sbox-v2ray-stats.XXXXXX")"
-  while IFS= read -r line; do
-    [[ "$line" =~ user\>\>\>(.+)\>\>\>traffic\>\>\>(uplink|downlink) ]] || continue
-    name="${BASH_REMATCH[1]}"
-    bytes=""
-
-    if [[ "$line" =~ \"value\"[[:space:]]*:[[:space:]]*\"?([0-9]+)\"? ]]; then
-      bytes="${BASH_REMATCH[1]}"
-    elif [[ "$line" =~ value:[[:space:]]*([0-9]+) ]]; then
-      bytes="${BASH_REMATCH[1]}"
-    else
-      prefix="${line%%user>>>*}"
-      if [[ "$prefix" =~ ([0-9]+([.][0-9]+)?)[[:space:]]*([KMGTP]?i?B|[KMGTP]?B|B)?[[:space:]]*$ ]]; then
-        number="${BASH_REMATCH[1]}"
-        unit="${BASH_REMATCH[3]:-B}"
-        bytes="$(stats_value_to_bytes "$number" "$unit")"
-      fi
-    fi
-
-    [[ "$bytes" =~ ^[0-9]+$ ]] || continue
-    printf '%s\t%s\n' "$name" "$bytes" >>"$tmp_tsv"
-  done <"$input_file"
-
-  jq -Rn '
-    [inputs | split("\t") | select(length == 2) | {name: .[0], bytes: (.[1] | tonumber)}]
-    | group_by(.name)
-    | map({name: .[0].name, bytes: (map(.bytes) | add)})
-  ' <"$tmp_tsv"
-  rm -f "$tmp_tsv"
-}
-
-refresh_client_traffic_usage() {
-  local tmp_raw tmp_stats stats_json stats_count
-
-  [[ "$(state_get '.traffic_stats.enabled // false')" == "true" ]] || return 1
-
-  tmp_raw="$(mktemp "$TMP_DIR/sbox-v2ray-api.XXXXXX")"
-  tmp_stats="$(mktemp "$TMP_DIR/sbox-v2ray-api-stats.XXXXXX")"
-
-  if ! query_v2ray_stats_text >"$tmp_raw"; then
-    rm -f "$tmp_raw" "$tmp_stats"
-    return 1
-  fi
-
-  if ! stats_json="$(parse_v2ray_stats_to_json "$tmp_raw")"; then
-    rm -f "$tmp_raw" "$tmp_stats"
-    return 1
-  fi
-  printf '%s\n' "$stats_json" >"$tmp_stats"
-
-  stats_count="$(jq -r 'length' "$tmp_stats" 2>/dev/null || echo 0)"
-  if [[ "$stats_count" -eq 0 ]]; then
-    rm -f "$tmp_raw" "$tmp_stats"
-    return 1
-  fi
-
-  state_jq --slurpfile stats "$tmp_stats" --arg ts "$(utc_now)" '
-    def num($value): (($value // 0) | tonumber? // 0);
-    def stat_for($name): (($stats[0][]? | select(.name == $name) | .bytes) // null);
-    def update_user_traffic:
-      map(
-        . as $user |
-        (stat_for($user.name)) as $api_bytes |
-        if $api_bytes == null then
-          .
-        else
-          (num(.traffic_last_api_bytes)) as $last_api_bytes |
-          (if $api_bytes >= $last_api_bytes then ($api_bytes - $last_api_bytes) else $api_bytes end) as $delta |
-          .traffic_used_bytes = (num(.traffic_used_bytes) + $delta) |
-          .traffic_last_api_bytes = $api_bytes
-        end
-      );
-
-    .protocols.shadowsocks.users |= update_user_traffic |
-    .protocols.vless_reality.users |= update_user_traffic |
-    .protocols.hysteria2.users |= update_user_traffic |
-    .meta.updated_at = $ts
-  '
-
-  rm -f "$tmp_raw" "$tmp_stats"
-}
-
-client_block_fingerprint() {
-  jq -r --arg now "$(utc_now)" '
-    def num($value): (($value // 0) | tonumber? // 0);
-    def limit_bytes: (num(.traffic_limit_gb) * 1073741824);
-    def expired: ((.expires_at // "") != "" and (.expires_at <= $now));
-    def over_limit: (num(.traffic_limit_gb) > 0 and num(.traffic_used_bytes) >= limit_bytes);
-    [
-      (.protocols.shadowsocks.users[]? | select(expired or over_limit) | "shadowsocks:" + .name),
-      (.protocols.vless_reality.users[]? | select(expired or over_limit) | "vless_reality:" + .name),
-      (.protocols.hysteria2.users[]? | select(expired or over_limit) | "hysteria2:" + .name)
-    ] | sort | join("|")
-  ' "$STATE_FILE"
-}
-
-update_client_block_fingerprint() {
-  local fingerprint
-  fingerprint="$(client_block_fingerprint)"
-  state_jq --arg fingerprint "$fingerprint" --arg ts "$(utc_now)" '
-    .traffic_stats.last_block_fingerprint = $fingerprint |
-    .meta.updated_at = $ts
-  '
-}
-
-ensure_client_enforce_timer() {
-  local manager_target exec_path
-
-  has_systemd || return 0
-  manager_target="$(manager_script_target_path)"
-  if [[ -x "$manager_target" ]]; then
-    exec_path="$manager_target"
-  else
-    exec_path="$SELF_PATH"
-  fi
-  [[ "$exec_path" == /* ]] || return 0
-
-  cat >"$CLIENT_ENFORCE_SERVICE_FILE" <<EOF
-[Unit]
-Description=sbox client traffic and expiry enforcement
-After=sing-box.service
-
-[Service]
-Type=oneshot
-ExecStart=${exec_path} enforce-clients
-EOF
-
-  cat >"$CLIENT_ENFORCE_TIMER_FILE" <<EOF
-[Unit]
-Description=Run sbox client traffic and expiry enforcement periodically
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=10min
-AccuracySec=1min
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  systemctl enable --now "$(basename "$CLIENT_ENFORCE_TIMER_FILE")" >/dev/null 2>&1 || true
-}
-
-set_client_limits() {
-  local selected protocol name current_limit current_expires traffic_limit_gb expires_at
-
-  selected="$(select_client_with_protocol "客户端流量 / 到期" "请选择要设置的客户端")" || return 1
-  protocol="${selected%%$'\t'*}"
-  name="${selected##*$'\t'}"
-
-  current_limit="$(jq -r --arg name "$name" ".protocols.${protocol}.users[] | select(.name == \$name) | .traffic_limit_gb // 0" "$STATE_FILE")"
-  current_expires="$(jq -r --arg name "$name" ".protocols.${protocol}.users[] | select(.name == \$name) | .expires_at // \"\"" "$STATE_FILE")"
-
-  traffic_limit_gb="$(prompt_client_traffic_limit_gb "客户端总流量上限" "$current_limit")" || return 1
-  expires_at="$(prompt_client_expiry_time "客户端到期时间" "$current_expires")" || return 1
-
-  state_jq --arg name "$name" --argjson traffic_limit_gb "$traffic_limit_gb" --arg expires_at "$expires_at" --arg ts "$(utc_now)" \
-    ".protocols.${protocol}.users |= map(if .name == \$name then .traffic_limit_gb = \$traffic_limit_gb | .expires_at = \$expires_at else . end) | .meta.updated_at = \$ts"
-
-  ensure_client_enforce_timer
-  apply_config
-}
-
-configure_traffic_stats_api() {
-  local current_enabled current_listen desired_listen
-
-  current_enabled="$(state_get '.traffic_stats.enabled // false')"
-  current_listen="$(state_get '.traffic_stats.v2ray_api_listen // "127.0.0.1:10085"')"
-
-  if ! ui_yesno "是否启用 sing-box V2Ray API 流量统计？当前状态：${current_enabled}。启用后需要 sing-box 构建包含 with_v2ray_api。"; then
-    state_jq --arg ts "$(utc_now)" '
-      .traffic_stats.enabled = false |
-      .meta.updated_at = $ts
-    '
-    if ! apply_config; then
-      state_jq --argjson enabled "$current_enabled" --arg listen "$current_listen" --arg ts "$(utc_now)" '
-        .traffic_stats.enabled = $enabled |
-        .traffic_stats.v2ray_api_listen = $listen |
-        .meta.updated_at = $ts
-      '
-      apply_config || true
-      return 1
-    fi
-    return 0
-  fi
-
-  desired_listen="$(prompt_nonempty "V2Ray API 监听地址" "请输入 V2Ray API 监听地址" "$current_listen")" || return 1
-  if sing_box_v2ray_api_unavailable; then
-    state_jq --arg ts "$(utc_now)" '
-      .traffic_stats.enabled = false |
-      .meta.updated_at = $ts
-    '
-    if ui_yesno "当前 sing-box 未包含 with_v2ray_api，不能启用流量统计。是否现在自动编译安装支持流量统计的 sing-box？"; then
-      install_sing_box_with_v2ray_api
-      return $?
-    fi
-    ui_msg "当前 sing-box 未包含 with_v2ray_api，不能启用 V2Ray API 流量统计。已保持关闭；客户端到期时间和手动流量上限仍会保留。"
-    return 1
-  fi
-
-  state_jq --arg listen "$desired_listen" --arg ts "$(utc_now)" '
-    .traffic_stats.enabled = true |
-    .traffic_stats.v2ray_api_listen = $listen |
-    .meta.updated_at = $ts
-  '
-
-  ensure_client_enforce_timer
-  if ! apply_config; then
-    state_jq --argjson enabled "$current_enabled" --arg listen "$current_listen" --arg ts "$(utc_now)" '
-      .traffic_stats.enabled = $enabled |
-      .traffic_stats.v2ray_api_listen = $listen |
-      .meta.updated_at = $ts
-    '
-    apply_config || true
-    ui_msg "流量统计 API 启用失败，已回滚到原配置。请确认 sing-box 构建包含 with_v2ray_api。"
-    return 1
-  fi
-}
-
-show_client_traffic_usage() {
-  local refreshed=0 note output
-
-  if refresh_client_traffic_usage >/dev/null 2>&1; then
-    refreshed=1
-  fi
-
-  output="$(jq -r --arg now "$(utc_now)" '
-    def num($value): (($value // 0) | tonumber? // 0);
-    def gb($value): (((num($value) / 1073741824 * 100) | floor) / 100 | tostring) + " GB";
-    def limit_text:
-      if num(.traffic_limit_gb) > 0 then (.traffic_limit_gb | tostring) + " GB" else "不限" end;
-    def limit_bytes: (num(.traffic_limit_gb) * 1073741824);
-    def expire_text:
-      if (.expires_at // "") == "" then "永不过期"
-      elif (.expires_at <= $now) then "已到期（" + .expires_at + "）"
-      else .expires_at
-      end;
-    def status_text:
-      if (.expires_at // "") != "" and (.expires_at <= $now) then "已到期"
-      elif num(.traffic_limit_gb) > 0 and num(.traffic_used_bytes) >= limit_bytes then "已超额"
-      else "正常"
-      end;
-    [
-      (.protocols.shadowsocks.users[]? | {protocol: "Shadowsocks 2022"} + .),
-      (.protocols.vless_reality.users[]? | {protocol: "VLESS + Reality"} + .),
-      (.protocols.hysteria2.users[]? | {protocol: "Hysteria2"} + .)
-    ]
-    | if length == 0 then
-        "当前还没有客户端。"
-      else
-        map(
-          "[\(.protocol)] \(.name)\n" +
-          "  已用流量: " + gb(.traffic_used_bytes) + " / " + limit_text + "\n" +
-          "  到期时间: " + expire_text + "\n" +
-          "  状态: " + status_text
-        ) | join("\n\n")
-      end
-  ' "$STATE_FILE")"
-
-  if [[ "$(state_get '.traffic_stats.enabled // false')" == "true" ]]; then
-    if (( refreshed )); then
-      note="已从 V2Ray API 刷新流量统计。"
-    else
-      note="未能从 V2Ray API 读取流量，已显示本地已记录值。请确认 sing-box 构建包含 with_v2ray_api，且已安装 grpcurl、v2ray 或 xray 命令用于查询。"
-    fi
-  else
-    note="流量统计 API 当前未启用，已显示本地已记录值；可在本菜单启用 V2Ray API 后自动累计。"
-  fi
-
-  ui_show_text "客户端流量使用情况" "${note}"$'\n\n'"${output}"
-}
-
-client_limit_menu_text() {
-  cat <<EOF
-流量统计 API：$(state_get '.traffic_stats.enabled // false')
-V2Ray API 监听：$(state_get '.traffic_stats.v2ray_api_listen // "127.0.0.1:10085"')
-
-请选择要执行的操作（输入 0 返回上一级，输入 00 退出脚本）
-EOF
-}
-
-client_limit_submenu() {
-  local choice menu_text
-
-  while true; do
-    menu_text="$(client_limit_menu_text)"
-    choice="$(ui_menu "客户端流量 / 到期" "$menu_text" \
-      "1" "查看客户端流量使用情况" \
-      "2" "设置客户端总流量 / 到期时间" \
-      "3" "开启 / 关闭流量统计 API" \
-      "4" "编译安装支持流量统计的 sing-box" \
-      "5" "诊断 V2Ray API 支持状态" \
-      "0" "返回上一级菜单" \
-      "00" "退出脚本")" || return 1
-
-    case "$choice" in
-      1)
-        show_client_traffic_usage
-        ;;
-      2)
-        set_client_limits
-        ;;
-      3)
-        configure_traffic_stats_api
-        ;;
-      4)
-        install_sing_box_with_v2ray_api
-        ;;
-      5)
-        show_v2ray_api_diagnostics
-        ;;
-      0)
-        return 0
-        ;;
-      00)
-        exit 0
-        ;;
-      *)
-        ui_msg "无效选项，请重新选择。"
-        ;;
-    esac
-  done
 }
 
 ensure_hysteria_cert() {
@@ -2732,14 +1942,6 @@ apply_config() {
 
   normalize_protocol_listen_addresses
   refresh_ai_resolved_ip_cidrs
-  refresh_client_traffic_usage >/dev/null 2>&1 || true
-  if [[ "$(state_get '.traffic_stats.enabled // false')" == "true" ]] && sing_box_v2ray_api_unavailable; then
-    state_jq --arg ts "$(utc_now)" '
-      .traffic_stats.enabled = false |
-      .meta.updated_at = $ts
-    '
-    warn "当前 sing-box 未包含 with_v2ray_api，已自动关闭 V2Ray API 流量统计以避免服务启动失败。"
-  fi
   validate_state || return 1
 
   tmp_config="$(mktemp "$TMP_DIR/singbox-config.XXXXXX.json")"
@@ -2786,13 +1988,13 @@ quick_install() {
 
 fresh_install() {
   local assume_yes=${1:-}
-  local log_file manager_target confirm_text check_bin
+  local log_file manager_target confirm_text
 
   require_linux
   require_root
   ensure_ui_backend
 
-  confirm_text=$'这将执行全新重装：\n- 停止并删除 sing-box / Realm 服务\n- 删除 /etc/sing-box、/etc/realm、/etc/sing-box-manager\n- 删除现有客户端、节点、分流和中转状态\n- 重新编译安装带 with_v2ray_api 的 sing-box\n\n是否继续？'
+  confirm_text=$'这将执行全新重装：\n- 停止并删除 sing-box / Realm 服务\n- 删除 /etc/sing-box、/etc/realm、/etc/sing-box-manager\n- 删除现有客户端、节点、分流和中转状态\n- 重新安装官方原生 sing-box\n\n是否继续？'
   if [[ "$assume_yes" != "--yes" && "${SBOX_FRESH_INSTALL_YES:-0}" != "1" ]]; then
     ui_yesno "$confirm_text" || return 0
   fi
@@ -2815,12 +2017,9 @@ fresh_install() {
   systemctl disable sing-box >/dev/null 2>&1 || true
   systemctl stop realm >/dev/null 2>&1 || true
   systemctl disable realm >/dev/null 2>&1 || true
-  systemctl stop "$(basename "$CLIENT_ENFORCE_TIMER_FILE")" >/dev/null 2>&1 || true
-  systemctl disable "$(basename "$CLIENT_ENFORCE_TIMER_FILE")" >/dev/null 2>&1 || true
 
   rm -f /etc/systemd/system/sing-box.service /lib/systemd/system/sing-box.service /usr/lib/systemd/system/sing-box.service /etc/systemd/system/multi-user.target.wants/sing-box.service 2>/dev/null || true
   rm -f "$REALM_SERVICE_FILE" /lib/systemd/system/realm.service /usr/lib/systemd/system/realm.service /etc/systemd/system/multi-user.target.wants/realm.service 2>/dev/null || true
-  rm -f "$CLIENT_ENFORCE_SERVICE_FILE" "$CLIENT_ENFORCE_TIMER_FILE" 2>/dev/null || true
   rm -rf /etc/sing-box "$REALM_DIR" "$STATE_DIR" 2>/dev/null || true
   rm -f "$REALM_BIN" 2>/dev/null || true
 
@@ -2828,7 +2027,6 @@ fresh_install() {
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl reset-failed sing-box >/dev/null 2>&1 || true
     systemctl reset-failed realm >/dev/null 2>&1 || true
-    systemctl reset-failed "$(basename "$CLIENT_ENFORCE_TIMER_FILE")" >/dev/null 2>&1 || true
   fi
 
   ensure_dirs
@@ -2837,13 +2035,7 @@ fresh_install() {
 
   rm -f /usr/bin/sing-box.bak.* /usr/local/bin/sing-box.bak.* 2>/dev/null || true
 
-  check_bin="$(sing_box_check_bin 2>/dev/null || true)"
-  if [[ -z "$check_bin" ]] || sing_box_v2ray_api_unavailable "$check_bin"; then
-    ui_msg "全新重装完成，但 V2Ray API 支持校验失败。请查看日志：$log_file"
-    return 1
-  fi
-
-  ui_msg "全新重装完成。sing-box 已支持 with_v2ray_api。\n日志文件：$log_file"
+  ui_msg "全新重装完成。已安装官方原生 sing-box。\n日志文件：$log_file"
 }
 
 repair_install() {
@@ -4144,16 +3336,15 @@ main_menu() {
       "7" "新增客户端" \
       "8" "删除客户端" \
       "9" "查看客户端信息" \
-      "10" "客户端流量 / 到期管理" \
-      "11" "查看订阅链接" \
-      "12" "重新生成配置并重载服务" \
-      "13" "查看当前概览" \
-      "14" "查看服务状态" \
-      "15" "一键AI分流" \
-      "16" "Realm 中转" \
-      "17" "重新安装 / 修复（保留规则）" \
-      "18" "全新重装（删除所有配置）" \
-      "19" "卸载" \
+      "10" "查看订阅链接" \
+      "11" "重新生成配置并重载服务" \
+      "12" "查看当前概览" \
+      "13" "查看服务状态" \
+      "14" "一键AI分流" \
+      "15" "Realm 中转" \
+      "16" "重新安装 / 修复（保留规则）" \
+      "17" "全新重装（删除所有配置）" \
+      "18" "卸载" \
       "0" "退出")" || break
 
     case "$choice" in
@@ -4185,34 +3376,31 @@ main_menu() {
         show_client_info
         ;;
       10)
-        client_limit_submenu
-        ;;
-      11)
         show_subscription_links
         ;;
-      12)
+      11)
         apply_config
         ;;
-      13)
+      12)
         show_overview
         ;;
-      14)
+      13)
         show_service_status
         ;;
-      15)
+      14)
         ai_routing_submenu
         ;;
-      16)
+      15)
         prepare_realm_menu && realm_submenu
         ;;
-      17)
+      16)
         export SBOX_REPAIR_OPEN_PANEL=1
         repair_install
         ;;
-      18)
+      17)
         fresh_install
         ;;
-      19)
+      18)
         uninstall_sbox
         ;;
       0)
@@ -4237,15 +3425,6 @@ usage() {
   $SCRIPT_NAME fresh-install  删除全部配置后全新安装（可加 --yes 跳过确认）
   $SCRIPT_NAME add-client     打开新增客户端流程
   $SCRIPT_NAME remove-client  打开删除客户端流程
-  $SCRIPT_NAME traffic        查看客户端流量使用情况
-  $SCRIPT_NAME client-limits  设置客户端总流量和到期时间
-  $SCRIPT_NAME traffic-api    开启 / 关闭 V2Ray API 流量统计
-  $SCRIPT_NAME install-v2ray-api
-                          编译安装支持 with_v2ray_api 的 sing-box
-  $SCRIPT_NAME diagnose-v2ray-api
-                          诊断当前 sing-box 是否支持 V2Ray API
-  $SCRIPT_NAME enforce-clients
-                          刷新客户端流量并执行到期 / 超额限制
   $SCRIPT_NAME ai             打开一键AI分流菜单
   $SCRIPT_NAME ai-route       配置 AI 分流到远端 SS / VLESS 落地节点
   $SCRIPT_NAME ai-rules       查看 AI 分流规则
@@ -4266,11 +3445,10 @@ usage() {
   1. 面板使用纯命令行数字输入，不依赖方向键。
   2. Hysteria2 默认使用自签名证书。
   3. 非交互安装可通过 SINGBOX_SERVER_ADDRESS=your.domain 指定节点地址。
-  4. 一键安装会从源码编译带 with_v2ray_api 的 sing-box，便于后续启用客户端流量统计。
+  4. 一键安装使用官方原生 sing-box 软件包。
   5. AI 分流支持 Shadowsocks 和 VLESS，落地节点地址可以是域名、IPv4 或 IPv6。
   6. repair-install 会重装 / 更新脚本和 sing-box 核心，但不会删除状态文件、客户端或分流规则。
   7. 一键安装只安装环境；当你启用协议或新增客户端后，才会生成对应的协议链接。
-  8. 客户端流量统计依赖 grpcurl、v2ray 或 xray 查询命令；到期 / 超额会通过 auth_user 拒绝规则限制。
 EOF
 }
 
@@ -4318,43 +3496,6 @@ main() {
       ensure_dirs
       init_state_file
       remove_client
-      ;;
-    traffic|client-traffic|show-traffic)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
-      show_client_traffic_usage
-      ;;
-    client-limits|set-client-limits)
-      require_linux
-      require_root
-      ensure_ui_backend
-      ensure_dirs
-      init_state_file
-      set_client_limits
-      ;;
-    traffic-api)
-      require_linux
-      require_root
-      ensure_ui_backend
-      ensure_dirs
-      init_state_file
-      configure_traffic_stats_api
-      ;;
-    install-v2ray-api|build-v2ray-api|install-v2ray-api-sing-box)
-      ensure_ui_backend
-      install_sing_box_with_v2ray_api
-      ;;
-    diagnose-v2ray-api|v2ray-api-diagnose|check-v2ray-api)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
-      show_v2ray_api_diagnostics
-      ;;
-    enforce-clients)
-      enforce_clients
       ;;
     ai|ai-menu|ai-route-menu)
       require_linux

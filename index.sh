@@ -578,7 +578,7 @@ service_exists() {
 }
 
 sing_box_service_exec_path() {
-  local exec_line exec_path
+  local exec_line exec_path arg
 
   has_systemd || return 1
   exec_line="$(systemctl cat sing-box 2>/dev/null | awk -F= '/^[[:space:]]*ExecStart=/ {print $2; exit}')"
@@ -586,11 +586,43 @@ sing_box_service_exec_path() {
 
   set -- $exec_line
   exec_path=${1:-}
+  exec_path="${exec_path#-}"
   exec_path="${exec_path#\"}"
   exec_path="${exec_path%\"}"
+
+  if [[ "$exec_path" == "/usr/bin/env" || "$exec_path" == "/bin/env" ]]; then
+    shift || true
+    for arg in "$@"; do
+      [[ "$arg" == *=* ]] && continue
+      if [[ "$arg" == */sing-box ]]; then
+        exec_path="$arg"
+      else
+        exec_path="$(command -v "$arg" 2>/dev/null || true)"
+      fi
+      break
+    done
+  fi
+
   [[ "$exec_path" == /* ]] || return 1
 
   printf '%s\n' "$exec_path"
+}
+
+sing_box_check_bin() {
+  local service_bin cli_bin
+  service_bin="$(sing_box_service_exec_path 2>/dev/null || true)"
+  if [[ -n "$service_bin" && -x "$service_bin" ]]; then
+    printf '%s\n' "$service_bin"
+    return 0
+  fi
+
+  cli_bin="$(command -v sing-box 2>/dev/null || true)"
+  if [[ -n "$cli_bin" && -x "$cli_bin" ]]; then
+    printf '%s\n' "$cli_bin"
+    return 0
+  fi
+
+  return 1
 }
 
 ensure_sing_box_service() {
@@ -637,9 +669,13 @@ restart_sing_box() {
 }
 
 sing_box_v2ray_api_unavailable() {
-  local tmp_config check_output
+  local target_bin tmp_config check_output
 
-  have_cmd sing-box || return 1
+  target_bin="${1:-}"
+  if [[ -z "$target_bin" ]]; then
+    target_bin="$(sing_box_check_bin 2>/dev/null || true)"
+  fi
+  [[ -n "$target_bin" && -x "$target_bin" ]] || return 1
 
   tmp_config="$(mktemp "$TMP_DIR/sbox-v2ray-api-check.XXXXXX.json")"
   cat >"$tmp_config" <<EOF
@@ -668,13 +704,87 @@ sing_box_v2ray_api_unavailable() {
 }
 EOF
 
-  if check_output="$(sing-box check -c "$tmp_config" 2>&1)"; then
+  if check_output="$("$target_bin" check -c "$tmp_config" 2>&1)"; then
     rm -f "$tmp_config"
     return 1
   fi
   rm -f "$tmp_config"
 
   [[ "$check_output" == *"v2ray api is not included"* || "$check_output" == *"with_v2ray_api"* ]]
+}
+
+show_v2ray_api_diagnostics() {
+  local cli_bin service_bin check_bin path tmp_config check_output status output version_text
+  local -a paths=()
+
+  cli_bin="$(command -v sing-box 2>/dev/null || true)"
+  service_bin="$(sing_box_service_exec_path 2>/dev/null || true)"
+  check_bin="$(sing_box_check_bin 2>/dev/null || true)"
+
+  [[ -n "$service_bin" ]] && paths+=("$service_bin")
+  [[ -n "$cli_bin" ]] && paths+=("$cli_bin")
+  [[ -x /usr/bin/sing-box ]] && paths+=("/usr/bin/sing-box")
+  [[ -x /usr/local/bin/sing-box ]] && paths+=("/usr/local/bin/sing-box")
+
+  tmp_config="$(mktemp "$TMP_DIR/sbox-v2ray-api-diagnose.XXXXXX.json")"
+  cat >"$tmp_config" <<EOF
+{
+  "log": {
+    "level": "error"
+  },
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "final": "direct"
+  },
+  "experimental": {
+    "v2ray_api": {
+      "listen": "127.0.0.1:10085",
+      "stats": {
+        "enabled": true,
+        "users": []
+      }
+    }
+  }
+}
+EOF
+
+  output=$(
+    cat <<EOF
+[Paths]
+command -v sing-box = ${cli_bin:-未找到}
+systemd ExecStart = ${service_bin:-未找到}
+配置检查使用 = ${check_bin:-未找到}
+
+[Service]
+$(systemctl cat sing-box 2>/dev/null | sed -n '/ExecStart=/p' || true)
+
+[V2Ray API Check]
+EOF
+  )
+
+  while IFS= read -r path; do
+    [[ -n "$path" && -x "$path" ]] || continue
+    version_text="$("$path" version 2>/dev/null | head -n 1 || true)"
+    if check_output="$("$path" check -c "$tmp_config" 2>&1)"; then
+      status="支持 with_v2ray_api"
+      check_output="check ok"
+    else
+      status="不支持或检查失败"
+    fi
+    output+=$'\n'"- $path"
+    output+=$'\n'"  version: ${version_text:-未知}"
+    output+=$'\n'"  status: $status"
+    output+=$'\n'"  output: $check_output"
+  done < <(printf '%s\n' "${paths[@]}" | awk 'NF && !seen[$0]++')
+
+  rm -f "$tmp_config"
+
+  ui_show_text "V2Ray API 诊断" "$output"
 }
 
 stop_sing_box() {
@@ -2337,6 +2447,7 @@ client_limit_submenu() {
       "2" "设置客户端总流量 / 到期时间" \
       "3" "开启 / 关闭流量统计 API" \
       "4" "编译安装支持流量统计的 sing-box" \
+      "5" "诊断 V2Ray API 支持状态" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || return 1
 
@@ -2352,6 +2463,9 @@ client_limit_submenu() {
         ;;
       4)
         install_sing_box_with_v2ray_api
+        ;;
+      5)
+        show_v2ray_api_diagnostics
         ;;
       0)
         return 0
@@ -3102,7 +3216,7 @@ EOF
 }
 
 apply_config() {
-  local enabled_count tmp_config check_output success_text links_file
+  local enabled_count tmp_config check_output success_text links_file check_bin
   enabled_count="$(enabled_protocol_count)"
 
   if [[ "$enabled_count" -eq 0 ]]; then
@@ -3127,8 +3241,9 @@ apply_config() {
   tmp_config="$(mktemp "$TMP_DIR/singbox-config.XXXXXX.json")"
   render_config >"$tmp_config"
 
-  if have_cmd sing-box; then
-    if ! check_output="$(sing-box check -c "$tmp_config" 2>&1)"; then
+  check_bin="$(sing_box_check_bin 2>/dev/null || true)"
+  if [[ -n "$check_bin" ]]; then
+    if ! check_output="$("$check_bin" check -c "$tmp_config" 2>&1)"; then
       rm -f "$tmp_config"
       ui_show_text "sing-box 配置检查失败" "$check_output"
       return 1
@@ -4605,6 +4720,8 @@ usage() {
   $SCRIPT_NAME traffic-api    开启 / 关闭 V2Ray API 流量统计
   $SCRIPT_NAME install-v2ray-api
                           编译安装支持 with_v2ray_api 的 sing-box
+  $SCRIPT_NAME diagnose-v2ray-api
+                          诊断当前 sing-box 是否支持 V2Ray API
   $SCRIPT_NAME enforce-clients
                           刷新客户端流量并执行到期 / 超额限制
   $SCRIPT_NAME ai             打开一键AI分流菜单
@@ -4702,6 +4819,13 @@ main() {
     install-v2ray-api|build-v2ray-api|install-v2ray-api-sing-box)
       ensure_ui_backend
       install_sing_box_with_v2ray_api
+      ;;
+    diagnose-v2ray-api|v2ray-api-diagnose|check-v2ray-api)
+      require_linux
+      require_root
+      ensure_dirs
+      init_state_file
+      show_v2ray_api_diagnostics
       ;;
     enforce-clients)
       enforce_clients

@@ -301,6 +301,243 @@ install_dependencies() {
   init_ui
 }
 
+install_build_dependencies() {
+  detect_pkg_manager
+
+  case "$PKG_MANAGER" in
+    apt)
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y
+      apt-get install -y curl jq openssl ca-certificates whiptail uuid-runtime iproute2 git build-essential tar gzip
+      ;;
+    dnf)
+      dnf install -y curl jq openssl ca-certificates newt util-linux iproute git make gcc gcc-c++ tar gzip
+      ;;
+    yum)
+      yum install -y epel-release || true
+      yum install -y curl jq openssl ca-certificates newt util-linux iproute git make gcc gcc-c++ tar gzip
+      ;;
+    *)
+      die "暂不支持自动安装编译依赖，请手动安装 curl、git、Go、gcc、make、tar、jq 后再运行。"
+      ;;
+  esac
+
+  init_ui
+}
+
+detect_go_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64)
+      printf 'amd64\n'
+      ;;
+    aarch64|arm64)
+      printf 'arm64\n'
+      ;;
+    armv6l|armv7l)
+      printf 'armv6l\n'
+      ;;
+    i386|i686)
+      printf '386\n'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+latest_go_version() {
+  local version
+  version="${SINGBOX_GO_VERSION:-}"
+  if [[ -z "$version" ]] && have_cmd curl; then
+    version="$(curl -fsSL --max-time 10 https://go.dev/VERSION?m=text 2>/dev/null | head -n 1 | sed 's/^go//' || true)"
+  fi
+  printf '%s\n' "${version:-1.26.2}"
+}
+
+version_at_least() {
+  local current=$1
+  local required=$2
+  [[ "$(printf '%s\n%s\n' "$required" "$current" | sort -V | head -n 1)" == "$required" ]]
+}
+
+go_version_value() {
+  go version 2>/dev/null | awk '{print $3}' | sed 's/^go//'
+}
+
+install_go_toolchain() {
+  local go_version go_arch archive_url archive_path current_go_version
+
+  if [[ -x /usr/local/go/bin/go ]]; then
+    export PATH="/usr/local/go/bin:$PATH"
+  fi
+  if have_cmd go; then
+    current_go_version="$(go_version_value)"
+    if [[ -n "$current_go_version" ]] && version_at_least "$current_go_version" "1.23.1"; then
+      log "检测到 Go ${current_go_version}，直接用于编译。"
+      return 0
+    fi
+  fi
+
+  go_arch="$(detect_go_arch)" || die "当前架构暂不支持自动安装 Go：$(uname -m)"
+  go_version="$(latest_go_version)"
+  archive_url="https://go.dev/dl/go${go_version}.linux-${go_arch}.tar.gz"
+  archive_path="$TMP_DIR/go${go_version}.linux-${go_arch}.tar.gz"
+
+  log "安装 Go ${go_version} (${go_arch})..."
+  curl -fsSL "$archive_url" -o "$archive_path"
+  rm -rf /usr/local/go
+  tar -C /usr/local -xzf "$archive_path"
+  rm -f "$archive_path"
+  export PATH="/usr/local/go/bin:$PATH"
+  printf 'export PATH="/usr/local/go/bin:$PATH"\n' >/etc/profile.d/go.sh
+}
+
+sing_box_version_value() {
+  local target_bin=${1:-sing-box}
+  "$target_bin" version 2>/dev/null | awk '/^sing-box version / {print $3; exit}'
+}
+
+resolve_sing_box_build_ref() {
+  local src_dir=$1
+  local current_version desired_ref
+
+  desired_ref="${SINGBOX_BUILD_VERSION:-}"
+  if [[ -n "$desired_ref" ]]; then
+    desired_ref="${desired_ref#v}"
+    printf 'v%s\n' "$desired_ref"
+    return 0
+  fi
+
+  current_version="$(sing_box_version_value "$(command -v sing-box 2>/dev/null || printf 'sing-box')")"
+  if [[ -n "$current_version" ]] && git -C "$src_dir" rev-parse "v${current_version}^{commit}" >/dev/null 2>&1; then
+    printf 'v%s\n' "$current_version"
+    return 0
+  fi
+
+  git -C "$src_dir" tag -l 'v*' --sort=-version:refname | grep -v -- '-' | head -n 1
+}
+
+install_grpcurl_if_missing() {
+  local go_bin=${1:-/usr/local/go/bin/go}
+
+  have_cmd grpcurl && return 0
+  [[ -x "$go_bin" ]] || return 0
+
+  log "安装 grpcurl，用于读取 V2Ray API 流量统计..."
+  GOBIN=/usr/local/bin "$go_bin" install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest || warn "grpcurl 安装失败；后续仍可手动安装 grpcurl、v2ray 或 xray 查询流量。"
+}
+
+install_sing_box_with_v2ray_api() {
+  local target_bin backup_bin tmp_dir src_dir build_ref go_bin build_tags ldflags tmp_bin check_output listen_addr success_text
+
+  require_linux
+  require_root
+  ensure_dirs
+  init_state_file
+  install_build_dependencies
+  install_go_toolchain
+
+  go_bin="$(command -v go 2>/dev/null || true)"
+  [[ -n "$go_bin" && -x "$go_bin" ]] || die "Go 安装失败，未找到 go 命令。"
+
+  target_bin="$(command -v sing-box 2>/dev/null || true)"
+  [[ -n "$target_bin" ]] || target_bin="/usr/local/bin/sing-box"
+
+  tmp_dir="$(mktemp -d "$TMP_DIR/sbox-build.XXXXXX")"
+  src_dir="$tmp_dir/sing-box"
+  tmp_bin="$tmp_dir/sing-box-bin"
+
+  log "拉取 sing-box 源码..."
+  git clone https://github.com/SagerNet/sing-box.git "$src_dir" >/dev/null 2>&1 || {
+    rm -rf "$tmp_dir"
+    die "拉取 sing-box 源码失败。"
+  }
+  git -C "$src_dir" fetch --tags --force >/dev/null 2>&1 || true
+
+  build_ref="$(resolve_sing_box_build_ref "$src_dir")"
+  [[ -n "$build_ref" ]] || {
+    rm -rf "$tmp_dir"
+    die "无法确定 sing-box 构建版本。"
+  }
+  git -C "$src_dir" checkout "$build_ref" >/dev/null 2>&1 || {
+    rm -rf "$tmp_dir"
+    die "切换 sing-box 源码版本 ${build_ref} 失败。"
+  }
+
+  build_tags="$(tr '\n' ' ' <"$src_dir/release/DEFAULT_BUILD_TAGS" 2>/dev/null || true)"
+  case " $build_tags " in
+    *" with_v2ray_api "*) ;;
+    *) build_tags="${build_tags} with_v2ray_api" ;;
+  esac
+  ldflags="$(tr '\n' ' ' <"$src_dir/release/LDFLAGS" 2>/dev/null || true)"
+
+  log "开始编译 sing-box ${build_ref}（包含 with_v2ray_api）..."
+  if [[ -n "$ldflags" ]]; then
+    (cd "$src_dir" && GOTOOLCHAIN=auto "$go_bin" build -trimpath -tags "$build_tags" -ldflags "$ldflags" -o "$tmp_bin" ./cmd/sing-box)
+  else
+    (cd "$src_dir" && GOTOOLCHAIN=auto "$go_bin" build -trimpath -tags "$build_tags" -o "$tmp_bin" ./cmd/sing-box)
+  fi
+  [[ -x "$tmp_bin" ]] || {
+    rm -rf "$tmp_dir"
+    die "编译 sing-box 失败。"
+  }
+
+  if ! check_output="$("$tmp_bin" check -c <(cat <<'EOF'
+{
+  "log": {"level": "error"},
+  "outbounds": [{"type": "direct", "tag": "direct"}],
+  "route": {"final": "direct"},
+  "experimental": {
+    "v2ray_api": {
+      "listen": "127.0.0.1:10085",
+      "stats": {"enabled": true, "users": []}
+    }
+  }
+}
+EOF
+) 2>&1)"; then
+    rm -rf "$tmp_dir"
+    ui_show_text "sing-box 编译验证失败" "$check_output"
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$target_bin")"
+  backup_bin=""
+  if [[ -f "$target_bin" ]]; then
+    backup_bin="${target_bin}.bak.$(date +%Y%m%d-%H%M%S)"
+    cp "$target_bin" "$backup_bin"
+  fi
+
+  stop_sing_box
+  install -m 755 "$tmp_bin" "$target_bin"
+  rm -rf "$tmp_dir"
+  ensure_sing_box_service
+  install_grpcurl_if_missing "$go_bin"
+
+  listen_addr="$(state_get '.traffic_stats.v2ray_api_listen // "127.0.0.1:10085"')"
+  if ui_yesno "已安装支持流量统计的 sing-box。是否立即启用 V2Ray API 流量统计？监听地址：${listen_addr}"; then
+    state_jq --arg listen "$listen_addr" --arg ts "$(utc_now)" '
+      .traffic_stats.enabled = true |
+      .traffic_stats.v2ray_api_listen = $listen |
+      .meta.updated_at = $ts
+    '
+  fi
+
+  ensure_client_enforce_timer
+  apply_config || {
+    if [[ -n "$backup_bin" && -f "$backup_bin" ]]; then
+      warn "新 sing-box 应用配置失败，已保留备份：$backup_bin"
+    fi
+    return 1
+  }
+
+  success_text="已切换到支持 with_v2ray_api 的 sing-box：$target_bin"
+  if [[ -n "$backup_bin" ]]; then
+    success_text+=$'\n'"旧版本备份：$backup_bin"
+  fi
+  ui_msg "$success_text"
+}
+
 install_sing_box() {
   if have_cmd sing-box; then
     log "检测到 sing-box 已安装，开始通过官方安装脚本检查并更新到最新版本..."
@@ -1974,6 +2211,10 @@ configure_traffic_stats_api() {
       .traffic_stats.enabled = false |
       .meta.updated_at = $ts
     '
+    if ui_yesno "当前 sing-box 未包含 with_v2ray_api，不能启用流量统计。是否现在自动编译安装支持流量统计的 sing-box？"; then
+      install_sing_box_with_v2ray_api
+      return $?
+    fi
     ui_msg "当前 sing-box 未包含 with_v2ray_api，不能启用 V2Ray API 流量统计。已保持关闭；客户端到期时间和手动流量上限仍会保留。"
     return 1
   fi
@@ -2068,6 +2309,7 @@ client_limit_submenu() {
       "1" "查看客户端流量使用情况" \
       "2" "设置客户端总流量 / 到期时间" \
       "3" "开启 / 关闭流量统计 API" \
+      "4" "编译安装支持流量统计的 sing-box" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || return 1
 
@@ -2080,6 +2322,9 @@ client_limit_submenu() {
         ;;
       3)
         configure_traffic_stats_api
+        ;;
+      4)
+        install_sing_box_with_v2ray_api
         ;;
       0)
         return 0
@@ -4331,6 +4576,8 @@ usage() {
   $SCRIPT_NAME traffic        查看客户端流量使用情况
   $SCRIPT_NAME client-limits  设置客户端总流量和到期时间
   $SCRIPT_NAME traffic-api    开启 / 关闭 V2Ray API 流量统计
+  $SCRIPT_NAME install-v2ray-api
+                          编译安装支持 with_v2ray_api 的 sing-box
   $SCRIPT_NAME enforce-clients
                           刷新客户端流量并执行到期 / 超额限制
   $SCRIPT_NAME ai             打开一键AI分流菜单
@@ -4424,6 +4671,10 @@ main() {
       ensure_dirs
       init_state_file
       configure_traffic_stats_api
+      ;;
+    install-v2ray-api|build-v2ray-api|install-v2ray-api-sing-box)
+      ensure_ui_backend
+      install_sing_box_with_v2ray_api
       ;;
     enforce-clients)
       enforce_clients

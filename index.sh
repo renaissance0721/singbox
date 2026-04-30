@@ -35,8 +35,6 @@ REALM_CONFIG_FILE="${REALM_CONFIG_FILE:-$REALM_DIR/config.toml}"
 REALM_STATE_FILE="${REALM_STATE_FILE:-$STATE_DIR/realm-state.json}"
 REALM_BIN="${REALM_BIN:-/usr/local/bin/realm}"
 REALM_SERVICE_FILE="${REALM_SERVICE_FILE:-/etc/systemd/system/realm.service}"
-CLIENT_ENFORCE_SERVICE_FILE="${CLIENT_ENFORCE_SERVICE_FILE:-/etc/systemd/system/sbox-client-enforce.service}"
-CLIENT_ENFORCE_TIMER_FILE="${CLIENT_ENFORCE_TIMER_FILE:-/etc/systemd/system/sbox-client-enforce.timer}"
 MANAGER_SCRIPT_PATH="${MANAGER_SCRIPT_PATH:-/usr/local/bin/sbox}"
 SCRIPT_REPO_OWNER="${SCRIPT_REPO_OWNER:-renaissance0721}"
 SCRIPT_REPO_NAME="${SCRIPT_REPO_NAME:-singbox}"
@@ -1124,11 +1122,6 @@ init_state_file() {
       "ip_cidr": [],
       "resolved_ip_cidr": []
     }
-  },
-  "traffic_stats": {
-    "enabled": false,
-    "v2ray_api_listen": "127.0.0.1:10085",
-    "last_block_fingerprint": ""
   }
 }
 EOF
@@ -1160,22 +1153,11 @@ migrate_state_schema() {
     and (.routing.ai.reality_short_id? != null)
     and (.routing.ai.ip_cidr? != null)
     and (.routing.ai.resolved_ip_cidr? != null)
-    and (.traffic_stats.enabled? != null)
-    and (.traffic_stats.v2ray_api_listen? != null)
-    and (.traffic_stats.last_block_fingerprint? != null)
-    and ([.protocols.shadowsocks.users[]?, .protocols.vless_reality.users[]?, .protocols.hysteria2.users[]?]
-      | all(has("traffic_limit_gb") and has("traffic_used_bytes") and has("traffic_last_api_bytes") and has("expires_at")))
   ' "$STATE_FILE" >/dev/null 2>&1; then
     return 0
   fi
 
   state_jq --arg ts "$(utc_now)" '
-    def normalize_client:
-      .traffic_limit_gb = (((.traffic_limit_gb // 0) | tonumber?) // 0) |
-      .traffic_used_bytes = (((.traffic_used_bytes // 0) | tonumber?) // 0) |
-      .traffic_last_api_bytes = (((.traffic_last_api_bytes // 0) | tonumber?) // 0) |
-      .expires_at = (.expires_at // "");
-
     .routing = (.routing // {}) |
     .routing.ai = (.routing.ai // {}) |
     .routing.ai.enabled = (.routing.ai.enabled // false) |
@@ -1222,13 +1204,6 @@ migrate_state_schema() {
     ]) |
     .routing.ai.ip_cidr = (.routing.ai.ip_cidr // []) |
     .routing.ai.resolved_ip_cidr = (.routing.ai.resolved_ip_cidr // []) |
-    .traffic_stats = (.traffic_stats // {}) |
-    .traffic_stats.enabled = (.traffic_stats.enabled // false) |
-    .traffic_stats.v2ray_api_listen = (.traffic_stats.v2ray_api_listen // "127.0.0.1:10085") |
-    .traffic_stats.last_block_fingerprint = (.traffic_stats.last_block_fingerprint // "") |
-    .protocols.shadowsocks.users = ((.protocols.shadowsocks.users // []) | map(normalize_client)) |
-    .protocols.vless_reality.users = ((.protocols.vless_reality.users // []) | map(normalize_client)) |
-    .protocols.hysteria2.users = ((.protocols.hysteria2.users // []) | map(normalize_client)) |
     .meta.updated_at = $ts
   '
 }
@@ -1916,88 +1891,6 @@ prompt_number() {
   done
 }
 
-trim_value() {
-  local value=${1:-}
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  printf '%s\n' "$value"
-}
-
-format_limit_gb() {
-  local limit=${1:-0}
-  if [[ -z "$limit" || "$limit" == "null" || "$limit" == "0" ]]; then
-    printf '不限\n'
-  else
-    printf '%s GB\n' "$limit"
-  fi
-}
-
-format_expiry_time() {
-  local expires_at=${1:-}
-  if [[ -z "$expires_at" || "$expires_at" == "null" ]]; then
-    printf '永不过期\n'
-  else
-    printf '%s\n' "$expires_at"
-  fi
-}
-
-normalize_expiry_input() {
-  local value=${1:-}
-  local normalized
-  value="$(trim_value "$value")"
-
-  if [[ -z "$value" || "$value" == "0" || "$value" == "never" || "$value" == "none" ]]; then
-    printf '\n'
-    return 0
-  fi
-
-  if [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-    normalized="$(date -u -d "${value} 23:59:59" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)" || return 1
-    [[ "${normalized%%T*}" == "$value" ]] || return 1
-    printf '%s\n' "$normalized"
-    return 0
-  fi
-
-  if [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
-    normalized="$(date -u -d "$value" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)" || return 1
-    [[ "$normalized" == "$value" ]] || return 1
-    printf '%s\n' "$normalized"
-    return 0
-  fi
-
-  return 1
-}
-
-prompt_client_traffic_limit_gb() {
-  local title=$1
-  local default_value=${2:-0}
-  local value
-
-  value="$(prompt_number "$title" "请输入客户端总流量上限（GB，0 表示不限）" "${default_value:-0}" 0 1048576)" || return 1
-  value="$((10#$value))"
-  printf '%s\n' "$value"
-}
-
-prompt_client_expiry_time() {
-  local title=$1
-  local default_value=${2:-}
-  local display_default value normalized
-
-  display_default="$default_value"
-  if [[ "$display_default" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]]; then
-    display_default="${display_default%%T*}"
-  fi
-
-  while true; do
-    value="$(ui_input "$title" "请输入客户端到期日期（YYYY-MM-DD，留空或 0 表示永不过期）" "$display_default")" || return 1
-    if normalized="$(normalize_expiry_input "$value")"; then
-      printf '%s\n' "$normalized"
-      return 0
-    fi
-    ui_msg "到期日期格式不正确，请输入 YYYY-MM-DD，例如 2026-12-31；留空或 0 表示永不过期。"
-  done
-}
-
 realm_prompt_nonempty_limited() {
   local counter_var=$1
   local title=$2
@@ -2069,28 +1962,22 @@ user_exists() {
 append_ss_user() {
   local name=$1
   local password=$2
-  local traffic_limit_gb=${3:-0}
-  local expires_at=${4:-}
-  state_jq --arg name "$name" --arg password "$password" --argjson traffic_limit_gb "$traffic_limit_gb" --arg expires_at "$expires_at" --arg ts "$(utc_now)" \
-    '.protocols.shadowsocks.users += [{name: $name, password: $password, traffic_limit_gb: $traffic_limit_gb, traffic_used_bytes: 0, traffic_last_api_bytes: 0, expires_at: $expires_at}] | .meta.updated_at = $ts'
+  state_jq --arg name "$name" --arg password "$password" --arg ts "$(utc_now)" \
+    '.protocols.shadowsocks.users += [{name: $name, password: $password}] | .meta.updated_at = $ts'
 }
 
 append_vless_user() {
   local name=$1
   local uuid=$2
-  local traffic_limit_gb=${3:-0}
-  local expires_at=${4:-}
-  state_jq --arg name "$name" --arg uuid "$uuid" --argjson traffic_limit_gb "$traffic_limit_gb" --arg expires_at "$expires_at" --arg ts "$(utc_now)" \
-    '.protocols.vless_reality.users += [{name: $name, uuid: $uuid, traffic_limit_gb: $traffic_limit_gb, traffic_used_bytes: 0, traffic_last_api_bytes: 0, expires_at: $expires_at}] | .meta.updated_at = $ts'
+  state_jq --arg name "$name" --arg uuid "$uuid" --arg ts "$(utc_now)" \
+    '.protocols.vless_reality.users += [{name: $name, uuid: $uuid}] | .meta.updated_at = $ts'
 }
 
 append_hy2_user() {
   local name=$1
   local password=$2
-  local traffic_limit_gb=${3:-0}
-  local expires_at=${4:-}
-  state_jq --arg name "$name" --arg password "$password" --argjson traffic_limit_gb "$traffic_limit_gb" --arg expires_at "$expires_at" --arg ts "$(utc_now)" \
-    '.protocols.hysteria2.users += [{name: $name, password: $password, traffic_limit_gb: $traffic_limit_gb, traffic_used_bytes: 0, traffic_last_api_bytes: 0, expires_at: $expires_at}] | .meta.updated_at = $ts'
+  state_jq --arg name "$name" --arg password "$password" --arg ts "$(utc_now)" \
+    '.protocols.hysteria2.users += [{name: $name, password: $password}] | .meta.updated_at = $ts'
 }
 
 remove_protocol_user() {
@@ -2132,6 +2019,7 @@ select_protocol_user() {
   printf '%s\n' "${users[$selected_index]}"
 }
 
+<<<<<<< HEAD
 select_client_with_protocol() {
   local title=$1
   local prompt=$2
@@ -2560,6 +2448,8 @@ client_limit_submenu() {
   done
 }
 
+=======
+>>>>>>> parent of 9c992e4 (Update index.sh)
 ensure_hysteria_cert() {
   local server_name cert_path key_path san_type openssl_conf
   server_name="$(state_get '.protocols.hysteria2.tls_server_name')"
@@ -2790,37 +2680,7 @@ validate_state() {
 }
 
 render_config() {
-  jq --arg now "$(utc_now)" '
-  def num($value): (($value // 0) | tonumber? // 0);
-  def client_expired($now): ((.expires_at // "") != "" and (.expires_at <= $now));
-  def client_limit_bytes: (num(.traffic_limit_gb) * 1073741824);
-  def client_over_limit: (num(.traffic_limit_gb) > 0 and num(.traffic_used_bytes) >= client_limit_bytes);
-  def client_blocked($now): client_expired($now) or client_over_limit;
-  def blocked_route_rules($now):
-    [
-      (.protocols.shadowsocks.users[]? | select(client_blocked($now)) | {inbound: "ss-in", name: .name}),
-      (.protocols.vless_reality.users[]? | select(client_blocked($now)) | {inbound: "vless-reality-in", name: .name}),
-      (.protocols.hysteria2.users[]? | select(client_blocked($now)) | {inbound: "hy2-in", name: .name})
-    ]
-    | group_by(.inbound)
-    | map({
-        inbound: [.[0].inbound],
-        auth_user: (map(.name) | unique),
-        action: "reject",
-        method: "default"
-      });
-  def enabled_inbound_tags:
-    [
-      (if .protocols.shadowsocks.enabled then "ss-in" else empty end),
-      (if .protocols.vless_reality.enabled then "vless-reality-in" else empty end),
-      (if .protocols.hysteria2.enabled then "hy2-in" else empty end)
-    ];
-  def all_client_names:
-    [
-      .protocols.shadowsocks.users[]?.name,
-      .protocols.vless_reality.users[]?.name,
-      .protocols.hysteria2.users[]?.name
-    ] | unique;
+  jq '
   def ai_route_matcher:
     (.routing.ai.domain_suffix // []) as $suffix |
     {
@@ -2830,7 +2690,6 @@ render_config() {
       ip_cidr: (((.routing.ai.ip_cidr // []) + (.routing.ai.resolved_ip_cidr // [])) | unique)
     };
 
-  (
   {
     log: {
       disabled: false,
@@ -2848,7 +2707,7 @@ render_config() {
             network: .protocols.shadowsocks.network,
             method: .protocols.shadowsocks.method,
             password: .protocols.shadowsocks.server_password,
-            users: (.protocols.shadowsocks.users | map({name: .name, password: .password})),
+            users: .protocols.shadowsocks.users,
             multiplex: {
               enabled: (.protocols.shadowsocks.multiplex // true)
             }
@@ -2898,7 +2757,7 @@ render_config() {
               listen_port: .protocols.hysteria2.port,
               up_mbps: .protocols.hysteria2.up_mbps,
               down_mbps: .protocols.hysteria2.down_mbps,
-              users: (.protocols.hysteria2.users | map({name: .name, password: .password})),
+              users: .protocols.hysteria2.users,
               tls: {
                 enabled: true,
                 alpn: ["h3"],
@@ -2982,7 +2841,6 @@ render_config() {
     ],
     route: {
       rules: [
-        ((blocked_route_rules($now))[]?),
         (
           if (.routing.ai.enabled // false) then
             {
@@ -3035,26 +2893,7 @@ render_config() {
       ],
       final: "direct"
     }
-  }
-  + (
-    if (.traffic_stats.enabled // false) then
-      {
-        experimental: {
-          v2ray_api: {
-            listen: (.traffic_stats.v2ray_api_listen // "127.0.0.1:10085"),
-            stats: {
-              enabled: true,
-              inbounds: enabled_inbound_tags,
-              users: all_client_names
-            }
-          }
-        }
-      }
-    else
-      {}
-    end
-  )
-  )' "$STATE_FILE"
+  }' "$STATE_FILE"
 }
 
 enabled_protocol_count() {
@@ -3199,11 +3038,8 @@ write_client_exports() {
     ss_method="$(state_get '.protocols.shadowsocks.method')"
     ss_server_password="$(state_get '.protocols.shadowsocks.server_password')"
 
-    while IFS=$'\t' read -r name user_password traffic_limit_gb expires_at; do
+    while IFS=$'\t' read -r name user_password; do
       [[ -n "$name" ]] || continue
-      local limit_text expiry_text
-      limit_text="$(format_limit_gb "$traffic_limit_gb")"
-      expiry_text="$(format_expiry_time "$expires_at")"
       cat >"$CLIENT_DIR/shadowsocks/${name}.txt" <<EOF
 [Shadowsocks 2022]
 name = $display_name
@@ -3213,14 +3049,12 @@ method = $ss_method
 password = ${ss_server_password}:${user_password}
 network = tcp
 multiplex = true
-traffic_limit = $limit_text
-expires_at = $expiry_text
 EOF
       link="ss://$(base64_urlsafe "${ss_method}:${ss_server_password}:${user_password}")@${host}:${ss_port}#$(uri_encode "$display_name")"
       printf '%s（%s）的订阅链接是：%s\n' "$display_name" "$name" "$link" >>"$links_file"
       cat "$CLIENT_DIR/shadowsocks/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
-    done < <(jq -r '.protocols.shadowsocks.users[]? | [.name, .password, (.traffic_limit_gb // 0), (.expires_at // "")] | @tsv' "$STATE_FILE")
+    done < <(jq -r '.protocols.shadowsocks.users[]? | [.name, .password] | @tsv' "$STATE_FILE")
   fi
 
   if [[ "$(state_get '.protocols.vless_reality.enabled')" == "true" ]]; then
@@ -3230,11 +3064,8 @@ EOF
     vless_public_key="$(state_get '.protocols.vless_reality.public_key')"
     vless_short_id="$(state_get '.protocols.vless_reality.short_id')"
 
-    while IFS=$'\t' read -r name uuid traffic_limit_gb expires_at; do
+    while IFS=$'\t' read -r name uuid; do
       [[ -n "$name" ]] || continue
-      local limit_text expiry_text
-      limit_text="$(format_limit_gb "$traffic_limit_gb")"
-      expiry_text="$(format_expiry_time "$expires_at")"
       cat >"$CLIENT_DIR/vless-reality/${name}.txt" <<EOF
 [VLESS + Reality]
 name = $display_name
@@ -3246,14 +3077,12 @@ tls.server_name = $vless_server_name
 reality.public_key = $vless_public_key
 reality.short_id = $vless_short_id
 transport = tcp
-traffic_limit = $limit_text
-expires_at = $expiry_text
 EOF
       link="vless://${uuid}@${host}:${vless_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(uri_encode "$vless_server_name")&fp=chrome&pbk=$(uri_encode "$vless_public_key")&sid=$(uri_encode "$vless_short_id")&alpn=$(uri_encode "h2,http/1.1")&type=tcp&headerType=none#$(uri_encode "$display_name")"
       printf '%s（%s）的订阅链接是：%s\n' "$display_name" "$name" "$link" >>"$links_file"
       cat "$CLIENT_DIR/vless-reality/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
-    done < <(jq -r '.protocols.vless_reality.users[]? | [.name, .uuid, (.traffic_limit_gb // 0), (.expires_at // "")] | @tsv' "$STATE_FILE")
+    done < <(jq -r '.protocols.vless_reality.users[]? | [.name, .uuid] | @tsv' "$STATE_FILE")
   fi
 
   if [[ "$(state_get '.protocols.hysteria2.enabled')" == "true" ]]; then
@@ -3262,11 +3091,8 @@ EOF
     hy2_sni="$(state_get '.protocols.hysteria2.tls_server_name')"
     hy2_obfs="$(state_get '.protocols.hysteria2.obfs_password')"
 
-    while IFS=$'\t' read -r name password traffic_limit_gb expires_at; do
+    while IFS=$'\t' read -r name password; do
       [[ -n "$name" ]] || continue
-      local limit_text expiry_text
-      limit_text="$(format_limit_gb "$traffic_limit_gb")"
-      expiry_text="$(format_expiry_time "$expires_at")"
       cat >"$CLIENT_DIR/hysteria2/${name}.txt" <<EOF
 [Hysteria2]
 name = $display_name
@@ -3277,14 +3103,12 @@ tls.server_name = $hy2_sni
 tls.insecure = true
 obfs = salamander
 obfs_password = $hy2_obfs
-traffic_limit = $limit_text
-expires_at = $expiry_text
 EOF
       link="hysteria2://$(uri_encode "$password")@${host}:${hy2_port}?sni=$(uri_encode "$hy2_sni")&insecure=1&obfs=salamander&obfs-password=$(uri_encode "$hy2_obfs")#$(uri_encode "$display_name")"
       printf '%s（%s）的订阅链接是：%s\n' "$display_name" "$name" "$link" >>"$links_file"
       cat "$CLIENT_DIR/hysteria2/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
-    done < <(jq -r '.protocols.hysteria2.users[]? | [.name, .password, (.traffic_limit_gb // 0), (.expires_at // "")] | @tsv' "$STATE_FILE")
+    done < <(jq -r '.protocols.hysteria2.users[]? | [.name, .password] | @tsv' "$STATE_FILE")
   fi
 
   write_nekobox_exports
@@ -3302,6 +3126,7 @@ apply_config() {
 
   normalize_protocol_listen_addresses
   refresh_ai_resolved_ip_cidrs
+<<<<<<< HEAD
   refresh_client_traffic_usage >/dev/null 2>&1 || true
   if [[ "$(state_get '.traffic_stats.enabled // false')" == "true" ]] && sing_box_v2ray_api_unavailable; then
     state_jq --arg ts "$(utc_now)" '
@@ -3310,6 +3135,8 @@ apply_config() {
     '
     warn "当前 sing-box 未包含 with_v2ray_api，已自动关闭 V2Ray API 流量统计以避免服务启动失败。"
   fi
+=======
+>>>>>>> parent of 9c992e4 (Update index.sh)
   validate_state || return 1
 
   tmp_config="$(mktemp "$TMP_DIR/singbox-config.XXXXXX.json")"
@@ -3331,7 +3158,6 @@ apply_config() {
   write_client_exports
   apply_firewall_rules
   restart_sing_box || return 1
-  update_client_block_fingerprint
 
   success_text="配置已写入 $CONFIG_FILE，服务已重载。客户端信息已导出到 $CLIENT_DIR。"
   links_file="$(direct_links_file)"
@@ -3339,26 +3165,6 @@ apply_config() {
     success_text+=$'\n\n订阅链接：\n'"$(cat "$links_file")"
   fi
   ui_msg "$success_text"
-}
-
-enforce_clients() {
-  local previous_fingerprint current_fingerprint
-
-  require_linux
-  require_root
-  ensure_dirs
-  init_state_file
-
-  previous_fingerprint="$(state_get '.traffic_stats.last_block_fingerprint // ""')"
-  refresh_client_traffic_usage >/dev/null 2>&1 || true
-  current_fingerprint="$(client_block_fingerprint)"
-
-  if [[ "$current_fingerprint" != "$previous_fingerprint" ]]; then
-    apply_config
-  else
-    write_client_exports
-    printf '客户端流量和到期状态未变化，无需重载 sing-box。\n'
-  fi
 }
 
 quick_install() {
@@ -3914,62 +3720,8 @@ delete_ai_routing_rule() {
   apply_config
 }
 
-ai_routing_menu_text() {
-  cat <<EOF
-AI 分流状态：$(state_get '.routing.ai.enabled // false')
-落地协议：$(state_get '.routing.ai.outbound_type // "shadowsocks"')
-落地地址：$(state_get '.routing.ai.server // "-"'):$(state_get '.routing.ai.port // "-"')
-规则：$(format_ai_rule_list)
-
-请选择要执行的操作（输入 0 返回上一级，输入 00 退出脚本）
-EOF
-}
-
-ai_routing_submenu() {
-  local choice menu_text
-
-  while true; do
-    menu_text="$(ai_routing_menu_text)"
-    choice="$(ui_menu "一键AI分流" "$menu_text" \
-      "1" "配置 / 开关 AI 分流" \
-      "2" "查看 AI 分流规则" \
-      "3" "新增 AI 分流规则" \
-      "4" "删除 AI 分流规则" \
-      "5" "导出 NekoBox 分流规则" \
-      "0" "返回上一级菜单" \
-      "00" "退出脚本")" || return 1
-
-    case "$choice" in
-      1)
-        configure_ai_routing
-        ;;
-      2)
-        show_ai_routing_rules
-        ;;
-      3)
-        append_ai_routing_rules
-        ;;
-      4)
-        delete_ai_routing_rule
-        ;;
-      5)
-        show_nekobox_routing_exports
-        ;;
-      0)
-        return 0
-        ;;
-      00)
-        exit 0
-        ;;
-      *)
-        ui_msg "无效选项，请重新选择。"
-        ;;
-    esac
-  done
-}
-
 add_client() {
-  local protocol_choice name value traffic_limit_gb expires_at
+  local protocol_choice name value
   protocol_choice="$(ui_protocol_menu)" || return 1
 
   case "$protocol_choice" in
@@ -3986,11 +3738,8 @@ add_client() {
         fi
         break
       done
-      traffic_limit_gb="$(prompt_client_traffic_limit_gb "Shadowsocks 客户端总流量" "0")" || return 1
-      expires_at="$(prompt_client_expiry_time "Shadowsocks 客户端到期时间" "")" || return 1
       value="$(generate_base64_bytes 32)"
-      append_ss_user "$name" "$value" "$traffic_limit_gb" "$expires_at"
-      ensure_client_enforce_timer
+      append_ss_user "$name" "$value"
       apply_config
       ;;
     2)
@@ -4006,11 +3755,8 @@ add_client() {
         fi
         break
       done
-      traffic_limit_gb="$(prompt_client_traffic_limit_gb "VLESS 客户端总流量" "0")" || return 1
-      expires_at="$(prompt_client_expiry_time "VLESS 客户端到期时间" "")" || return 1
       value="$(generate_uuid)"
-      append_vless_user "$name" "$value" "$traffic_limit_gb" "$expires_at"
-      ensure_client_enforce_timer
+      append_vless_user "$name" "$value"
       apply_config
       ;;
     3)
@@ -4026,11 +3772,8 @@ add_client() {
         fi
         break
       done
-      traffic_limit_gb="$(prompt_client_traffic_limit_gb "Hysteria2 客户端总流量" "0")" || return 1
-      expires_at="$(prompt_client_expiry_time "Hysteria2 客户端到期时间" "")" || return 1
       value="$(generate_password)"
-      append_hy2_user "$name" "$value" "$traffic_limit_gb" "$expires_at"
-      ensure_client_enforce_timer
+      append_hy2_user "$name" "$value"
       apply_config
       ;;
     *)
@@ -4494,7 +4237,6 @@ Sing-box 状态：$(sing_box_install_status)
 Shadowsocks 2022 规则个数：$(state_get '.protocols.shadowsocks.users | length')
 VLESS + Reality 规则个数：$(state_get '.protocols.vless_reality.users | length')
 Hysteria2 规则个数：$(state_get '.protocols.hysteria2.users | length')
-流量统计 API：$(state_get '.traffic_stats.enabled // false')
 AI 分流状态：$(state_get '.routing.ai.enabled // false')
 
 请选择要执行的操作
@@ -4763,6 +4505,7 @@ main_menu() {
       "7" "新增客户端" \
       "8" "删除客户端" \
       "9" "查看客户端信息" \
+<<<<<<< HEAD
       "10" "客户端流量 / 到期管理" \
       "11" "查看订阅链接" \
       "12" "重新生成配置并重载服务" \
@@ -4773,6 +4516,20 @@ main_menu() {
       "17" "重新安装 / 修复（保留规则）" \
       "18" "全新重装（删除所有配置）" \
       "19" "卸载" \
+=======
+      "10" "查看订阅链接" \
+      "11" "重新生成配置并重载服务" \
+      "12" "查看当前概览" \
+      "13" "查看服务状态" \
+      "14" "配置 AI 分流" \
+      "15" "查看 AI 分流规则" \
+      "16" "新增 AI 分流规则" \
+      "17" "删除 AI 分流规则" \
+      "18" "导出 NekoBox 分流规则" \
+      "19" "Realm 中转" \
+      "20" "重新安装 / 修复（保留规则）" \
+      "21" "卸载" \
+>>>>>>> parent of 9c992e4 (Update index.sh)
       "0" "退出")" || break
 
     case "$choice" in
@@ -4804,34 +4561,47 @@ main_menu() {
         show_client_info
         ;;
       10)
-        client_limit_submenu
-        ;;
-      11)
         show_subscription_links
         ;;
-      12)
+      11)
         apply_config
         ;;
-      13)
+      12)
         show_overview
         ;;
-      14)
+      13)
         show_service_status
         ;;
+      14)
+        configure_ai_routing
+        ;;
       15)
-        ai_routing_submenu
+        show_ai_routing_rules
         ;;
       16)
-        prepare_realm_menu && realm_submenu
+        append_ai_routing_rules
         ;;
       17)
+        delete_ai_routing_rule
+        ;;
+      18)
+        show_nekobox_routing_exports
+        ;;
+      19)
+        prepare_realm_menu && realm_submenu
+        ;;
+      20)
         export SBOX_REPAIR_OPEN_PANEL=1
         repair_install
         ;;
+<<<<<<< HEAD
       18)
         fresh_install
         ;;
       19)
+=======
+      21)
+>>>>>>> parent of 9c992e4 (Update index.sh)
         uninstall_sbox
         ;;
       0)
@@ -4856,6 +4626,7 @@ usage() {
   $SCRIPT_NAME fresh-install  删除全部配置后全新安装（可加 --yes 跳过确认）
   $SCRIPT_NAME add-client     打开新增客户端流程
   $SCRIPT_NAME remove-client  打开删除客户端流程
+<<<<<<< HEAD
   $SCRIPT_NAME traffic        查看客户端流量使用情况
   $SCRIPT_NAME client-limits  设置客户端总流量和到期时间
   $SCRIPT_NAME traffic-api    开启 / 关闭 V2Ray API 流量统计
@@ -4866,6 +4637,8 @@ usage() {
   $SCRIPT_NAME enforce-clients
                           刷新客户端流量并执行到期 / 超额限制
   $SCRIPT_NAME ai             打开一键AI分流菜单
+=======
+>>>>>>> parent of 9c992e4 (Update index.sh)
   $SCRIPT_NAME ai-route       配置 AI 分流到远端 SS / VLESS 落地节点
   $SCRIPT_NAME ai-rules       查看 AI 分流规则
   $SCRIPT_NAME add-ai-rule domain1 keyword2
@@ -4885,11 +4658,17 @@ usage() {
   1. 面板使用纯命令行数字输入，不依赖方向键。
   2. Hysteria2 默认使用自签名证书。
   3. 非交互安装可通过 SINGBOX_SERVER_ADDRESS=your.domain 指定节点地址。
+<<<<<<< HEAD
   4. 一键安装会从源码编译带 with_v2ray_api 的 sing-box，便于后续启用客户端流量统计。
   5. AI 分流支持 Shadowsocks 和 VLESS，落地节点地址可以是域名、IPv4 或 IPv6。
   6. repair-install 会重装 / 更新脚本和 sing-box 核心，但不会删除状态文件、客户端或分流规则。
   7. 一键安装只安装环境；当你启用协议或新增客户端后，才会生成对应的协议链接。
   8. 客户端流量统计依赖 grpcurl、v2ray 或 xray 查询命令；到期 / 超额会通过 auth_user 拒绝规则限制。
+=======
+  4. AI 分流支持 Shadowsocks 和 VLESS，落地节点地址可以是域名、IPv4 或 IPv6。
+  5. repair-install 会重装 / 更新脚本和 sing-box 核心，但不会删除状态文件、客户端或分流规则。
+  6. 一键安装只安装环境；当你启用协议或新增客户端后，才会生成对应的协议链接。
+>>>>>>> parent of 9c992e4 (Update index.sh)
 EOF
 }
 
@@ -4938,6 +4717,7 @@ main() {
       init_state_file
       remove_client
       ;;
+<<<<<<< HEAD
     traffic|client-traffic|show-traffic)
       require_linux
       require_root
@@ -4983,6 +4763,8 @@ main() {
       init_state_file
       ai_routing_submenu
       ;;
+=======
+>>>>>>> parent of 9c992e4 (Update index.sh)
     ai-route)
       require_linux
       require_root

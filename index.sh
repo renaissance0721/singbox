@@ -730,6 +730,11 @@ init_state_file() {
         "grok.com",
         "deepseek.com",
         "deepseek.ai",
+        "google.com",
+        "googleapis.com",
+        "gstatic.com",
+        "googleusercontent.com",
+        "ggpht.com",
         "generativelanguage.googleapis.com",
         "aistudio.google.com",
         "gemini.google.com"
@@ -772,6 +777,34 @@ cleanup_removed_traffic_state() {
   '
 }
 
+sync_ai_google_rules() {
+  state_jq --arg ts "$(utc_now)" '
+    def has_suffix($value): ((.routing.ai.domain_suffix // []) | index($value)) != null;
+    def has_keyword($value): ((.routing.ai.domain_keyword // []) | index($value)) != null;
+    def has_google_ai_rule:
+      has_suffix("gemini.google.com")
+      or has_suffix("aistudio.google.com")
+      or has_suffix("generativelanguage.googleapis.com")
+      or has_keyword("gemini");
+
+    [
+      "google.com",
+      "googleapis.com",
+      "gstatic.com",
+      "googleusercontent.com",
+      "ggpht.com"
+    ] as $google_ai_domains |
+    (.routing.ai.domain_suffix // []) as $current_domains |
+    ($google_ai_domains | map(select(($current_domains | index(.)) == null))) as $missing_domains |
+    if has_google_ai_rule and (($missing_domains | length) > 0) then
+      .routing.ai.domain_suffix = (($current_domains + $missing_domains) | unique) |
+      .meta.updated_at = $ts
+    else
+      .
+    end
+  '
+}
+
 migrate_state_schema() {
   if jq -e '
     (.routing.ai.enabled? != null)
@@ -787,6 +820,7 @@ migrate_state_schema() {
     and (.routing.ai.reality_short_id? != null)
   ' "$STATE_FILE" >/dev/null 2>&1; then
     cleanup_removed_traffic_state
+    sync_ai_google_rules
     return 0
   fi
 
@@ -822,6 +856,11 @@ migrate_state_schema() {
       "grok.com",
       "deepseek.com",
       "deepseek.ai",
+      "google.com",
+      "googleapis.com",
+      "gstatic.com",
+      "googleusercontent.com",
+      "ggpht.com",
       "generativelanguage.googleapis.com",
       "aistudio.google.com",
       "gemini.google.com"
@@ -839,6 +878,7 @@ migrate_state_schema() {
   '
 
   cleanup_removed_traffic_state
+  sync_ai_google_rules
 }
 
 format_ai_rule_list() {

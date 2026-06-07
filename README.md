@@ -18,7 +18,7 @@
 - 支持客户端新增、删除、导出
 - 自动生成 Reality 密钥、随机密码和 Hysteria2 自签名证书
 - 支持零预置的自定义分流规则集，可随时新增、查看和删除
-- 分流落地支持 SOCKS5 和 Shadowsocks
+- 支持添加多个 SOCKS5 / Shadowsocks 分流落地
 
 ## 适用环境
 
@@ -55,7 +55,29 @@ sbox
 
 ## 分流管理
 
-进入面板后选择“分流管理”，可选择：
+进入面板后选择“分流管理”，可以新增多个落地。每个落地拥有独立名称、代理信息和规则集，例如：
+
+```text
+us-ai  -> chatgpt, openai
+jp-ai  -> claude
+```
+
+同一个规则集只会绑定一个落地；将它添加到另一个落地时，脚本会自动从原落地解绑。
+
+可重复执行以下命令新增落地：
+
+```bash
+sbox split-route
+```
+
+也可以通过面板或命令编辑、停用和删除落地：
+
+```bash
+sbox edit-split-route
+sbox delete-split-route
+```
+
+每个落地可选择：
 
 - SOCKS5：填写 IP 或域名、端口、用户名和密码
 - Shadowsocks：填写 IP 或域名、端口、加密方式和密码
@@ -78,7 +100,7 @@ plain
 
 其中 `plain` 会按 `none` 生成配置，两个不带 `ietf` 的 Poly1305 名称会转换为 sing-box 支持的标准名称。
 
-脚本不预置任何规则集。新增规则时只需输入名称，例如：
+脚本不预置任何规则集。新增落地或为已有落地追加规则时，只需输入名称，例如：
 
 ```text
 chatgpt
@@ -91,7 +113,9 @@ claude
 sbox add-split-rule chatgpt claude
 ```
 
-查看规则集：
+执行后会提示选择这些规则要绑定到哪个落地。
+
+查看全部落地和规则集：
 
 ```bash
 sbox split-rules

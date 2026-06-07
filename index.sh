@@ -701,15 +701,8 @@ init_state_file() {
   },
   "routing": {
     "split": {
-      "enabled": false,
-      "outbound_type": "socks",
-      "server": "",
-      "port": 1080,
-      "username": "",
-      "password": "",
-      "method": "2022-blake3-aes-256-gcm",
       "legacy_defaults_removed": true,
-      "rule_sets": []
+      "outbounds": []
     }
   }
 }
@@ -717,7 +710,7 @@ EOF
 }
 
 state_get() {
-  jq -r "$1" "$STATE_FILE"
+  jq -r "$@" "$STATE_FILE"
 }
 
 state_jq() {
@@ -741,109 +734,84 @@ cleanup_removed_traffic_state() {
 
 migrate_state_schema() {
   if jq -e '
-    (.routing.split.enabled? != null)
-    and (.routing.split.outbound_type? != null)
-    and (.routing.split.server? != null)
-    and (.routing.split.port? != null)
-    and (.routing.split.username? != null)
-    and (.routing.split.password? != null)
-    and (.routing.split.method? != null)
-    and (.routing.split.legacy_defaults_removed? == true)
-    and (.routing.split.rule_sets? != null)
+    (.routing.split.legacy_defaults_removed? == true)
+    and (.routing.split.outbounds? | type == "array")
   ' "$STATE_FILE" >/dev/null 2>&1; then
     cleanup_removed_traffic_state
     return 0
   fi
 
   state_jq --arg ts "$(utc_now)" '
-    .routing = (.routing // {}) |
-    .routing.split = (
-      .routing.split // {
+    def clean_rules:
+      map(ascii_downcase)
+      | map(select(. as $rule | [
+          "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com",
+          "anthropic.com", "claude.ai", "perplexity.ai", "poe.com", "sora.com",
+          "x.ai", "grok.com", "deepseek.com", "deepseek.ai", "google.com",
+          "googleapis.com", "gstatic.com", "googleusercontent.com", "ggpht.com",
+          "generativelanguage.googleapis.com", "aistudio.google.com",
+          "gemini.google.com", "openai", "chatgpt", "gpt", "anthropic",
+          "claude", "perplexity", "gemini"
+        ] | index($rule) | not))
+      | unique;
+    def normalize_method:
+      if . == "plain" then "none"
+      elif . == "chacha20-poly1305" then "chacha20-ietf-poly1305"
+      elif . == "xchacha20-poly1305" then "xchacha20-ietf-poly1305"
+      else . end;
+    def legacy_split:
+      {
+        id: "default",
+        name: "default",
+        enabled: (
+          (.enabled // false)
+          and (((.rule_sets // []) | clean_rules | length) > 0)
+        ),
+        outbound_type: (.outbound_type // "socks"),
+        server: (.server // ""),
+        port: (.port // 1080),
+        username: (.username // ""),
+        password: (.password // ""),
+        method: ((.method // "2022-blake3-aes-256-gcm") | normalize_method),
+        rule_sets: ((.rule_sets // []) | clean_rules)
+      };
+    def legacy_ai:
+      {
+        id: "default",
+        name: "default",
         enabled: false,
         outbound_type: (
-          if (.routing.ai.outbound_type // "") == "shadowsocks" then
-            "shadowsocks"
-          else
-            "socks"
-          end
+          if (.outbound_type // "") == "shadowsocks" then "shadowsocks"
+          else "socks" end
         ),
-        server: (.routing.ai.server // ""),
-        port: (.routing.ai.port // 1080),
+        server: (.server // ""),
+        port: (.port // 1080),
         username: "",
         password: (
-          if (.routing.ai.outbound_type // "") == "shadowsocks" then
-            (.routing.ai.password // "")
-          else
-            ""
-          end
+          if (.outbound_type // "") == "shadowsocks" then (.password // "")
+          else "" end
         ),
-        method: (.routing.ai.method // "2022-blake3-aes-256-gcm"),
-        legacy_defaults_removed: false,
+        method: ((.method // "2022-blake3-aes-256-gcm") | normalize_method),
         rule_sets: (
-          ((.routing.ai.domain_suffix // []) + (.routing.ai.domain_keyword // []))
-          | map(ascii_downcase)
-          | unique
+          ((.domain_suffix // []) + (.domain_keyword // [])) | clean_rules
         )
-      }
-    ) |
-    .routing.split.enabled = (.routing.split.enabled // false) |
-    .routing.split.outbound_type = (.routing.split.outbound_type // "socks") |
-    .routing.split.server = (.routing.split.server // "") |
-    .routing.split.port = (.routing.split.port // 1080) |
-    .routing.split.username = (.routing.split.username // "") |
-    .routing.split.password = (.routing.split.password // "") |
-    .routing.split.method = (
-      (.routing.split.method // "2022-blake3-aes-256-gcm")
-      | if . == "plain" then
-          "none"
-        elif . == "chacha20-poly1305" then
-          "chacha20-ietf-poly1305"
-        elif . == "xchacha20-poly1305" then
-          "xchacha20-ietf-poly1305"
+      };
+    .routing = (.routing // {}) |
+    (.routing.split // {}) as $split |
+    .routing.split = {
+      legacy_defaults_removed: true,
+      outbounds: (
+        if ($split.outbounds? | type) == "array" then
+          $split.outbounds
+        elif ($split.server // "") != "" or (($split.rule_sets // []) | length) > 0 then
+          [$split | legacy_split]
+        elif (.routing.ai? != null) then
+          [.routing.ai | legacy_ai]
         else
-          .
+          []
         end
-    ) |
-    .routing.split.rule_sets = (
-      (.routing.split.rule_sets // [])
-      | map(ascii_downcase)
-      | map(select(. as $rule | [
-          "openai.com",
-          "chatgpt.com",
-          "oaistatic.com",
-          "oaiusercontent.com",
-          "anthropic.com",
-          "claude.ai",
-          "perplexity.ai",
-          "poe.com",
-          "sora.com",
-          "x.ai",
-          "grok.com",
-          "deepseek.com",
-          "deepseek.ai",
-          "google.com",
-          "googleapis.com",
-          "gstatic.com",
-          "googleusercontent.com",
-          "ggpht.com",
-          "generativelanguage.googleapis.com",
-          "aistudio.google.com",
-          "gemini.google.com",
-          "openai",
-          "chatgpt",
-          "gpt",
-          "anthropic",
-          "claude",
-          "perplexity",
-          "gemini"
-        ] | index($rule) | not))
-      | unique
-    ) |
-    .routing.split.legacy_defaults_removed = true |
-    .routing.split.enabled = (
-      .routing.split.enabled
-      and ((.routing.split.rule_sets | length) > 0)
-    ) |
+      )
+    } |
     del(.routing.ai) |
     .meta.updated_at = $ts
   '
@@ -852,7 +820,7 @@ migrate_state_schema() {
 }
 
 format_split_rule_list() {
-  jq -r '(.routing.split.rule_sets // []) | join(", ")' "$STATE_FILE"
+  jq -r '[.routing.split.outbounds[]?.rule_sets[]?] | unique | join(", ")' "$STATE_FILE"
 }
 
 build_split_rules_json() {
@@ -988,13 +956,13 @@ nekobox_guide_file() {
 
 render_nekobox_route_rule_json() {
   jq '{
-    domain_keyword: (.routing.split.rule_sets // [] | unique),
+    domain_keyword: ([.routing.split.outbounds[]?.rule_sets[]?] | unique),
     outbound: "proxy"
   }' "$STATE_FILE"
 }
 
 render_nekobox_domain_rules() {
-  jq -r '(.routing.split.rule_sets // [] | unique | map("keyword:" + .) | join("\n"))' "$STATE_FILE"
+  jq -r '([.routing.split.outbounds[]?.rule_sets[]?] | unique | map("keyword:" + .) | join("\n"))' "$STATE_FILE"
 }
 
 render_nekobox_ip_rules() {
@@ -1475,13 +1443,12 @@ validate_state() {
   local errors=""
   local ss_enabled vless_enabled hy2_enabled
   local server_address vless_server_name handshake_server
-  local split_enabled split_type split_server split_username split_password split_method
+  local split_name split_enabled split_type split_server split_port split_username split_password split_method split_rule_count
 
   ss_enabled="$(state_get '.protocols.shadowsocks.enabled')"
   vless_enabled="$(state_get '.protocols.vless_reality.enabled')"
   hy2_enabled="$(state_get '.protocols.hysteria2.enabled')"
   server_address="$(state_get '.meta.server_address')"
-  split_enabled="$(state_get '.routing.split.enabled // false')"
 
   [[ -n "$server_address" && "$server_address" != "null" ]] || errors+=$'节点对外地址不能为空。\n'
 
@@ -1514,23 +1481,33 @@ validate_state() {
     [[ -f "$(state_get '.protocols.hysteria2.key_path')" ]] || errors+=$'Hysteria2 私钥文件不存在。\n'
   fi
 
-  if [[ "$split_enabled" == "true" ]]; then
-    split_type="$(state_get '.routing.split.outbound_type // "socks"')"
-    split_server="$(state_get '.routing.split.server')"
-    split_username="$(state_get '.routing.split.username')"
-    split_password="$(state_get '.routing.split.password')"
-    split_method="$(state_get '.routing.split.method // ""')"
-    [[ "$split_type" == "socks" || "$split_type" == "shadowsocks" ]] || errors+=$'分流落地类型仅支持 SOCKS5 或 Shadowsocks。\n'
-    [[ -n "$split_server" && "$split_server" != "null" ]] || errors+=$'分流落地地址不能为空。\n'
-    [[ "$(state_get '.routing.split.port')" =~ ^[0-9]+$ ]] || errors+=$'分流落地端口必须是数字。\n'
+  while IFS=$'\x1f' read -r split_name split_enabled split_type split_server split_port split_username split_password split_method split_rule_count; do
+    split_rule_count="${split_rule_count%$'\r'}"
+    [[ "$split_enabled" == "true" ]] || continue
+    [[ "$split_type" == "socks" || "$split_type" == "shadowsocks" ]] || errors+="分流落地 ${split_name} 类型仅支持 SOCKS5 或 Shadowsocks。"$'\n'
+    [[ -n "$split_server" && "$split_server" != "null" ]] || errors+="分流落地 ${split_name} 地址不能为空。"$'\n'
+    [[ "$split_port" =~ ^[0-9]+$ ]] || errors+="分流落地 ${split_name} 端口必须是数字。"$'\n'
     if [[ "$split_type" == "socks" ]]; then
-      [[ -n "$split_username" && "$split_username" != "null" ]] || errors+=$'分流落地 SOCKS5 用户名不能为空。\n'
+      [[ -n "$split_username" && "$split_username" != "null" ]] || errors+="分流落地 ${split_name} 的 SOCKS5 用户名不能为空。"$'\n'
     else
-      is_supported_split_shadowsocks_method "$split_method" || errors+=$'分流落地 Shadowsocks 加密方式不受支持。\n'
+      is_supported_split_shadowsocks_method "$split_method" || errors+="分流落地 ${split_name} 的 Shadowsocks 加密方式不受支持。"$'\n'
     fi
-    [[ -n "$split_password" && "$split_password" != "null" ]] || errors+=$'分流落地密码不能为空。\n'
-    [[ "$(state_get '(.routing.split.rule_sets // []) | length')" -gt 0 ]] || errors+=$'至少需要一个分流规则集。\n'
-  fi
+    [[ -n "$split_password" && "$split_password" != "null" ]] || errors+="分流落地 ${split_name} 密码不能为空。"$'\n'
+    [[ "$split_rule_count" -gt 0 ]] || errors+="分流落地 ${split_name} 至少需要一个规则集。"$'\n'
+  done < <(jq -r '
+    .routing.split.outbounds[]? |
+    [
+      .name,
+      (.enabled // false),
+      (.outbound_type // "socks"),
+      (.server // ""),
+      (.port // 0),
+      (.username // ""),
+      (.password // ""),
+      (.method // ""),
+      ((.rule_sets // []) | length)
+    ] | map(tostring) | join("\u001f")
+  ' "$STATE_FILE")
 
   if [[ -n "$errors" ]]; then
     ui_show_text "配置校验失败" "$errors"
@@ -1542,8 +1519,10 @@ validate_state() {
 
 render_config() {
   jq '
-  def split_rule_tag:
-    "split:" + .;
+  def split_outbound_tag:
+    "split-out:" + .;
+  def split_rule_tag($id; $rule):
+    "split:" + $id + ":" + $rule;
   def split_ss_method:
     if . == "plain" then
       "none"
@@ -1652,51 +1631,50 @@ render_config() {
         tag: "direct"
       },
       (
-        if (.routing.split.enabled // false) then
-          if (.routing.split.outbound_type // "socks") == "shadowsocks" then
+        .routing.split.outbounds[]?
+        | select((.enabled // false) and ((.rule_sets // []) | length > 0))
+        | if (.outbound_type // "socks") == "shadowsocks" then
             {
               type: "shadowsocks",
-              tag: "split-out",
-              server: .routing.split.server,
-              server_port: .routing.split.port,
-              method: (.routing.split.method | split_ss_method),
-              password: .routing.split.password
+              tag: (.id | split_outbound_tag),
+              server: .server,
+              server_port: .port,
+              method: (.method | split_ss_method),
+              password: .password
             }
           else
             {
               type: "socks",
-              tag: "split-out",
-              server: .routing.split.server,
-              server_port: .routing.split.port,
+              tag: (.id | split_outbound_tag),
+              server: .server,
+              server_port: .port,
               version: "5",
-              username: .routing.split.username,
-              password: .routing.split.password
+              username: .username,
+              password: .password
             }
           end
-        else empty
-        end
       )
     ],
     route: {
       rule_set: [
         (
-          if (.routing.split.enabled // false) then
-            .routing.split.rule_sets[] | {
+          .routing.split.outbounds[]?
+          | select((.enabled // false) and ((.rule_sets // []) | length > 0))
+          | . as $outbound
+          | .rule_sets[] | {
               type: "inline",
-              tag: split_rule_tag,
+              tag: split_rule_tag($outbound.id; .),
               rules: [
                 {
                   domain_keyword: [.]
                 }
               ]
             }
-          else empty
-          end
         )
       ],
       rules: [
         (
-          if (.routing.split.enabled // false) then
+          if ([.routing.split.outbounds[]? | select((.enabled // false) and ((.rule_sets // []) | length > 0))] | length) > 0 then
             {
               action: "sniff",
               sniffer: ["http", "tls", "quic"],
@@ -1706,14 +1684,14 @@ render_config() {
           end
         ),
         (
-          if (.routing.split.enabled // false) then
-            {
-              rule_set: [.routing.split.rule_sets[] | split_rule_tag],
+          .routing.split.outbounds[]?
+          | select((.enabled // false) and ((.rule_sets // []) | length > 0))
+          | . as $outbound
+          | {
+              rule_set: [.rule_sets[] | split_rule_tag($outbound.id; .)],
               action: "route",
-              outbound: "split-out"
+              outbound: ($outbound.id | split_outbound_tag)
             }
-          else empty
-          end
         )
       ],
       final: "direct"
@@ -2358,21 +2336,74 @@ delete_node() {
   apply_config || return 0
 }
 
+split_outbound_count() {
+  state_get '(.routing.split.outbounds // []) | length'
+}
+
+select_split_outbound_id() {
+  local title=${1:-选择分流落地}
+  local prompt=${2:-请选择分流落地}
+  local choice index id name type server port enabled
+  local -a ids=()
+  local -a options=()
+
+  while IFS=$'\t' read -r id name type server port enabled; do
+    [[ -n "$id" ]] || continue
+    ids+=("$id")
+    options+=("${#ids[@]}" "${name} | ${type} | ${server}:${port} | enabled=${enabled}")
+  done < <(jq -r '.routing.split.outbounds[]? | [.id, .name, .outbound_type, .server, .port, (.enabled // false)] | @tsv' "$STATE_FILE")
+
+  (( ${#ids[@]} > 0 )) || return 1
+  options+=("0" "返回")
+  choice="$(ui_menu "$title" "$prompt" "${options[@]}")" || return 1
+  [[ "$choice" == "0" ]] && return 1
+  [[ "$choice" =~ ^[0-9]+$ ]] || return 1
+  index=$((choice - 1))
+  (( index >= 0 && index < ${#ids[@]} )) || return 1
+  printf '%s\n' "${ids[$index]}"
+}
+
 configure_split_routing() {
-  local current_enabled current_type current_server current_port current_username current_password current_method
-  local type_choice outbound_type server port username password method_choice method
+  local outbound_id=${1:-}
+  local is_new=0 current_enabled current_type current_server current_port current_username current_password current_method current_rules
+  local type_choice outbound_type server port username password method_choice method rules_input rules_json name
 
-  current_enabled="$(state_get '.routing.split.enabled // false')"
-  current_type="$(state_get '.routing.split.outbound_type // "socks"')"
-  current_server="$(state_get '.routing.split.server // ""')"
-  current_port="$(state_get '.routing.split.port // 1080')"
-  current_username="$(state_get '.routing.split.username // ""')"
-  current_password="$(state_get '.routing.split.password // ""')"
-  current_method="$(state_get '.routing.split.method // "2022-blake3-aes-256-gcm"')"
+  if [[ -z "$outbound_id" ]]; then
+    is_new=1
+    name="$(prompt_nonempty "新增分流落地" "请输入唯一名称，只能包含字母、数字、点、下划线和连字符" "route-$(($(split_outbound_count) + 1))")" || return 1
+    name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+    [[ "$name" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || {
+      ui_msg "落地名称格式无效。"
+      return 1
+    }
+    if jq -e --arg id "$name" '.routing.split.outbounds[]? | select(.id == $id)' "$STATE_FILE" >/dev/null; then
+      ui_msg "该落地名称已存在。"
+      return 1
+    fi
+    outbound_id="$name"
+    current_enabled="false"
+    current_type="socks"
+    current_server=""
+    current_port="1080"
+    current_username=""
+    current_password=""
+    current_method="2022-blake3-aes-256-gcm"
+    current_rules=""
+  else
+    name="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | .name')"
+    current_enabled="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.enabled // false)')"
+    current_type="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.outbound_type // "socks")')"
+    current_server="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.server // "")')"
+    current_port="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.port // 1080)')"
+    current_username="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.username // "")')"
+    current_password="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.password // "")')"
+    current_method="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.method // "2022-blake3-aes-256-gcm")')"
+    current_rules="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.rule_sets // []) | join(", ")')"
+  fi
 
-  if ! ui_yesno "是否启用或继续配置分流？选择否将关闭分流。当前状态：${current_enabled}"; then
-    state_jq --arg ts "$(utc_now)" '
-      .routing.split.enabled = false |
+  if (( ! is_new )) && ! ui_yesno "是否启用并编辑落地 ${name}？选择否将停用该落地。当前状态：${current_enabled}"; then
+    state_jq --arg id "$outbound_id" --arg ts "$(utc_now)" '
+      (.routing.split.outbounds[] | select(.id == $id) | .enabled) = false |
       .meta.updated_at = $ts
     '
     apply_config
@@ -2387,10 +2418,7 @@ configure_split_routing() {
     1) outbound_type="socks" ;;
     2) outbound_type="shadowsocks" ;;
     0) return 0 ;;
-    *)
-      ui_msg "无效选项，请重新选择。"
-      return 1
-      ;;
+    *) ui_msg "无效选项，请重新选择。"; return 1 ;;
   esac
 
   server="$(prompt_nonempty "分流落地地址" "请输入落地 IP 或域名" "$current_server")" || return 1
@@ -2415,188 +2443,199 @@ configure_split_routing() {
       10) method="2022-blake3-aes-256-gcm" ;;
       11) method="2022-blake3-chacha20-poly1305" ;;
       0) return 0 ;;
-      *)
-        ui_msg "无效加密方式，请重新选择。"
-        return 1
-        ;;
+      *) ui_msg "无效加密方式，请重新选择。"; return 1 ;;
     esac
     method="$(normalize_shadowsocks_method "$method")"
   fi
 
   password="$(ui_password "分流落地密码" "请输入落地密码；留空则保留当前密码")" || return 1
   [[ -n "$password" ]] || password="$current_password"
-  if [[ -z "$password" || "$password" == "null" ]]; then
+  [[ -n "$password" && "$password" != "null" ]] || {
     ui_msg "落地密码不能为空。"
     return 1
-  fi
+  }
 
-  state_jq --arg outbound_type "$outbound_type" --arg server "$server" --argjson port "$port" \
-    --arg username "$username" --arg password "$password" --arg method "$method" --arg ts "$(utc_now)" '
-    .routing.split.enabled = (((.routing.split.rule_sets // []) | length) > 0) |
-    .routing.split.outbound_type = $outbound_type |
-    .routing.split.server = $server |
-    .routing.split.port = $port |
-    .routing.split.username = $username |
-    .routing.split.password = $password |
-    .routing.split.method = $method |
+  rules_input="$(ui_input "落地规则集" "请输入该落地绑定的规则集名称，可用逗号或空格分隔" "$current_rules")" || return 1
+  rules_json="$(build_split_rules_json "$rules_input")"
+
+  state_jq --arg id "$outbound_id" --arg name "$name" --arg outbound_type "$outbound_type" \
+    --arg server "$server" --argjson port "$port" --arg username "$username" --arg password "$password" \
+    --arg method "$method" --argjson rules "$rules_json" --arg ts "$(utc_now)" '
+    {
+      id: $id,
+      name: $name,
+      enabled: (($rules | length) > 0),
+      outbound_type: $outbound_type,
+      server: $server,
+      port: $port,
+      username: $username,
+      password: $password,
+      method: $method,
+      rule_sets: $rules
+    } as $outbound |
+    .routing.split.outbounds |= map(
+      if .id == $id then
+        .
+      else
+        .rule_sets = ((.rule_sets // []) - $rules) |
+        .enabled = ((.enabled // false) and ((.rule_sets | length) > 0))
+      end
+    ) |
+    if any(.routing.split.outbounds[]?; .id == $id) then
+      .routing.split.outbounds |= map(if .id == $id then $outbound else . end)
+    else
+      .routing.split.outbounds += [$outbound]
+    end |
     .meta.updated_at = $ts
   '
 
-  if [[ "$(state_get '(.routing.split.rule_sets // []) | length')" -eq 0 ]]; then
-    ui_msg "落地信息已保存。请继续添加至少一个规则集，例如 chatgpt 或 claude。"
-    return 0
+  if [[ "$(printf '%s' "$rules_json" | jq -r 'length')" -eq 0 ]]; then
+    ui_msg "落地已保存但未启用，请为它添加至少一个规则集。"
+  else
+    apply_config
   fi
+}
 
+edit_split_routing() {
+  local outbound_id
+  outbound_id="$(select_split_outbound_id "编辑分流落地" "请选择要编辑或停用的落地")" || return 0
+  configure_split_routing "$outbound_id"
+}
+
+delete_split_outbound() {
+  local outbound_id name
+  outbound_id="$(select_split_outbound_id "删除分流落地" "请选择要删除的落地")" || return 0
+  name="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | .name')"
+  ui_yesno "确认删除分流落地 ${name} 及其全部规则集吗？" || return 0
+  state_jq --arg id "$outbound_id" --arg ts "$(utc_now)" '
+    .routing.split.outbounds |= map(select(.id != $id)) |
+    .meta.updated_at = $ts
+  '
   apply_config
 }
 
 show_split_routing_rules() {
-  local rules_text summary
-  rules_text="$(jq -r '
-    (.routing.split.rule_sets // [])
-    | if length == 0 then "当前没有分流规则集。" else map("domain_keyword: " + .) | join("\n") end
+  local summary
+  summary="$(jq -r '
+    if (.routing.split.outbounds // [] | length) == 0 then
+      "当前没有分流落地。"
+    else
+      .routing.split.outbounds
+      | map(
+          "[\(.name)]\n"
+          + "enabled = \(.enabled // false)\n"
+          + "outbound = \(.outbound_type // "socks")\n"
+          + "address = \(.server):\(.port)\n"
+          + "username = \(.username // "-")\n"
+          + "method = \(.method // "-")\n"
+          + "rule_sets = \((.rule_sets // []) | join(", "))"
+        )
+      | join("\n\n")
+    end
   ' "$STATE_FILE")"
-
-  summary=$(
-    cat <<EOF
-enabled = $(state_get '.routing.split.enabled // false')
-outbound = $(state_get '.routing.split.outbound_type // "socks"')
-address = $(state_get '.routing.split.server // "-"')
-port = $(state_get '.routing.split.port // "-"')
-username = $(state_get '.routing.split.username // "-"')
-method = $(state_get '.routing.split.method // "-"')
-
-[Rule Sets]
-${rules_text}
-EOF
-  )
-
-  ui_show_text "分流规则集" "$summary"
+  ui_show_text "分流落地与规则集" "$summary"
 }
 
 append_split_routing_rules() {
-  local rules_input rules_json rules_count
-
+  local outbound_id rules_input rules_json
+  [[ "$(split_outbound_count)" -gt 0 ]] || {
+    ui_msg "请先新增分流落地。"
+    return 0
+  }
+  outbound_id="$(select_split_outbound_id "新增分流规则集" "请选择规则集要绑定的落地")" || return 0
   if (( $# > 0 )); then
     rules_input="$*"
   else
     rules_input="$(prompt_nonempty "新增分流规则集" "请输入规则集名称，可用逗号或空格分隔；例如 chatgpt, claude" "")" || return 1
   fi
-
-  if ! rules_json="$(build_split_rules_json "$rules_input")"; then
-    ui_msg "分流规则集解析失败，请检查输入后重试。"
+  rules_json="$(build_split_rules_json "$rules_input")"
+  [[ "$(printf '%s' "$rules_json" | jq -r 'length')" -gt 0 ]] || {
+    ui_msg "规则集名称格式无效。"
     return 1
-  fi
-  rules_count="$(printf '%s' "$rules_json" | jq -r 'length')"
-  if [[ "$rules_count" -eq 0 ]]; then
-    ui_msg "规则集名称只能包含字母、数字、点、下划线和连字符。"
-    return 1
-  fi
-
-  state_jq --argjson rules "$rules_json" --arg ts "$(utc_now)" '
-    .routing.split.rule_sets = (((.routing.split.rule_sets // []) + $rules) | unique) |
-    .routing.split.enabled = (
-      ((.routing.split.server // "") != "")
-      and ((.routing.split.password // "") != "")
-      and (
-        if (.routing.split.outbound_type // "socks") == "shadowsocks" then
-          ((.routing.split.method // "") != "")
-        else
-          ((.routing.split.username // "") != "")
-        end
-      )
+  }
+  state_jq --arg id "$outbound_id" --argjson rules "$rules_json" --arg ts "$(utc_now)" '
+    .routing.split.outbounds |= map(
+      if .id == $id then
+        .rule_sets = (((.rule_sets // []) + $rules) | unique) |
+        .enabled = true
+      else
+        .rule_sets = ((.rule_sets // []) - $rules) |
+        .enabled = ((.enabled // false) and ((.rule_sets | length) > 0))
+      end
     ) |
     .meta.updated_at = $ts
   '
-
-  if [[ "$(state_get '.routing.split.enabled // false')" == "true" ]]; then
-    apply_config
-  else
-    ui_msg "规则集已保存。配置分流落地后即可启用。"
-  fi
+  apply_config
 }
 
 delete_split_routing_rule() {
-  local total_count choice selected_index selected_rule
+  local outbound_id total_count choice selected_index selected_rule
   local -a rule_values=()
   local -a options=()
-
-  total_count="$(state_get '(.routing.split.rule_sets // []) | length')"
-  if [[ "$total_count" -eq 0 ]]; then
-    ui_msg "当前没有可删除的分流规则集。"
+  outbound_id="$(select_split_outbound_id "删除分流规则集" "请选择规则集所属的落地")" || return 0
+  total_count="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.rule_sets // []) | length')"
+  [[ "$total_count" -gt 0 ]] || {
+    ui_msg "该落地没有可删除的规则集。"
     return 0
-  fi
-
+  }
   while IFS= read -r selected_rule; do
-    [[ -n "$selected_rule" ]] || continue
     rule_values+=("$selected_rule")
     options+=("${#rule_values[@]}" "$selected_rule")
-  done < <(jq -r '.routing.split.rule_sets[]?' "$STATE_FILE")
-
+  done < <(jq -r --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | .rule_sets[]?' "$STATE_FILE")
   options+=("0" "返回")
   choice="$(ui_menu "删除分流规则集" "请选择要删除的规则集" "${options[@]}")" || return 1
   [[ "$choice" == "0" ]] && return 0
-  [[ "$choice" =~ ^[0-9]+$ ]] || {
-    ui_msg "无效选项，请重新选择。"
-    return 1
-  }
-
+  [[ "$choice" =~ ^[0-9]+$ ]] || return 1
   selected_index=$((choice - 1))
-  (( selected_index >= 0 && selected_index < ${#rule_values[@]} )) || {
-    ui_msg "无效选项，请重新选择。"
-    return 1
-  }
+  (( selected_index >= 0 && selected_index < ${#rule_values[@]} )) || return 1
   selected_rule="${rule_values[$selected_index]}"
-
-  if [[ "$total_count" -eq 1 ]]; then
-    ui_yesno "这是最后一个规则集。删除后将自动关闭分流，是否继续？" || return 0
-    state_jq --arg ts "$(utc_now)" '
-      .routing.split.enabled = false |
-      .routing.split.rule_sets = [] |
-      .meta.updated_at = $ts
-    '
-  else
-    state_jq --arg rule "$selected_rule" --arg ts "$(utc_now)" '
-      .routing.split.rule_sets |= map(select(. != $rule)) |
-      .meta.updated_at = $ts
-    '
-  fi
-
+  state_jq --arg id "$outbound_id" --arg rule "$selected_rule" --arg ts "$(utc_now)" '
+    .routing.split.outbounds |= map(
+      if .id == $id then
+        .rule_sets = ((.rule_sets // []) | map(select(. != $rule))) |
+        .enabled = ((.rule_sets | length) > 0)
+      else
+        .
+      end
+    ) |
+    .meta.updated_at = $ts
+  '
   apply_config
 }
 
 split_routing_menu_text() {
   cat <<EOF
-分流状态：$(state_get '.routing.split.enabled // false')
-落地类型：$(state_get '.routing.split.outbound_type // "socks"')
-分流落地：$(state_get '.routing.split.server // "-"'):$(state_get '.routing.split.port // "-"')
-规则集数量：$(state_get '(.routing.split.rule_sets // []) | length')
+分流落地数量：$(split_outbound_count)
+已启用落地数量：$(state_get '[.routing.split.outbounds[]? | select(.enabled == true)] | length')
+规则集总数：$(state_get '[.routing.split.outbounds[]?.rule_sets[]?] | length')
 
-每个规则集名称按域名关键词匹配，例如 chatgpt、claude。
+每个落地独立绑定规则集，例如 chatgpt 走落地 A、claude 走落地 B。
 请选择要执行的操作（输入 0 返回上一级，输入 00 退出脚本）
 EOF
 }
 
 split_routing_submenu() {
   local choice menu_text
-
   while true; do
     menu_text="$(split_routing_menu_text)"
     choice="$(ui_menu "分流管理" "$menu_text" \
-      "1" "配置分流落地" \
-      "2" "查看分流规则集" \
-      "3" "新增分流规则集" \
-      "4" "删除分流规则集" \
-      "5" "导出 NekoBox 分流规则" \
+      "1" "新增分流落地" \
+      "2" "编辑 / 停用分流落地" \
+      "3" "删除分流落地" \
+      "4" "查看全部落地与规则集" \
+      "5" "为落地新增规则集" \
+      "6" "删除落地规则集" \
+      "7" "导出 NekoBox 分流规则" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || return 1
-
     case "$choice" in
       1) configure_split_routing ;;
-      2) show_split_routing_rules ;;
-      3) append_split_routing_rules ;;
-      4) delete_split_routing_rule ;;
-      5) show_nekobox_routing_exports ;;
+      2) edit_split_routing ;;
+      3) delete_split_outbound ;;
+      4) show_split_routing_rules ;;
+      5) append_split_routing_rules ;;
+      6) delete_split_routing_rule ;;
+      7) show_nekobox_routing_exports ;;
       0) return 0 ;;
       00) exit 0 ;;
       *) ui_msg "无效选项，请重新选择。" ;;
@@ -3199,7 +3238,7 @@ Sing-box 状态：$(sing_box_install_status)
 Shadowsocks 2022 规则个数：$(state_get '.protocols.shadowsocks.users | length')
 VLESS + Reality 规则个数：$(state_get '.protocols.vless_reality.users | length')
 Hysteria2 规则个数：$(state_get '.protocols.hysteria2.users | length')
-分流状态：$(state_get '.routing.split.enabled // false')
+分流落地：$(state_get '(.routing.split.outbounds // []) | length') 个
 
 请选择要执行的操作
 EOF
@@ -3355,12 +3394,8 @@ obfs_password = $(state_get '.protocols.hysteria2.obfs_password')
 users = $hy2_users
 
 [Split Routing]
-enabled = $(state_get '.routing.split.enabled // false')
-outbound = $(state_get '.routing.split.outbound_type // "socks"')
-address = $(state_get '.routing.split.server // "-"')
-port = $(state_get '.routing.split.port // "-"')
-username = $(state_get '.routing.split.username // "-"')
-method = $(state_get '.routing.split.method // "-"')
+outbounds = $(state_get '(.routing.split.outbounds // []) | length')
+enabled_outbounds = $(state_get '[.routing.split.outbounds[]? | select(.enabled == true)] | length')
 rule_sets = $(format_split_rule_list)
 EOF
   )
@@ -3523,8 +3558,12 @@ usage() {
   $SCRIPT_NAME add-client     打开新增客户端流程
   $SCRIPT_NAME remove-client  打开删除客户端流程
   $SCRIPT_NAME split          打开分流管理菜单
-  $SCRIPT_NAME split-route    配置 SOCKS5 / Shadowsocks 分流落地
-  $SCRIPT_NAME split-rules    查看分流规则集
+  $SCRIPT_NAME split-route    新增 SOCKS5 / Shadowsocks 分流落地
+  $SCRIPT_NAME edit-split-route
+                          编辑或停用分流落地
+  $SCRIPT_NAME delete-split-route
+                          删除分流落地
+  $SCRIPT_NAME split-rules    查看全部分流落地与规则集
   $SCRIPT_NAME add-split-rule chatgpt claude
                           新增分流规则集
   $SCRIPT_NAME delete-split-rule
@@ -3544,8 +3583,8 @@ usage() {
   2. Hysteria2 默认使用自签名证书。
   3. 非交互安装可通过 SINGBOX_SERVER_ADDRESS=your.domain 指定节点地址。
   4. 一键安装使用官方原生 sing-box 软件包。
-  5. 分流落地支持 SOCKS5 和 Shadowsocks；Shadowsocks 可选择多种 AEAD / 2022 加密方式。
-  6. 不预置规则集；历史内置默认规则会在迁移时删除，规则可随时新增、查看和删除。
+  5. 支持添加多个 SOCKS5 / Shadowsocks 分流落地，每个落地独立绑定规则集。
+  6. Shadowsocks 可选择多种 AEAD / 2022 加密方式；不预置任何规则集。
   7. repair-install 会重装 / 更新脚本和 sing-box 核心，但不会删除状态文件、客户端或分流规则。
   8. 一键安装只安装环境；当你启用协议或新增客户端后，才会生成对应的协议链接。
 EOF
@@ -3624,6 +3663,22 @@ main() {
       ensure_dirs
       init_state_file
       configure_split_routing
+      ;;
+    edit-split-route|edit-split-outbound)
+      require_linux
+      require_root
+      ensure_ui_backend
+      ensure_dirs
+      init_state_file
+      edit_split_routing
+      ;;
+    delete-split-route|remove-split-route|delete-split-outbound)
+      require_linux
+      require_root
+      ensure_ui_backend
+      ensure_dirs
+      init_state_file
+      delete_split_outbound
       ;;
     split-rules|show-split-rules|ai-rules|show-ai-rules)
       require_linux

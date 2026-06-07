@@ -612,8 +612,18 @@ generate_hex() {
   openssl rand -hex "$bytes" | tr -d '\n'
 }
 
-generate_vless_port() {
-  printf '%s\n' "$((10000 + RANDOM % 50001))"
+generate_random_service_port() {
+  printf '%s\n' "$((10000 + ((RANDOM * 32768 + RANDOM) % 50001)))"
+}
+
+generate_random_service_port_excluding() {
+  local excluded_port=${1:-}
+  local port
+  port="$(generate_random_service_port)"
+  while [[ -n "$excluded_port" && "$port" == "$excluded_port" ]]; do
+    port="$(generate_random_service_port)"
+  done
+  printf '%s\n' "$port"
 }
 
 generate_base64_bytes() {
@@ -648,9 +658,10 @@ init_state_file() {
     return 0
   fi
 
-  local now vless_default_port
+  local now ss_default_port vless_default_port
   now="$(utc_now)"
-  vless_default_port="$(generate_vless_port)"
+  ss_default_port="$(generate_random_service_port)"
+  vless_default_port="$(generate_random_service_port_excluding "$ss_default_port")"
 
   cat >"$STATE_FILE" <<EOF
 {
@@ -666,7 +677,7 @@ init_state_file() {
     "shadowsocks": {
       "enabled": false,
       "listen": "0.0.0.0",
-      "port": 8388,
+      "port": $ss_default_port,
       "network": "tcp",
       "method": "2022-blake3-aes-256-gcm",
       "server_password": "",
@@ -1334,19 +1345,25 @@ EOF
 }
 
 ensure_ss_defaults() {
-  local current_password user_count listen_addr
+  local current_password current_port vless_port user_count listen_addr
   current_password="$(state_get '.protocols.shadowsocks.server_password')"
+  current_port="$(state_get '.protocols.shadowsocks.port')"
+  vless_port="$(state_get '.protocols.vless_reality.port')"
   user_count="$(state_get '.protocols.shadowsocks.users | length')"
   listen_addr="$(default_listen_address)"
+
+  if [[ -z "$current_port" || "$current_port" == "null" || "$current_port" == "8388" ]]; then
+    current_port="$(generate_random_service_port_excluding "$vless_port")"
+  fi
 
   if [[ -z "$current_password" || "$current_password" == "null" ]]; then
     current_password="$(generate_base64_bytes 32)"
   fi
 
-  state_jq --arg password "$current_password" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
+  state_jq --argjson port "$current_port" --arg password "$current_password" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
     .protocols.shadowsocks.enabled = true |
     .protocols.shadowsocks.listen = $listen_addr |
-    .protocols.shadowsocks.port = (.protocols.shadowsocks.port // 8388) |
+    .protocols.shadowsocks.port = $port |
     .protocols.shadowsocks.network = "tcp" |
     .protocols.shadowsocks.method = "2022-blake3-aes-256-gcm" |
     .protocols.shadowsocks.multiplex = true |
@@ -1360,17 +1377,18 @@ ensure_ss_defaults() {
 }
 
 ensure_vless_defaults() {
-  local private_key public_key short_id user_count keypair listen_addr vless_port vless_sni
+  local private_key public_key short_id user_count keypair listen_addr ss_port vless_port vless_sni
   private_key="$(state_get '.protocols.vless_reality.private_key')"
   public_key="$(state_get '.protocols.vless_reality.public_key')"
   short_id="$(state_get '.protocols.vless_reality.short_id')"
   user_count="$(state_get '.protocols.vless_reality.users | length')"
   listen_addr="$(default_listen_address)"
+  ss_port="$(state_get '.protocols.shadowsocks.port')"
   vless_port="$(state_get '.protocols.vless_reality.port')"
   vless_sni="$(state_get '.protocols.vless_reality.server_name')"
 
   if [[ -z "$vless_port" || "$vless_port" == "null" || "$vless_port" == "443" ]]; then
-    vless_port="$(generate_vless_port)"
+    vless_port="$(generate_random_service_port_excluding "$ss_port")"
   fi
 
   if [[ -z "$vless_sni" || "$vless_sni" == "null" || "$vless_sni" == "www.cloudflare.com" ]]; then
@@ -2036,11 +2054,15 @@ configure_node_name() {
 }
 
 configure_shadowsocks() {
-  local current_port port regenerate_password server_password listen_addr
+  local current_port vless_port port regenerate_password server_password listen_addr
 
   prompt_node_name_for_protocol
 
   current_port="$(state_get '.protocols.shadowsocks.port')"
+  vless_port="$(state_get '.protocols.vless_reality.port')"
+  if [[ -z "$current_port" || "$current_port" == "null" || "$current_port" == "8388" ]]; then
+    current_port="$(generate_random_service_port_excluding "$vless_port")"
+  fi
   port="$(prompt_number "Shadowsocks 端口" "请输入 Shadowsocks 监听端口" "$current_port" 1 65535)" || return 1
 
   regenerate_password="false"
@@ -2073,16 +2095,17 @@ configure_shadowsocks() {
 }
 
 configure_vless_reality() {
-  local current_port port current_sni sni current_handshake_port handshake_port keypair private_key public_key short_id listen_addr
+  local current_port ss_port port current_sni sni current_handshake_port handshake_port keypair private_key public_key short_id listen_addr
 
   prompt_node_name_for_protocol
 
   current_port="$(state_get '.protocols.vless_reality.port')"
+  ss_port="$(state_get '.protocols.shadowsocks.port')"
   current_sni="$(state_get '.protocols.vless_reality.server_name')"
   current_handshake_port="$(state_get '.protocols.vless_reality.handshake_port')"
 
   if [[ -z "$current_port" || "$current_port" == "null" || "$current_port" == "443" ]]; then
-    current_port="$(generate_vless_port)"
+    current_port="$(generate_random_service_port_excluding "$ss_port")"
   fi
   if [[ -z "$current_sni" || "$current_sni" == "null" || "$current_sni" == "www.cloudflare.com" ]]; then
     current_sni="www.tesla.com"
@@ -2852,7 +2875,7 @@ add_realm_forward_rule() {
     return 1
   }
 
-  listen_port="$(realm_prompt_number_limited error_count "本地端口" "请输入需要监听的本地端口" "$(generate_vless_port)" 10000 60000)" || return 1
+  listen_port="$(realm_prompt_number_limited error_count "本地端口" "请输入需要监听的本地端口" "$(generate_random_service_port)" 10000 60000)" || return 1
   remote_host="$(realm_prompt_nonempty_limited error_count "落地地址" "请输入目标地址【落地机的ip或域名】" "")" || return 1
   remote_port="$(realm_prompt_number_limited error_count "落地端口" "请输入目标端口【落地节点的端口】" "443" 1 65535)" || return 1
 
@@ -2880,7 +2903,7 @@ add_realm_range_rule() {
   }
 
   while true; do
-    listen_start="$(realm_prompt_number_limited error_count "起始端口" "请输入本地起始端口" "$(generate_vless_port)" 10000 60000)" || return 1
+    listen_start="$(realm_prompt_number_limited error_count "起始端口" "请输入本地起始端口" "$(generate_random_service_port)" 10000 60000)" || return 1
     listen_end="$(realm_prompt_number_limited error_count "结束端口" "请输入本地结束端口" "$listen_start" 10000 60000)" || return 1
     if (( listen_end >= listen_start )); then
       break

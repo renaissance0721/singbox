@@ -153,10 +153,12 @@ sbox uninstall
 ### Shadowsocks 2022
 
 - 默认使用 `2022-blake3-aes-256-gcm`
+- 默认端口在 `10000-60000` 范围内随机生成
 - 服务端主密码和用户密码会分开生成
 
 ### VLESS + Reality
 
+- 默认端口在 `10000-60000` 范围内随机生成，并避开 Shadowsocks 默认端口
 - 默认流控为 `xtls-rprx-vision`
 - 会自动生成 Reality 密钥对和 `short_id`
 - 首次配置建议确认伪装域名和端口是否可访问

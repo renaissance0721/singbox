@@ -17,6 +17,8 @@
 - 支持 `Shadowsocks 2022`、`VLESS + Reality`、`Hysteria2`
 - 支持客户端新增、删除、导出
 - 自动生成 Reality 密钥、随机密码和 Hysteria2 自签名证书
+- 支持零预置的自定义分流规则集，可随时新增、查看和删除
+- 分流落地支持 SOCKS5 和 Shadowsocks
 
 ## 适用环境
 
@@ -49,6 +51,56 @@ curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/instal
 
 ```bash
 sbox
+```
+
+## 分流管理
+
+进入面板后选择“分流管理”，可选择：
+
+- SOCKS5：填写 IP 或域名、端口、用户名和密码
+- Shadowsocks：填写 IP 或域名、端口、加密方式和密码
+
+Shadowsocks 分流落地支持：
+
+```text
+aes-256-gcm
+aes-128-gcm
+chacha20-poly1305
+chacha20-ietf-poly1305
+xchacha20-poly1305
+xchacha20-ietf-poly1305
+none
+plain
+2022-blake3-aes-128-gcm
+2022-blake3-aes-256-gcm
+2022-blake3-chacha20-poly1305
+```
+
+其中 `plain` 会按 `none` 生成配置，两个不带 `ietf` 的 Poly1305 名称会转换为 sing-box 支持的标准名称。
+
+脚本不预置任何规则集。新增规则时只需输入名称，例如：
+
+```text
+chatgpt
+claude
+```
+
+每个名称会创建一个独立的内联规则集，并按域名关键词匹配。也可以一次输入多个名称：
+
+```bash
+sbox add-split-rule chatgpt claude
+```
+
+查看规则集：
+
+```bash
+sbox split-rules
+```
+
+删除规则集：
+
+```bash
+sbox delete-split-rule
 ```
 
 如需卸载：

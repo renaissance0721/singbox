@@ -21,7 +21,7 @@ set -Eeuo pipefail
 
 ORIGINAL_ARGS=("$@")
 SELF_PATH="${BASH_SOURCE[0]}"
-SCRIPT_VERSION="0.2.4"
+SCRIPT_VERSION="0.3.0"
 SCRIPT_NAME="${0##*/}"
 APP_TITLE="Sing-box 管理面板 | 输入 sbox 快捷打开脚本"
 STATE_DIR="${STATE_DIR:-/etc/sing-box-manager}"
@@ -700,54 +700,16 @@ init_state_file() {
     }
   },
   "routing": {
-    "ai": {
+    "split": {
       "enabled": false,
-      "outbound_type": "shadowsocks",
+      "outbound_type": "socks",
       "server": "",
-      "port": 443,
-      "method": "chacha20-ietf-poly1305",
+      "port": 1080,
+      "username": "",
       "password": "",
-      "uuid": "",
-      "flow": "",
-      "tls_enabled": false,
-      "tls_server_name": "",
-      "tls_insecure": false,
-      "reality_enabled": false,
-      "reality_public_key": "",
-      "reality_short_id": "",
-      "network": "tcp",
-      "domain_suffix": [
-        "openai.com",
-        "chatgpt.com",
-        "oaistatic.com",
-        "oaiusercontent.com",
-        "anthropic.com",
-        "claude.ai",
-        "perplexity.ai",
-        "poe.com",
-        "sora.com",
-        "x.ai",
-        "grok.com",
-        "deepseek.com",
-        "deepseek.ai",
-        "google.com",
-        "googleapis.com",
-        "gstatic.com",
-        "googleusercontent.com",
-        "ggpht.com",
-        "generativelanguage.googleapis.com",
-        "aistudio.google.com",
-        "gemini.google.com"
-      ],
-      "domain_keyword": [
-        "openai",
-        "chatgpt",
-        "gpt",
-        "anthropic",
-        "claude",
-        "perplexity",
-        "gemini"
-      ]
+      "method": "2022-blake3-aes-256-gcm",
+      "legacy_defaults_removed": true,
+      "rule_sets": []
     }
   }
 }
@@ -777,144 +739,178 @@ cleanup_removed_traffic_state() {
   '
 }
 
-sync_ai_google_rules() {
-  state_jq --arg ts "$(utc_now)" '
-    def has_suffix($value): ((.routing.ai.domain_suffix // []) | index($value)) != null;
-    def has_keyword($value): ((.routing.ai.domain_keyword // []) | index($value)) != null;
-    def has_google_ai_rule:
-      has_suffix("gemini.google.com")
-      or has_suffix("aistudio.google.com")
-      or has_suffix("generativelanguage.googleapis.com")
-      or has_keyword("gemini");
-
-    [
-      "google.com",
-      "googleapis.com",
-      "gstatic.com",
-      "googleusercontent.com",
-      "ggpht.com"
-    ] as $google_ai_domains |
-    (.routing.ai.domain_suffix // []) as $current_domains |
-    ($google_ai_domains | map(select(($current_domains | index(.)) == null))) as $missing_domains |
-    if has_google_ai_rule and (($missing_domains | length) > 0) then
-      .routing.ai.domain_suffix = (($current_domains + $missing_domains) | unique) |
-      .meta.updated_at = $ts
-    else
-      .
-    end
-  '
-}
-
 migrate_state_schema() {
   if jq -e '
-    (.routing.ai.enabled? != null)
-    and (.routing.ai.domain_suffix? != null)
-    and (.routing.ai.domain_keyword? != null)
-    and (.routing.ai.uuid? != null)
-    and (.routing.ai.flow? != null)
-    and (.routing.ai.tls_enabled? != null)
-    and (.routing.ai.tls_server_name? != null)
-    and (.routing.ai.tls_insecure? != null)
-    and (.routing.ai.reality_enabled? != null)
-    and (.routing.ai.reality_public_key? != null)
-    and (.routing.ai.reality_short_id? != null)
+    (.routing.split.enabled? != null)
+    and (.routing.split.outbound_type? != null)
+    and (.routing.split.server? != null)
+    and (.routing.split.port? != null)
+    and (.routing.split.username? != null)
+    and (.routing.split.password? != null)
+    and (.routing.split.method? != null)
+    and (.routing.split.legacy_defaults_removed? == true)
+    and (.routing.split.rule_sets? != null)
   ' "$STATE_FILE" >/dev/null 2>&1; then
     cleanup_removed_traffic_state
-    sync_ai_google_rules
     return 0
   fi
 
   state_jq --arg ts "$(utc_now)" '
     .routing = (.routing // {}) |
-    .routing.ai = (.routing.ai // {}) |
-    .routing.ai.enabled = (.routing.ai.enabled // false) |
-    .routing.ai.outbound_type = (.routing.ai.outbound_type // "shadowsocks") |
-    .routing.ai.server = (.routing.ai.server // "") |
-    .routing.ai.port = (.routing.ai.port // 443) |
-    .routing.ai.method = (.routing.ai.method // "chacha20-ietf-poly1305") |
-    .routing.ai.password = (.routing.ai.password // "") |
-    .routing.ai.uuid = (.routing.ai.uuid // "") |
-    .routing.ai.flow = (.routing.ai.flow // "") |
-    .routing.ai.tls_enabled = (.routing.ai.tls_enabled // false) |
-    .routing.ai.tls_server_name = (.routing.ai.tls_server_name // "") |
-    .routing.ai.tls_insecure = (.routing.ai.tls_insecure // false) |
-    .routing.ai.reality_enabled = (.routing.ai.reality_enabled // false) |
-    .routing.ai.reality_public_key = (.routing.ai.reality_public_key // "") |
-    .routing.ai.reality_short_id = (.routing.ai.reality_short_id // "") |
-    .routing.ai.network = (.routing.ai.network // "tcp") |
-    .routing.ai.domain_suffix = (.routing.ai.domain_suffix // [
-      "openai.com",
-      "chatgpt.com",
-      "oaistatic.com",
-      "oaiusercontent.com",
-      "anthropic.com",
-      "claude.ai",
-      "perplexity.ai",
-      "poe.com",
-      "sora.com",
-      "x.ai",
-      "grok.com",
-      "deepseek.com",
-      "deepseek.ai",
-      "google.com",
-      "googleapis.com",
-      "gstatic.com",
-      "googleusercontent.com",
-      "ggpht.com",
-      "generativelanguage.googleapis.com",
-      "aistudio.google.com",
-      "gemini.google.com"
-    ]) |
-    .routing.ai.domain_keyword = (.routing.ai.domain_keyword // [
-      "openai",
-      "chatgpt",
-      "gpt",
-      "anthropic",
-      "claude",
-      "perplexity",
-      "gemini"
-    ]) |
+    .routing.split = (
+      .routing.split // {
+        enabled: false,
+        outbound_type: (
+          if (.routing.ai.outbound_type // "") == "shadowsocks" then
+            "shadowsocks"
+          else
+            "socks"
+          end
+        ),
+        server: (.routing.ai.server // ""),
+        port: (.routing.ai.port // 1080),
+        username: "",
+        password: (
+          if (.routing.ai.outbound_type // "") == "shadowsocks" then
+            (.routing.ai.password // "")
+          else
+            ""
+          end
+        ),
+        method: (.routing.ai.method // "2022-blake3-aes-256-gcm"),
+        legacy_defaults_removed: false,
+        rule_sets: (
+          ((.routing.ai.domain_suffix // []) + (.routing.ai.domain_keyword // []))
+          | map(ascii_downcase)
+          | unique
+        )
+      }
+    ) |
+    .routing.split.enabled = (.routing.split.enabled // false) |
+    .routing.split.outbound_type = (.routing.split.outbound_type // "socks") |
+    .routing.split.server = (.routing.split.server // "") |
+    .routing.split.port = (.routing.split.port // 1080) |
+    .routing.split.username = (.routing.split.username // "") |
+    .routing.split.password = (.routing.split.password // "") |
+    .routing.split.method = (
+      (.routing.split.method // "2022-blake3-aes-256-gcm")
+      | if . == "plain" then
+          "none"
+        elif . == "chacha20-poly1305" then
+          "chacha20-ietf-poly1305"
+        elif . == "xchacha20-poly1305" then
+          "xchacha20-ietf-poly1305"
+        else
+          .
+        end
+    ) |
+    .routing.split.rule_sets = (
+      (.routing.split.rule_sets // [])
+      | map(ascii_downcase)
+      | map(select(. as $rule | [
+          "openai.com",
+          "chatgpt.com",
+          "oaistatic.com",
+          "oaiusercontent.com",
+          "anthropic.com",
+          "claude.ai",
+          "perplexity.ai",
+          "poe.com",
+          "sora.com",
+          "x.ai",
+          "grok.com",
+          "deepseek.com",
+          "deepseek.ai",
+          "google.com",
+          "googleapis.com",
+          "gstatic.com",
+          "googleusercontent.com",
+          "ggpht.com",
+          "generativelanguage.googleapis.com",
+          "aistudio.google.com",
+          "gemini.google.com",
+          "openai",
+          "chatgpt",
+          "gpt",
+          "anthropic",
+          "claude",
+          "perplexity",
+          "gemini"
+        ] | index($rule) | not))
+      | unique
+    ) |
+    .routing.split.legacy_defaults_removed = true |
+    .routing.split.enabled = (
+      .routing.split.enabled
+      and ((.routing.split.rule_sets | length) > 0)
+    ) |
+    del(.routing.ai) |
     .meta.updated_at = $ts
   '
 
   cleanup_removed_traffic_state
-  sync_ai_google_rules
 }
 
-format_ai_rule_list() {
-  jq -r '((.routing.ai.domain_suffix // []) + (.routing.ai.domain_keyword // [])) | join(", ")' "$STATE_FILE"
+format_split_rule_list() {
+  jq -r '(.routing.split.rule_sets // []) | join(", ")' "$STATE_FILE"
 }
 
-build_ai_rules_json() {
+build_split_rules_json() {
   local input=$1
   jq -nc --arg input "$input" '
-    def normalized_items:
-      (. // "" | tostring | ascii_downcase)
-      | gsub("，|、|；"; ",")
-      | gsub("[,;[:space:]]+"; ",")
-      | split(",")
-      | map(
-          (. // "" | tostring)
-          | gsub("^\\s+|\\s+$"; "")
-          | sub("^[a-z][a-z0-9+.-]*://"; "")
-          | sub("^//"; "")
-          | split("/")[0]
-          | (. // "" | tostring)
-          | sub("^\\["; "")
-          | sub("\\]$"; "")
-          | sub(":[0-9]+$"; "")
-          | sub("^\\*\\."; "")
-          | sub("^\\."; "")
-        )
-      | map(select(length > 0))
-      | unique;
-
-    ($input | normalized_items) as $items |
-    {
-      domain_suffix: ($items | map(select(contains(".")))),
-      domain_keyword: ($items | map(select(contains(".") | not)))
-    }
+    ($input | ascii_downcase)
+    | gsub("，|、|；"; ",")
+    | gsub("[,;[:space:]]+"; ",")
+    | split(",")
+    | map(gsub("^\\s+|\\s+$"; ""))
+    | map(select(test("^[a-z0-9][a-z0-9._-]*$")))
+    | unique
   '
+}
+
+normalize_shadowsocks_method() {
+  case "$1" in
+    chacha20-poly1305)
+      printf 'chacha20-ietf-poly1305\n'
+      ;;
+    xchacha20-poly1305)
+      printf 'xchacha20-ietf-poly1305\n'
+      ;;
+    plain)
+      printf 'none\n'
+      ;;
+    *)
+      printf '%s\n' "$1"
+      ;;
+  esac
+}
+
+is_supported_split_shadowsocks_method() {
+  case "$(normalize_shadowsocks_method "$1")" in
+    aes-256-gcm|aes-128-gcm|chacha20-ietf-poly1305|xchacha20-ietf-poly1305|none|2022-blake3-aes-128-gcm|2022-blake3-aes-256-gcm|2022-blake3-chacha20-poly1305)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+ui_split_shadowsocks_method_menu() {
+  local current_method=${1:-2022-blake3-aes-256-gcm}
+  ui_menu "Shadowsocks 加密方式" "请选择加密方式。当前：${current_method}" \
+    "1" "aes-256-gcm" \
+    "2" "aes-128-gcm" \
+    "3" "chacha20-poly1305" \
+    "4" "chacha20-ietf-poly1305" \
+    "5" "xchacha20-poly1305" \
+    "6" "xchacha20-ietf-poly1305" \
+    "7" "none" \
+    "8" "plain" \
+    "9" "2022-blake3-aes-128-gcm" \
+    "10" "2022-blake3-aes-256-gcm" \
+    "11" "2022-blake3-chacha20-poly1305" \
+    "0" "返回"
 }
 
 init_realm_state_file() {
@@ -975,42 +971,34 @@ direct_links_file() {
 }
 
 nekobox_route_rule_file() {
-  printf '%s/nekobox-ai-route-rule.json\n' "$CLIENT_DIR"
+  printf '%s/nekobox-split-route-rule.json\n' "$CLIENT_DIR"
 }
 
 nekobox_domain_rules_file() {
-  printf '%s/nekobox-ai-domain-rules.txt\n' "$CLIENT_DIR"
+  printf '%s/nekobox-split-domain-rules.txt\n' "$CLIENT_DIR"
 }
 
 nekobox_ip_rules_file() {
-  printf '%s/nekobox-ai-ip-rules.txt\n' "$CLIENT_DIR"
+  printf '%s/nekobox-split-ip-rules.txt\n' "$CLIENT_DIR"
 }
 
 nekobox_guide_file() {
-  printf '%s/nekobox-ai-routing-guide.txt\n' "$CLIENT_DIR"
+  printf '%s/nekobox-split-routing-guide.txt\n' "$CLIENT_DIR"
 }
 
 render_nekobox_route_rule_json() {
   jq '{
-    domain: (.routing.ai.domain_suffix // [] | map(select(contains("."))) | unique),
-    domain_suffix: (.routing.ai.domain_suffix // [] | map(select(contains("."))) | map(if startswith(".") then . else "." + . end) | unique),
-    domain_keyword: (.routing.ai.domain_keyword // [] | unique),
-    ip_cidr: (((.routing.ai.ip_cidr // []) + (.routing.ai.resolved_ip_cidr // [])) | unique),
+    domain_keyword: (.routing.split.rule_sets // [] | unique),
     outbound: "proxy"
   }' "$STATE_FILE"
 }
 
 render_nekobox_domain_rules() {
-  jq -r '
-    [
-      (.routing.ai.domain_suffix // [] | unique | map("domain:" + .)[]?),
-      (.routing.ai.domain_keyword // [] | unique | map("keyword:" + .)[]?)
-    ] | join("\n")
-  ' "$STATE_FILE"
+  jq -r '(.routing.split.rule_sets // [] | unique | map("keyword:" + .) | join("\n"))' "$STATE_FILE"
 }
 
 render_nekobox_ip_rules() {
-  jq -r '(((.routing.ai.ip_cidr // []) + (.routing.ai.resolved_ip_cidr // [])) | unique | join("\n"))' "$STATE_FILE"
+  printf ''
 }
 
 write_nekobox_exports() {
@@ -1025,7 +1013,7 @@ write_nekobox_exports() {
   render_nekobox_ip_rules >"$ip_file"
 
   cat >"$guide_file" <<EOF
-NekoBox for Android AI 分流使用说明
+NekoBox for Android 分流使用说明
 
 NekoBox 导入节点/订阅时通常只解析节点 outbound，订阅或服务端里的分流规则不会自动进入 NekoBox 路由。
 请在手机端 NekoBox 本地添加路由规则：
@@ -1487,13 +1475,13 @@ validate_state() {
   local errors=""
   local ss_enabled vless_enabled hy2_enabled
   local server_address vless_server_name handshake_server
-  local ai_enabled ai_protocol ai_server ai_password ai_uuid ai_reality_enabled ai_reality_public_key
+  local split_enabled split_type split_server split_username split_password split_method
 
   ss_enabled="$(state_get '.protocols.shadowsocks.enabled')"
   vless_enabled="$(state_get '.protocols.vless_reality.enabled')"
   hy2_enabled="$(state_get '.protocols.hysteria2.enabled')"
   server_address="$(state_get '.meta.server_address')"
-  ai_enabled="$(state_get '.routing.ai.enabled // false')"
+  split_enabled="$(state_get '.routing.split.enabled // false')"
 
   [[ -n "$server_address" && "$server_address" != "null" ]] || errors+=$'节点对外地址不能为空。\n'
 
@@ -1526,27 +1514,22 @@ validate_state() {
     [[ -f "$(state_get '.protocols.hysteria2.key_path')" ]] || errors+=$'Hysteria2 私钥文件不存在。\n'
   fi
 
-  if [[ "$ai_enabled" == "true" ]]; then
-    ai_protocol="$(state_get '.routing.ai.outbound_type // "shadowsocks"')"
-    ai_server="$(state_get '.routing.ai.server')"
-    [[ "$ai_protocol" == "shadowsocks" || "$ai_protocol" == "vless" ]] || errors+=$'AI 分流出站协议仅支持 Shadowsocks 或 VLESS。\n'
-    [[ -n "$ai_server" && "$ai_server" != "null" ]] || errors+=$'AI 分流落地节点地址不能为空。\n'
-    [[ "$(state_get '.routing.ai.port')" =~ ^[0-9]+$ ]] || errors+=$'AI 分流落地节点端口必须是数字。\n'
-    if [[ "$ai_protocol" == "shadowsocks" ]]; then
-      ai_password="$(state_get '.routing.ai.password')"
-      [[ -n "$(state_get '.routing.ai.method')" ]] || errors+=$'AI 分流 Shadowsocks 加密方式不能为空。\n'
-      [[ -n "$ai_password" && "$ai_password" != "null" ]] || errors+=$'AI 分流 Shadowsocks 密码不能为空。\n'
+  if [[ "$split_enabled" == "true" ]]; then
+    split_type="$(state_get '.routing.split.outbound_type // "socks"')"
+    split_server="$(state_get '.routing.split.server')"
+    split_username="$(state_get '.routing.split.username')"
+    split_password="$(state_get '.routing.split.password')"
+    split_method="$(state_get '.routing.split.method // ""')"
+    [[ "$split_type" == "socks" || "$split_type" == "shadowsocks" ]] || errors+=$'分流落地类型仅支持 SOCKS5 或 Shadowsocks。\n'
+    [[ -n "$split_server" && "$split_server" != "null" ]] || errors+=$'分流落地地址不能为空。\n'
+    [[ "$(state_get '.routing.split.port')" =~ ^[0-9]+$ ]] || errors+=$'分流落地端口必须是数字。\n'
+    if [[ "$split_type" == "socks" ]]; then
+      [[ -n "$split_username" && "$split_username" != "null" ]] || errors+=$'分流落地 SOCKS5 用户名不能为空。\n'
+    else
+      is_supported_split_shadowsocks_method "$split_method" || errors+=$'分流落地 Shadowsocks 加密方式不受支持。\n'
     fi
-    if [[ "$ai_protocol" == "vless" ]]; then
-      ai_uuid="$(state_get '.routing.ai.uuid')"
-      ai_reality_enabled="$(state_get '.routing.ai.reality_enabled // false')"
-      ai_reality_public_key="$(state_get '.routing.ai.reality_public_key')"
-      [[ -n "$ai_uuid" && "$ai_uuid" != "null" ]] || errors+=$'AI 分流 VLESS UUID 不能为空。\n'
-      if [[ "$ai_reality_enabled" == "true" ]]; then
-        [[ -n "$ai_reality_public_key" && "$ai_reality_public_key" != "null" ]] || errors+=$'AI 分流 VLESS Reality public key 不能为空。\n'
-      fi
-    fi
-    [[ "$(state_get '((.routing.ai.domain_suffix // []) + (.routing.ai.domain_keyword // [])) | length')" -gt 0 ]] || errors+=$'AI 分流域名规则不能为空。\n'
+    [[ -n "$split_password" && "$split_password" != "null" ]] || errors+=$'分流落地密码不能为空。\n'
+    [[ "$(state_get '(.routing.split.rule_sets // []) | length')" -gt 0 ]] || errors+=$'至少需要一个分流规则集。\n'
   fi
 
   if [[ -n "$errors" ]]; then
@@ -1559,13 +1542,18 @@ validate_state() {
 
 render_config() {
   jq '
-  def ai_route_matcher:
-    (.routing.ai.domain_suffix // []) as $suffix |
-    {
-      domain: ($suffix | map(select(contains("."))) | unique),
-      domain_suffix: ($suffix | map(select(contains("."))) | map(if startswith(".") then . else "." + . end) | unique),
-      domain_keyword: (.routing.ai.domain_keyword // [] | unique)
-    };
+  def split_rule_tag:
+    "split:" + .;
+  def split_ss_method:
+    if . == "plain" then
+      "none"
+    elif . == "chacha20-poly1305" then
+      "chacha20-ietf-poly1305"
+    elif . == "xchacha20-poly1305" then
+      "xchacha20-ietf-poly1305"
+    else
+      .
+    end;
 
   {
     log: {
@@ -1664,52 +1652,25 @@ render_config() {
         tag: "direct"
       },
       (
-        if (.routing.ai.enabled // false) then
-          if (.routing.ai.outbound_type // "shadowsocks") == "vless" then
-            (
-              {
-                type: "vless",
-                tag: "ai-out",
-                server: .routing.ai.server,
-                server_port: .routing.ai.port,
-                uuid: .routing.ai.uuid,
-                network: (.routing.ai.network // "tcp")
-              }
-              + (if (.routing.ai.flow // "") != "" then
-                  { flow: .routing.ai.flow }
-                else {} end)
-              + (if (.routing.ai.tls_enabled // false) or (.routing.ai.reality_enabled // false) then
-                  {
-                    tls: (
-                      {
-                        enabled: true,
-                        insecure: (.routing.ai.tls_insecure // false)
-                      }
-                      + (if (.routing.ai.tls_server_name // "") != "" then
-                          { server_name: .routing.ai.tls_server_name }
-                        else {} end)
-                      + (if (.routing.ai.reality_enabled // false) then
-                          {
-                            reality: {
-                              enabled: true,
-                              public_key: .routing.ai.reality_public_key,
-                              short_id: (.routing.ai.reality_short_id // "")
-                            }
-                          }
-                        else {} end)
-                    )
-                  }
-                else {} end)
-            )
-          else
+        if (.routing.split.enabled // false) then
+          if (.routing.split.outbound_type // "socks") == "shadowsocks" then
             {
               type: "shadowsocks",
-              tag: "ai-out",
-              server: .routing.ai.server,
-              server_port: .routing.ai.port,
-              method: .routing.ai.method,
-              password: .routing.ai.password,
-              network: (.routing.ai.network // "tcp")
+              tag: "split-out",
+              server: .routing.split.server,
+              server_port: .routing.split.port,
+              method: (.routing.split.method | split_ss_method),
+              password: .routing.split.password
+            }
+          else
+            {
+              type: "socks",
+              tag: "split-out",
+              server: .routing.split.server,
+              server_port: .routing.split.port,
+              version: "5",
+              username: .routing.split.username,
+              password: .routing.split.password
             }
           end
         else empty
@@ -1717,9 +1678,25 @@ render_config() {
       )
     ],
     route: {
+      rule_set: [
+        (
+          if (.routing.split.enabled // false) then
+            .routing.split.rule_sets[] | {
+              type: "inline",
+              tag: split_rule_tag,
+              rules: [
+                {
+                  domain_keyword: [.]
+                }
+              ]
+            }
+          else empty
+          end
+        )
+      ],
       rules: [
         (
-          if (.routing.ai.enabled // false) then
+          if (.routing.split.enabled // false) then
             {
               action: "sniff",
               sniffer: ["http", "tls", "quic"],
@@ -1729,20 +1706,11 @@ render_config() {
           end
         ),
         (
-          if (.routing.ai.enabled // false) then
-            ai_route_matcher + {
-              protocol: "quic",
-              action: "reject",
-              method: "default"
-            }
-          else empty
-          end
-        ),
-        (
-          if (.routing.ai.enabled // false) then
-            ai_route_matcher + {
+          if (.routing.split.enabled // false) then
+            {
+              rule_set: [.routing.split.rule_sets[] | split_rule_tag],
               action: "route",
-              outbound: "ai-out"
+              outbound: "split-out"
             }
           else empty
           end
@@ -2390,41 +2358,34 @@ delete_node() {
   apply_config || return 0
 }
 
-configure_ai_routing() {
-  local current_enabled current_protocol current_server current_port current_method current_password current_rules
-  local current_uuid current_flow current_tls_server_name current_reality_public_key current_reality_short_id
-  local protocol_choice protocol server port rules_input rules_json rules_count
-  local method password uuid flow tls_enabled tls_server_name tls_insecure reality_enabled reality_public_key reality_short_id
+configure_split_routing() {
+  local current_enabled current_type current_server current_port current_username current_password current_method
+  local type_choice outbound_type server port username password method_choice method
 
-  current_enabled="$(state_get '.routing.ai.enabled // false')"
-  current_protocol="$(state_get '.routing.ai.outbound_type // "shadowsocks"')"
-  current_server="$(state_get '.routing.ai.server // ""')"
-  current_port="$(state_get '.routing.ai.port // 443')"
-  current_method="$(state_get '.routing.ai.method // "chacha20-ietf-poly1305"')"
-  current_password="$(state_get '.routing.ai.password // ""')"
-  current_uuid="$(state_get '.routing.ai.uuid // ""')"
-  current_flow="$(state_get '.routing.ai.flow // ""')"
-  current_tls_server_name="$(state_get '.routing.ai.tls_server_name // ""')"
-  current_reality_public_key="$(state_get '.routing.ai.reality_public_key // ""')"
-  current_reality_short_id="$(state_get '.routing.ai.reality_short_id // ""')"
-  current_rules="$(format_ai_rule_list)"
+  current_enabled="$(state_get '.routing.split.enabled // false')"
+  current_type="$(state_get '.routing.split.outbound_type // "socks"')"
+  current_server="$(state_get '.routing.split.server // ""')"
+  current_port="$(state_get '.routing.split.port // 1080')"
+  current_username="$(state_get '.routing.split.username // ""')"
+  current_password="$(state_get '.routing.split.password // ""')"
+  current_method="$(state_get '.routing.split.method // "2022-blake3-aes-256-gcm"')"
 
-  if ! ui_yesno "是否启用或继续配置 AI 分流？选择否将关闭 AI 分流。当前状态：${current_enabled}"; then
+  if ! ui_yesno "是否启用或继续配置分流？选择否将关闭分流。当前状态：${current_enabled}"; then
     state_jq --arg ts "$(utc_now)" '
-      .routing.ai.enabled = false |
+      .routing.split.enabled = false |
       .meta.updated_at = $ts
     '
     apply_config
     return 0
   fi
 
-  protocol_choice="$(ui_menu "AI 分流出站协议" "请选择落地节点协议。当前协议：${current_protocol}" \
-    "1" "Shadowsocks" \
-    "2" "VLESS" \
+  type_choice="$(ui_menu "分流落地类型" "请选择落地代理类型。当前：${current_type}" \
+    "1" "SOCKS5" \
+    "2" "Shadowsocks" \
     "0" "返回")" || return 1
-  case "$protocol_choice" in
-    1) protocol="shadowsocks" ;;
-    2) protocol="vless" ;;
+  case "$type_choice" in
+    1) outbound_type="socks" ;;
+    2) outbound_type="shadowsocks" ;;
     0) return 0 ;;
     *)
       ui_msg "无效选项，请重新选择。"
@@ -2432,183 +2393,148 @@ configure_ai_routing() {
       ;;
   esac
 
-  server="$(prompt_nonempty "AI 分流落地节点地址" "请输入落地节点地址（域名、IPv4 或 IPv6）" "$current_server")" || return 1
-  port="$(prompt_number "AI 分流落地端口" "请输入落地节点端口" "$current_port" 1 65535)" || return 1
-  rules_input="$(prompt_nonempty "AI 分流站点规则" "请输入要走落地的域名、网址或关键词，用逗号/空格分隔；例如 gemini, gpt, claude" "$current_rules")" || return 1
-  if ! rules_json="$(build_ai_rules_json "$rules_input")"; then
-    ui_msg "AI 分流站点规则解析失败，请检查输入内容后重试。"
-    return 1
-  fi
-  if ! rules_count="$(printf '%s' "$rules_json" | jq -r '((.domain_suffix // []) + (.domain_keyword // [])) | length')"; then
-    ui_msg "AI 分流站点规则解析失败，请检查输入内容后重试。"
-    return 1
-  fi
-  if [[ "$rules_count" -eq 0 ]]; then
-    ui_msg "AI 分流站点规则不能为空。"
-    return 1
-  fi
+  server="$(prompt_nonempty "分流落地地址" "请输入落地 IP 或域名" "$current_server")" || return 1
+  port="$(prompt_number "分流落地端口" "请输入落地端口" "$current_port" 1 65535)" || return 1
+  username="$current_username"
+  method="$current_method"
 
-  if [[ "$protocol" == "shadowsocks" ]]; then
-    method="$(prompt_nonempty "AI 分流加密方式" "请输入 Shadowsocks 加密方式，例如 chacha20-ietf-poly1305 / aes-256-gcm" "$current_method")" || return 1
-    password="$(ui_password "AI 分流密码" "请输入 Shadowsocks 密码；留空则保留当前密码")" || return 1
-    if [[ -z "$password" ]]; then
-      password="$current_password"
-    fi
-    if [[ -z "$password" || "$password" == "null" ]]; then
-      ui_msg "Shadowsocks 密码不能为空。请向节点提供方确认加密方式和密码。"
-      return 1
-    fi
-
-    state_jq --arg server "$server" --argjson port "$port" --arg method "$method" --arg password "$password" --argjson rules "$rules_json" --arg ts "$(utc_now)" '
-      .routing.ai.enabled = true |
-      .routing.ai.outbound_type = "shadowsocks" |
-      .routing.ai.server = $server |
-      .routing.ai.port = $port |
-      .routing.ai.method = $method |
-      .routing.ai.password = $password |
-      .routing.ai.network = "tcp" |
-      .routing.ai.domain_suffix = $rules.domain_suffix |
-      .routing.ai.domain_keyword = $rules.domain_keyword |
-      .meta.updated_at = $ts
-    '
+  if [[ "$outbound_type" == "socks" ]]; then
+    username="$(prompt_nonempty "分流落地用户名" "请输入 SOCKS5 用户名" "$current_username")" || return 1
   else
-    uuid="$(prompt_nonempty "AI 分流 VLESS UUID" "请输入 VLESS UUID" "$current_uuid")" || return 1
-    flow="$(ui_input "AI 分流 VLESS Flow" "请输入 VLESS flow；普通 VLESS 可留空，Reality Vision 常用 xtls-rprx-vision" "$current_flow")" || return 1
-    flow="${flow//[$'\r\n ']}"
-    tls_enabled="false"
-    tls_server_name=""
-    tls_insecure="false"
-    reality_enabled="false"
-    reality_public_key=""
-    reality_short_id=""
+    method_choice="$(ui_split_shadowsocks_method_menu "$current_method")" || return 1
+    case "$method_choice" in
+      1) method="aes-256-gcm" ;;
+      2) method="aes-128-gcm" ;;
+      3) method="chacha20-poly1305" ;;
+      4) method="chacha20-ietf-poly1305" ;;
+      5) method="xchacha20-poly1305" ;;
+      6) method="xchacha20-ietf-poly1305" ;;
+      7) method="none" ;;
+      8) method="plain" ;;
+      9) method="2022-blake3-aes-128-gcm" ;;
+      10) method="2022-blake3-aes-256-gcm" ;;
+      11) method="2022-blake3-chacha20-poly1305" ;;
+      0) return 0 ;;
+      *)
+        ui_msg "无效加密方式，请重新选择。"
+        return 1
+        ;;
+    esac
+    method="$(normalize_shadowsocks_method "$method")"
+  fi
 
-    if ui_yesno "是否启用 VLESS TLS？如果是 Reality 节点请选择是。"; then
-      tls_enabled="true"
-      tls_server_name="$(ui_input "AI 分流 TLS Server Name" "请输入 TLS SNI / server_name；只有 IP 且无需 SNI 时可留空" "$current_tls_server_name")" || return 1
-      tls_server_name="${tls_server_name//[$'\r\n ']}"
-      if ui_yesno "是否允许不安全证书 insecure？"; then
-        tls_insecure="true"
-      fi
-      if ui_yesno "是否启用 Reality？"; then
-        reality_enabled="true"
-        reality_public_key="$(prompt_nonempty "AI 分流 Reality Public Key" "请输入 Reality public key" "$current_reality_public_key")" || return 1
-        reality_short_id="$(ui_input "AI 分流 Reality Short ID" "请输入 Reality short_id；可留空" "$current_reality_short_id")" || return 1
-        reality_short_id="${reality_short_id//[$'\r\n ']}"
-      fi
-    fi
+  password="$(ui_password "分流落地密码" "请输入落地密码；留空则保留当前密码")" || return 1
+  [[ -n "$password" ]] || password="$current_password"
+  if [[ -z "$password" || "$password" == "null" ]]; then
+    ui_msg "落地密码不能为空。"
+    return 1
+  fi
 
-    state_jq --arg server "$server" --argjson port "$port" --arg uuid "$uuid" --arg flow "$flow" \
-      --argjson tls_enabled "$tls_enabled" --arg tls_server_name "$tls_server_name" --argjson tls_insecure "$tls_insecure" \
-      --argjson reality_enabled "$reality_enabled" --arg reality_public_key "$reality_public_key" --arg reality_short_id "$reality_short_id" \
-      --argjson rules "$rules_json" --arg ts "$(utc_now)" '
-      .routing.ai.enabled = true |
-      .routing.ai.outbound_type = "vless" |
-      .routing.ai.server = $server |
-      .routing.ai.port = $port |
-      .routing.ai.uuid = $uuid |
-      .routing.ai.flow = $flow |
-      .routing.ai.network = "tcp" |
-      .routing.ai.tls_enabled = $tls_enabled |
-      .routing.ai.tls_server_name = $tls_server_name |
-      .routing.ai.tls_insecure = $tls_insecure |
-      .routing.ai.reality_enabled = $reality_enabled |
-      .routing.ai.reality_public_key = $reality_public_key |
-      .routing.ai.reality_short_id = $reality_short_id |
-      .routing.ai.domain_suffix = $rules.domain_suffix |
-      .routing.ai.domain_keyword = $rules.domain_keyword |
-      .meta.updated_at = $ts
-    '
+  state_jq --arg outbound_type "$outbound_type" --arg server "$server" --argjson port "$port" \
+    --arg username "$username" --arg password "$password" --arg method "$method" --arg ts "$(utc_now)" '
+    .routing.split.enabled = (((.routing.split.rule_sets // []) | length) > 0) |
+    .routing.split.outbound_type = $outbound_type |
+    .routing.split.server = $server |
+    .routing.split.port = $port |
+    .routing.split.username = $username |
+    .routing.split.password = $password |
+    .routing.split.method = $method |
+    .meta.updated_at = $ts
+  '
+
+  if [[ "$(state_get '(.routing.split.rule_sets // []) | length')" -eq 0 ]]; then
+    ui_msg "落地信息已保存。请继续添加至少一个规则集，例如 chatgpt 或 claude。"
+    return 0
   fi
 
   apply_config
 }
 
-show_ai_routing_rules() {
+show_split_routing_rules() {
   local rules_text summary
   rules_text="$(jq -r '
-    [
-      (.routing.ai.domain_suffix // [] | map("domain_suffix: " + .)[]?),
-      (.routing.ai.domain_keyword // [] | map("domain_keyword: " + .)[]?)
-    ] | if length == 0 then "当前没有 AI 分流站点规则。" else join("\n") end
+    (.routing.split.rule_sets // [])
+    | if length == 0 then "当前没有分流规则集。" else map("domain_keyword: " + .) | join("\n") end
   ' "$STATE_FILE")"
 
   summary=$(
     cat <<EOF
-enabled = $(state_get '.routing.ai.enabled // false')
-outbound = $(state_get '.routing.ai.outbound_type // "shadowsocks"')
-address = $(state_get '.routing.ai.server // "-"')
-port = $(state_get '.routing.ai.port // "-"')
-tls = $(state_get '.routing.ai.tls_enabled // false')
-reality = $(state_get '.routing.ai.reality_enabled // false')
+enabled = $(state_get '.routing.split.enabled // false')
+outbound = $(state_get '.routing.split.outbound_type // "socks"')
+address = $(state_get '.routing.split.server // "-"')
+port = $(state_get '.routing.split.port // "-"')
+username = $(state_get '.routing.split.username // "-"')
+method = $(state_get '.routing.split.method // "-"')
 
-[Rules]
+[Rule Sets]
 ${rules_text}
 EOF
   )
 
-  ui_show_text "AI 分流规则" "$summary"
+  ui_show_text "分流规则集" "$summary"
 }
 
-append_ai_routing_rules() {
+append_split_routing_rules() {
   local rules_input rules_json rules_count
-
-  if [[ "$(state_get '.routing.ai.enabled // false')" != "true" ]]; then
-    ui_msg "AI 分流当前未启用，请先完成 AI 分流配置后再新增规则。"
-    return 0
-  fi
 
   if (( $# > 0 )); then
     rules_input="$*"
   else
-    rules_input="$(prompt_nonempty "新增 AI 分流规则" "请输入要追加的域名、网址或关键词，用逗号/空格分隔；例如 openai.com, gemini, claude.ai" "")" || return 1
+    rules_input="$(prompt_nonempty "新增分流规则集" "请输入规则集名称，可用逗号或空格分隔；例如 chatgpt, claude" "")" || return 1
   fi
 
-  if ! rules_json="$(build_ai_rules_json "$rules_input")"; then
-    ui_msg "AI 分流规则解析失败，请检查输入内容后重试。"
+  if ! rules_json="$(build_split_rules_json "$rules_input")"; then
+    ui_msg "分流规则集解析失败，请检查输入后重试。"
     return 1
   fi
-  if ! rules_count="$(printf '%s' "$rules_json" | jq -r '((.domain_suffix // []) + (.domain_keyword // [])) | length')"; then
-    ui_msg "AI 分流规则解析失败，请检查输入内容后重试。"
-    return 1
-  fi
+  rules_count="$(printf '%s' "$rules_json" | jq -r 'length')"
   if [[ "$rules_count" -eq 0 ]]; then
-    ui_msg "新增规则不能为空。"
+    ui_msg "规则集名称只能包含字母、数字、点、下划线和连字符。"
     return 1
   fi
 
   state_jq --argjson rules "$rules_json" --arg ts "$(utc_now)" '
-    .routing.ai.domain_suffix = (((.routing.ai.domain_suffix // []) + ($rules.domain_suffix // [])) | unique) |
-    .routing.ai.domain_keyword = (((.routing.ai.domain_keyword // []) + ($rules.domain_keyword // [])) | unique) |
+    .routing.split.rule_sets = (((.routing.split.rule_sets // []) + $rules) | unique) |
+    .routing.split.enabled = (
+      ((.routing.split.server // "") != "")
+      and ((.routing.split.password // "") != "")
+      and (
+        if (.routing.split.outbound_type // "socks") == "shadowsocks" then
+          ((.routing.split.method // "") != "")
+        else
+          ((.routing.split.username // "") != "")
+        end
+      )
+    ) |
     .meta.updated_at = $ts
   '
 
-  apply_config
+  if [[ "$(state_get '.routing.split.enabled // false')" == "true" ]]; then
+    apply_config
+  else
+    ui_msg "规则集已保存。配置分流落地后即可启用。"
+  fi
 }
 
-delete_ai_routing_rule() {
-  local total_count choice selected_index selected_kind selected_rule
-  local -a rule_kinds=()
+delete_split_routing_rule() {
+  local total_count choice selected_index selected_rule
   local -a rule_values=()
   local -a options=()
 
-  total_count="$(state_get '((.routing.ai.domain_suffix // []) + (.routing.ai.domain_keyword // [])) | length')"
+  total_count="$(state_get '(.routing.split.rule_sets // []) | length')"
   if [[ "$total_count" -eq 0 ]]; then
-    ui_msg "当前没有可删除的 AI 分流站点规则。"
+    ui_msg "当前没有可删除的分流规则集。"
     return 0
   fi
 
-  while IFS=$'\t' read -r selected_kind selected_rule; do
-    [[ -n "$selected_kind" && -n "$selected_rule" ]] || continue
-    rule_kinds+=("$selected_kind")
+  while IFS= read -r selected_rule; do
+    [[ -n "$selected_rule" ]] || continue
     rule_values+=("$selected_rule")
-    options+=("${#rule_values[@]}" "${selected_kind}: ${selected_rule}")
-  done < <(jq -r '
-    (.routing.ai.domain_suffix // [] | .[] | ["domain_suffix", .] | @tsv),
-    (.routing.ai.domain_keyword // [] | .[] | ["domain_keyword", .] | @tsv)
-  ' "$STATE_FILE")
+    options+=("${#rule_values[@]}" "$selected_rule")
+  done < <(jq -r '.routing.split.rule_sets[]?' "$STATE_FILE")
 
   options+=("0" "返回")
-  choice="$(ui_menu "删除 AI 分流规则" "请选择要删除的规则" "${options[@]}")" || return 1
+  choice="$(ui_menu "删除分流规则集" "请选择要删除的规则集" "${options[@]}")" || return 1
   [[ "$choice" == "0" ]] && return 0
   [[ "$choice" =~ ^[0-9]+$ ]] || {
     ui_msg "无效选项，请重新选择。"
@@ -2620,25 +2546,18 @@ delete_ai_routing_rule() {
     ui_msg "无效选项，请重新选择。"
     return 1
   }
-
-  selected_kind="${rule_kinds[$selected_index]}"
   selected_rule="${rule_values[$selected_index]}"
 
   if [[ "$total_count" -eq 1 ]]; then
-    ui_yesno "这是最后一条 AI 分流规则。删除后将自动关闭 AI 分流，是否继续？" || return 0
+    ui_yesno "这是最后一个规则集。删除后将自动关闭分流，是否继续？" || return 0
     state_jq --arg ts "$(utc_now)" '
-      .routing.ai.enabled = false |
-      .routing.ai.domain_suffix = [] |
-      .routing.ai.domain_keyword = [] |
+      .routing.split.enabled = false |
+      .routing.split.rule_sets = [] |
       .meta.updated_at = $ts
     '
   else
-    state_jq --arg kind "$selected_kind" --arg rule "$selected_rule" --arg ts "$(utc_now)" '
-      if $kind == "domain_suffix" then
-        .routing.ai.domain_suffix |= map(select(. != $rule))
-      else
-        .routing.ai.domain_keyword |= map(select(. != $rule))
-      end |
+    state_jq --arg rule "$selected_rule" --arg ts "$(utc_now)" '
+      .routing.split.rule_sets |= map(select(. != $rule)) |
       .meta.updated_at = $ts
     '
   fi
@@ -2646,55 +2565,41 @@ delete_ai_routing_rule() {
   apply_config
 }
 
-ai_routing_menu_text() {
+split_routing_menu_text() {
   cat <<EOF
-AI 分流状态：$(state_get '.routing.ai.enabled // false')
-AI 分流出站：$(state_get '.routing.ai.outbound_type // "shadowsocks"')
-AI 分流规则数：$(state_get '((.routing.ai.domain_suffix // []) + (.routing.ai.domain_keyword // [])) | length')
+分流状态：$(state_get '.routing.split.enabled // false')
+落地类型：$(state_get '.routing.split.outbound_type // "socks"')
+分流落地：$(state_get '.routing.split.server // "-"'):$(state_get '.routing.split.port // "-"')
+规则集数量：$(state_get '(.routing.split.rule_sets // []) | length')
 
+每个规则集名称按域名关键词匹配，例如 chatgpt、claude。
 请选择要执行的操作（输入 0 返回上一级，输入 00 退出脚本）
 EOF
 }
 
-ai_routing_submenu() {
+split_routing_submenu() {
   local choice menu_text
 
   while true; do
-    menu_text="$(ai_routing_menu_text)"
-    choice="$(ui_menu "一键AI分流" "$menu_text" \
-      "1" "配置 AI 分流" \
-      "2" "查看 AI 分流规则" \
-      "3" "新增 AI 分流规则" \
-      "4" "删除 AI 分流规则" \
+    menu_text="$(split_routing_menu_text)"
+    choice="$(ui_menu "分流管理" "$menu_text" \
+      "1" "配置分流落地" \
+      "2" "查看分流规则集" \
+      "3" "新增分流规则集" \
+      "4" "删除分流规则集" \
       "5" "导出 NekoBox 分流规则" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || return 1
 
     case "$choice" in
-      1)
-        configure_ai_routing
-        ;;
-      2)
-        show_ai_routing_rules
-        ;;
-      3)
-        append_ai_routing_rules
-        ;;
-      4)
-        delete_ai_routing_rule
-        ;;
-      5)
-        show_nekobox_routing_exports
-        ;;
-      0)
-        return 0
-        ;;
-      00)
-        exit 0
-        ;;
-      *)
-        ui_msg "无效选项，请重新选择。"
-        ;;
+      1) configure_split_routing ;;
+      2) show_split_routing_rules ;;
+      3) append_split_routing_rules ;;
+      4) delete_split_routing_rule ;;
+      5) show_nekobox_routing_exports ;;
+      0) return 0 ;;
+      00) exit 0 ;;
+      *) ui_msg "无效选项，请重新选择。" ;;
     esac
   done
 }
@@ -3294,7 +3199,7 @@ Sing-box 状态：$(sing_box_install_status)
 Shadowsocks 2022 规则个数：$(state_get '.protocols.shadowsocks.users | length')
 VLESS + Reality 规则个数：$(state_get '.protocols.vless_reality.users | length')
 Hysteria2 规则个数：$(state_get '.protocols.hysteria2.users | length')
-AI 分流状态：$(state_get '.routing.ai.enabled // false')
+分流状态：$(state_get '.routing.split.enabled // false')
 
 请选择要执行的操作
 EOF
@@ -3449,16 +3354,14 @@ tls_server_name = $(state_get '.protocols.hysteria2.tls_server_name')
 obfs_password = $(state_get '.protocols.hysteria2.obfs_password')
 users = $hy2_users
 
-[AI Routing]
-enabled = $(state_get '.routing.ai.enabled // false')
-outbound = $(state_get '.routing.ai.outbound_type // "shadowsocks"')
-address = $(state_get '.routing.ai.server // "-"')
-port = $(state_get '.routing.ai.port // "-"')
-method = $(state_get '.routing.ai.method // "-"')
-uuid = $(state_get '.routing.ai.uuid // "-"')
-tls = $(state_get '.routing.ai.tls_enabled // false')
-reality = $(state_get '.routing.ai.reality_enabled // false')
-rules = $(format_ai_rule_list)
+[Split Routing]
+enabled = $(state_get '.routing.split.enabled // false')
+outbound = $(state_get '.routing.split.outbound_type // "socks"')
+address = $(state_get '.routing.split.server // "-"')
+port = $(state_get '.routing.split.port // "-"')
+username = $(state_get '.routing.split.username // "-"')
+method = $(state_get '.routing.split.method // "-"')
+rule_sets = $(format_split_rule_list)
 EOF
   )
 
@@ -3555,7 +3458,7 @@ main_menu() {
       "5" "重新生成配置并重载服务" \
       "6" "查看当前概览" \
       "7" "查看服务状态" \
-      "8" "一键AI分流" \
+      "8" "分流管理" \
       "9" "Realm 中转" \
       "10" "重新安装 / 修复（保留规则）" \
       "11" "卸载" \
@@ -3584,7 +3487,7 @@ main_menu() {
         show_service_status
         ;;
       8)
-        ai_routing_submenu
+        split_routing_submenu
         ;;
       9)
         prepare_realm_menu && realm_submenu
@@ -3619,12 +3522,13 @@ usage() {
   $SCRIPT_NAME delete-node    删除已启用的协议节点
   $SCRIPT_NAME add-client     打开新增客户端流程
   $SCRIPT_NAME remove-client  打开删除客户端流程
-  $SCRIPT_NAME ai             打开一键AI分流菜单
-  $SCRIPT_NAME ai-route       配置 AI 分流到远端 SS / VLESS 落地节点
-  $SCRIPT_NAME ai-rules       查看 AI 分流规则
-  $SCRIPT_NAME add-ai-rule domain1 keyword2
-                          新增 AI 分流规则
-  $SCRIPT_NAME delete-ai-rule 删除 AI 分流规则
+  $SCRIPT_NAME split          打开分流管理菜单
+  $SCRIPT_NAME split-route    配置 SOCKS5 / Shadowsocks 分流落地
+  $SCRIPT_NAME split-rules    查看分流规则集
+  $SCRIPT_NAME add-split-rule chatgpt claude
+                          新增分流规则集
+  $SCRIPT_NAME delete-split-rule
+                          删除分流规则集
   $SCRIPT_NAME nekobox-rules  导出 NekoBox 手机端分流规则
   $SCRIPT_NAME repair-install 重新安装 / 修复环境并保留现有规则
   $SCRIPT_NAME realm          打开 Realm 中转菜单
@@ -3640,9 +3544,10 @@ usage() {
   2. Hysteria2 默认使用自签名证书。
   3. 非交互安装可通过 SINGBOX_SERVER_ADDRESS=your.domain 指定节点地址。
   4. 一键安装使用官方原生 sing-box 软件包。
-  5. AI 分流支持 Shadowsocks 和 VLESS，落地节点地址可以是域名、IPv4 或 IPv6。
-  6. repair-install 会重装 / 更新脚本和 sing-box 核心，但不会删除状态文件、客户端或分流规则。
-  7. 一键安装只安装环境；当你启用协议或新增客户端后，才会生成对应的协议链接。
+  5. 分流落地支持 SOCKS5 和 Shadowsocks；Shadowsocks 可选择多种 AEAD / 2022 加密方式。
+  6. 不预置规则集；历史内置默认规则会在迁移时删除，规则可随时新增、查看和删除。
+  7. repair-install 会重装 / 更新脚本和 sing-box 核心，但不会删除状态文件、客户端或分流规则。
+  8. 一键安装只安装环境；当你启用协议或新增客户端后，才会生成对应的协议链接。
 EOF
 }
 
@@ -3704,44 +3609,44 @@ main() {
       init_state_file
       delete_node
       ;;
-    ai|ai-menu|ai-route-menu)
+    split|split-menu|routing|ai|ai-menu|ai-route-menu)
       require_linux
       require_root
       ensure_ui_backend
       ensure_dirs
       init_state_file
-      ai_routing_submenu
+      split_routing_submenu
       ;;
-    ai-route)
+    split-route|ai-route)
       require_linux
       require_root
       ensure_ui_backend
       ensure_dirs
       init_state_file
-      configure_ai_routing
+      configure_split_routing
       ;;
-    ai-rules|show-ai-rules)
+    split-rules|show-split-rules|ai-rules|show-ai-rules)
       require_linux
       require_root
       ensure_dirs
       init_state_file
-      show_ai_routing_rules
+      show_split_routing_rules
       ;;
-    add-ai-rule|add-ai-rules|append-ai-rule|append-ai-rules)
-      require_linux
-      require_root
-      ensure_ui_backend
-      ensure_dirs
-      init_state_file
-      append_ai_routing_rules "${@:2}"
-      ;;
-    delete-ai-rule|remove-ai-rule)
+    add-split-rule|add-split-rules|append-split-rule|append-split-rules|add-ai-rule|add-ai-rules|append-ai-rule|append-ai-rules)
       require_linux
       require_root
       ensure_ui_backend
       ensure_dirs
       init_state_file
-      delete_ai_routing_rule
+      append_split_routing_rules "${@:2}"
+      ;;
+    delete-split-rule|remove-split-rule|delete-ai-rule|remove-ai-rule)
+      require_linux
+      require_root
+      ensure_ui_backend
+      ensure_dirs
+      init_state_file
+      delete_split_routing_rule
       ;;
     nekobox-rules|export-nekobox|nekobox)
       require_linux

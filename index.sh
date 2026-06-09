@@ -2086,13 +2086,16 @@ node_submenu() {
 
   while true; do
     menu_text="$(node_menu_text)"
-    choice="$(ui_menu "管理节点" "$menu_text" \
+    choice="$(ui_menu "代理节点管理" "$menu_text" \
       "1" "设置节点对外地址" \
       "2" "设置节点名称" \
       "3" "配置 Shadowsocks 2022" \
       "4" "配置 VLESS + Reality" \
       "5" "配置 Hysteria2" \
       "6" "删除节点" \
+      "7" "管理客户端" \
+      "8" "查看订阅链接" \
+      "9" "重新生成配置并重载服务" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || return 0
 
@@ -2114,6 +2117,15 @@ node_submenu() {
         ;;
       6)
         delete_node || true
+        ;;
+      7)
+        client_submenu
+        ;;
+      8)
+        show_subscription_links
+        ;;
+      9)
+        apply_config
         ;;
       0)
         return 0
@@ -3387,16 +3399,13 @@ main_menu() {
     menu_text="$(main_menu_text)"
     choice="$(ui_menu "$APP_TITLE" "$menu_text" \
       "1" "安装 / 初始化 sing-box" \
-      "2" "管理节点" \
-      "3" "管理客户端" \
-      "4" "查看订阅链接" \
-      "5" "重新生成配置并重载服务" \
-      "6" "查看当前概览" \
-      "7" "查看服务状态" \
-      "8" "分流管理" \
-      "9" "Realm 中转" \
-      "10" "更新脚本" \
-      "11" "卸载" \
+      "2" "代理节点管理" \
+      "3" "查看当前概览" \
+      "4" "查看服务状态" \
+      "5" "分流管理" \
+      "6" "Realm 中转" \
+      "7" "更新脚本" \
+      "8" "卸载" \
       "0" "退出")" || break
 
     if ! have_cmd jq && [[ "$choice" != "1" && "$choice" != "0" ]]; then
@@ -3412,30 +3421,21 @@ main_menu() {
         node_submenu
         ;;
       3)
-        client_submenu
-        ;;
-      4)
-        show_subscription_links
-        ;;
-      5)
-        apply_config
-        ;;
-      6)
         show_overview
         ;;
-      7)
+      4)
         show_service_status
         ;;
-      8)
+      5)
         split_routing_submenu
         ;;
-      9)
+      6)
         prepare_realm_menu && realm_submenu
         ;;
-      10)
+      7)
         update_manager_script
         ;;
-      11)
+      8)
         uninstall_sbox
         ;;
       0)
@@ -3457,7 +3457,7 @@ usage() {
 用法:
   $SCRIPT_NAME                打开管理面板
   $SCRIPT_NAME quick-install  一键安装并初始化
-  $SCRIPT_NAME node           打开节点管理菜单
+  $SCRIPT_NAME node           打开代理节点管理菜单
   $SCRIPT_NAME delete-node    删除已启用的协议节点
   $SCRIPT_NAME add-client     打开新增客户端流程
   $SCRIPT_NAME remove-client  打开删除客户端流程

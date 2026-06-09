@@ -3024,12 +3024,17 @@ install_manager_project_from_repo() {
 }
 
 update_manager_script() {
-  if ! install_manager_project_from_repo; then
+  if ! have_cmd curl; then
+    ui_msg "未检测到 curl，无法更新脚本。"
+    return 1
+  fi
+
+  if ! curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | sudo bash; then
     ui_msg "更新脚本失败，请稍后重试。"
     return 1
   fi
 
-  ui_msg "脚本已从 GitHub 仓库更新完成。"
+  ui_msg "脚本更新完成。"
 }
 
 realm_submenu() {
@@ -3390,7 +3395,7 @@ main_menu() {
       "7" "查看服务状态" \
       "8" "分流管理" \
       "9" "Realm 中转" \
-      "10" "重新安装 / 修复（保留规则）" \
+      "10" "更新脚本" \
       "11" "卸载" \
       "0" "退出")" || break
 
@@ -3428,8 +3433,7 @@ main_menu() {
         prepare_realm_menu && realm_submenu
         ;;
       10)
-        export SBOX_REPAIR_OPEN_PANEL=1
-        repair_install
+        update_manager_script
         ;;
       11)
         uninstall_sbox

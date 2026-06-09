@@ -972,72 +972,6 @@ direct_links_file() {
   printf '%s/direct-links.txt\n' "$CLIENT_DIR"
 }
 
-nekobox_route_rule_file() {
-  printf '%s/nekobox-split-route-rule.json\n' "$CLIENT_DIR"
-}
-
-nekobox_domain_rules_file() {
-  printf '%s/nekobox-split-domain-rules.txt\n' "$CLIENT_DIR"
-}
-
-nekobox_ip_rules_file() {
-  printf '%s/nekobox-split-ip-rules.txt\n' "$CLIENT_DIR"
-}
-
-nekobox_guide_file() {
-  printf '%s/nekobox-split-routing-guide.txt\n' "$CLIENT_DIR"
-}
-
-render_nekobox_route_rule_json() {
-  jq '{
-    domain_keyword: ([.routing.split.outbounds[]?.rule_sets[]?] | unique),
-    outbound: "proxy"
-  }' "$STATE_FILE"
-}
-
-render_nekobox_domain_rules() {
-  jq -r '([.routing.split.outbounds[]?.rule_sets[]?] | unique | map("keyword:" + .) | join("\n"))' "$STATE_FILE"
-}
-
-render_nekobox_ip_rules() {
-  printf ''
-}
-
-write_nekobox_exports() {
-  local rule_file domain_file ip_file guide_file
-  rule_file="$(nekobox_route_rule_file)"
-  domain_file="$(nekobox_domain_rules_file)"
-  ip_file="$(nekobox_ip_rules_file)"
-  guide_file="$(nekobox_guide_file)"
-
-  render_nekobox_route_rule_json >"$rule_file"
-  render_nekobox_domain_rules >"$domain_file"
-  render_nekobox_ip_rules >"$ip_file"
-
-  cat >"$guide_file" <<EOF
-NekoBox for Android 分流使用说明
-
-NekoBox 导入节点/订阅时通常只解析节点 outbound，订阅或服务端里的分流规则不会自动进入 NekoBox 路由。
-请在手机端 NekoBox 本地添加路由规则：
-
-1. 先正常导入并保存你的节点。
-2. 进入该节点的「路由」或「自定义配置 / 自定义路由」页面。
-3. 推荐使用文件：
-   $rule_file
-   把里面的 JSON 作为 sing-box 自定义 route rule 使用，出站标签为 proxy。
-4. 如果你使用 NekoBox 的简易路由界面：
-   - 域名规则文件：$domain_file
-   - IP 规则文件：$ip_file
-5. 在 NekoBox 设置里建议开启：
-   - VPN 模式
-   - DNS 路由
-   - Block QUIC 规则
-   - 关闭 Android 系统「私人 DNS / 安全 DNS」
-
-如果 NekoBox 的当前版本不接受自定义 JSON，请把 domain 文件内容填到「代理」域名规则，把 ip 文件内容填到「代理」目标 IP 规则。
-EOF
-}
-
 default_listen_address() {
   local server_address
   server_address="$(state_get '.meta.server_address' 2>/dev/null || true)"
@@ -1724,6 +1658,10 @@ write_client_exports() {
   : >"$all_file"
   : >"$links_file"
   rm -f "$CLIENT_DIR"/shadowsocks/*.txt "$CLIENT_DIR"/vless-reality/*.txt "$CLIENT_DIR"/hysteria2/*.txt 2>/dev/null || true
+  rm -f "$CLIENT_DIR"/nekobox-split-route-rule.json \
+    "$CLIENT_DIR"/nekobox-split-domain-rules.txt \
+    "$CLIENT_DIR"/nekobox-split-ip-rules.txt \
+    "$CLIENT_DIR"/nekobox-split-routing-guide.txt 2>/dev/null || true
 
   if [[ "$(state_get '.protocols.shadowsocks.enabled')" == "true" ]]; then
     local ss_port ss_method ss_server_password
@@ -1804,7 +1742,6 @@ EOF
     done < <(jq -r '.protocols.hysteria2.users[]? | [.name, .password] | @tsv' "$STATE_FILE")
   fi
 
-  write_nekobox_exports
 }
 
 apply_config() {
@@ -2519,7 +2456,6 @@ split_routing_submenu() {
       "4" "查看全部落地与规则集" \
       "5" "为落地新增规则集" \
       "6" "删除落地规则集" \
-      "7" "导出 NekoBox 分流规则" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || continue
     case "$choice" in
@@ -2529,7 +2465,6 @@ split_routing_submenu() {
       4) show_split_routing_rules ;;
       5) append_split_routing_rules ;;
       6) delete_split_routing_rule ;;
-      7) show_nekobox_routing_exports ;;
       0) return 0 ;;
       00) exit 0 ;;
       *) ui_msg "无效选项，请重新选择。" ;;
@@ -3240,38 +3175,6 @@ show_subscription_links() {
   ui_show_text "订阅链接" "$output"
 }
 
-show_nekobox_routing_exports() {
-  local output rule_file domain_file ip_file guide_file
-
-  write_client_exports
-  rule_file="$(nekobox_route_rule_file)"
-  domain_file="$(nekobox_domain_rules_file)"
-  ip_file="$(nekobox_ip_rules_file)"
-  guide_file="$(nekobox_guide_file)"
-
-  output=$(
-    cat <<EOF
-NekoBox 分流规则已导出：
-
-推荐：sing-box 自定义 route rule
-$rule_file
-
-简易路由域名规则
-$domain_file
-
-简易路由 IP 规则
-$ip_file
-
-使用说明
-$guide_file
-
-注意：NekoBox 导入节点/订阅通常只解析节点，不会自动应用服务端分流规则。请在 NekoBox 手机端本地路由里使用以上规则。
-EOF
-  )
-
-  ui_show_text "NekoBox 分流规则" "$output"
-}
-
 show_overview() {
   local server_address service_status ss_users vless_users hy2_users overview node_name links_file
   server_address="$(state_get '.meta.server_address')"
@@ -3485,7 +3388,6 @@ usage() {
                           新增分流规则集
   $SCRIPT_NAME delete-split-rule
                           删除分流规则集
-  $SCRIPT_NAME nekobox-rules  导出 NekoBox 手机端分流规则
   $SCRIPT_NAME repair-install 重新安装 / 修复环境并保留现有规则
   $SCRIPT_NAME realm          打开 Realm 中转菜单
   $SCRIPT_NAME apply          重新生成配置并重载服务
@@ -3603,13 +3505,6 @@ main() {
       ensure_dirs
       init_state_file
       delete_split_routing_rule
-      ;;
-    nekobox-rules|export-nekobox|nekobox)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
-      show_nekobox_routing_exports
       ;;
     repair-install|reinstall)
       repair_install

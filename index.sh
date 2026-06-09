@@ -29,6 +29,8 @@ BACKUP_DIR="${BACKUP_DIR:-$STATE_DIR/backups}"
 CLIENT_DIR="${CLIENT_DIR:-$STATE_DIR/clients}"
 CERT_DIR="${CERT_DIR:-$STATE_DIR/certs}"
 CONFIG_FILE="${CONFIG_FILE:-/etc/sing-box/config.json}"
+SING_BOX_OPENRC_SERVICE_FILE="${SING_BOX_OPENRC_SERVICE_FILE:-/etc/init.d/sing-box}"
+SING_BOX_OPENRC_LOG_FILE="${SING_BOX_OPENRC_LOG_FILE:-/var/log/sing-box.log}"
 REALM_DIR="${REALM_DIR:-/etc/realm}"
 REALM_CONFIG_FILE="${REALM_CONFIG_FILE:-$REALM_DIR/config.toml}"
 REALM_STATE_FILE="${REALM_STATE_FILE:-$STATE_DIR/realm-state.json}"
@@ -290,7 +292,9 @@ ui_protocol_menu() {
 }
 
 detect_pkg_manager() {
-  if have_cmd apt-get; then
+  if have_cmd apk; then
+    PKG_MANAGER="apk"
+  elif have_cmd apt-get; then
     PKG_MANAGER="apt"
   elif have_cmd dnf; then
     PKG_MANAGER="dnf"
@@ -305,6 +309,9 @@ install_dependencies() {
   detect_pkg_manager
 
   case "$PKG_MANAGER" in
+    apk)
+      apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc coreutils findutils
+      ;;
     apt)
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -y
@@ -318,7 +325,7 @@ install_dependencies() {
       yum install -y curl jq openssl ca-certificates git tar gzip
       ;;
     *)
-      die "暂不支持自动安装依赖，请手动安装 curl、jq、openssl、ca-certificates、git、tar、gzip 后再运行。"
+      die "暂不支持自动安装依赖，请手动安装 bash、curl、jq、openssl、ca-certificates、git、tar、gzip 后再运行。"
       ;;
   esac
 }
@@ -385,11 +392,20 @@ install_sing_box() {
   log "安装官方原生 sing-box 软件包..."
 
   case "$PKG_MANAGER" in
+    apk)
+      if apk add --no-cache sing-box; then
+        installed=1
+      fi
+      ;;
     apt)
-      install_sing_box_apt_repo && installed=1
+      if install_sing_box_apt_repo; then
+        installed=1
+      fi
       ;;
     dnf|yum)
-      install_sing_box_rpm_repo "$PKG_MANAGER" && installed=1
+      if install_sing_box_rpm_repo "$PKG_MANAGER"; then
+        installed=1
+      fi
       ;;
   esac
 
@@ -401,9 +417,7 @@ install_sing_box() {
   hash -r 2>/dev/null || true
   have_cmd sing-box || die "安装完成后仍未找到 sing-box 命令。"
   ensure_sing_box_service
-  if has_systemd; then
-    systemctl enable sing-box >/dev/null 2>&1 || true
-  fi
+  enable_sing_box_service
 
   version_text="$(sing-box version 2>/dev/null | head -n 1 || true)"
   log "sing-box 已安装：${version_text:-version unknown}"
@@ -413,16 +427,43 @@ has_systemd() {
   have_cmd systemctl && [[ -d /run/systemd/system ]]
 }
 
-service_exists() {
-  has_systemd || return 1
+has_openrc() {
+  have_cmd rc-service && have_cmd rc-update
+}
 
-  systemctl cat sing-box >/dev/null 2>&1 && return 0
-  systemctl list-unit-files sing-box.service --no-legend 2>/dev/null | grep -q '^sing-box\.service' && return 0
-  [[ -f /etc/systemd/system/sing-box.service || -f /lib/systemd/system/sing-box.service || -f /usr/lib/systemd/system/sing-box.service ]]
+sing_box_service_manager() {
+  if has_systemd; then
+    printf 'systemd\n'
+  elif has_openrc; then
+    printf 'openrc\n'
+  else
+    printf 'none\n'
+  fi
+}
+
+service_exists() {
+  case "$(sing_box_service_manager)" in
+    systemd)
+      systemctl cat sing-box >/dev/null 2>&1 && return 0
+      systemctl list-unit-files sing-box.service --no-legend 2>/dev/null | grep -q '^sing-box\.service' && return 0
+      [[ -f /etc/systemd/system/sing-box.service || -f /lib/systemd/system/sing-box.service || -f /usr/lib/systemd/system/sing-box.service ]]
+      ;;
+    openrc)
+      [[ -x "$SING_BOX_OPENRC_SERVICE_FILE" ]]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 sing_box_service_exec_path() {
   local exec_line exec_path arg
+
+  if has_openrc && ! has_systemd; then
+    command -v sing-box
+    return
+  fi
 
   has_systemd || return 1
   exec_line="$(systemctl cat sing-box 2>/dev/null | awk -F= '/^[[:space:]]*ExecStart=/ {print $2; exit}')"
@@ -470,15 +511,17 @@ sing_box_check_bin() {
 }
 
 ensure_sing_box_service() {
-  local sing_box_bin
+  local sing_box_bin service_manager
 
-  has_systemd || return 0
-  service_exists && return 0
+  service_manager="$(sing_box_service_manager)"
+  [[ "$service_manager" != "none" ]] || return 0
 
   sing_box_bin="$(command -v sing-box 2>/dev/null || true)"
   [[ -n "$sing_box_bin" ]] || return 0
 
-  cat >/etc/systemd/system/sing-box.service <<EOF
+  if [[ "$service_manager" == "systemd" ]]; then
+    service_exists && return 0
+    cat >/etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=sing-box service
 Documentation=https://sing-box.sagernet.org
@@ -497,24 +540,125 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 EOF
 
-  systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  cat >"$SING_BOX_OPENRC_SERVICE_FILE" <<EOF
+#!/sbin/openrc-run
+
+name="sing-box"
+description="sing-box service"
+command="${sing_box_bin}"
+command_args="run -c ${CONFIG_FILE}"
+command_background="yes"
+pidfile="/run/sing-box.pid"
+output_log="${SING_BOX_OPENRC_LOG_FILE}"
+error_log="${SING_BOX_OPENRC_LOG_FILE}"
+
+depend() {
+  need net
+  after firewall
+}
+
+start_pre() {
+  checkpath --directory --mode 0755 /run
+  checkpath --file --mode 0644 "${SING_BOX_OPENRC_LOG_FILE}"
+}
+EOF
+  chmod 755 "$SING_BOX_OPENRC_SERVICE_FILE"
+}
+
+enable_sing_box_service() {
+  case "$(sing_box_service_manager)" in
+    systemd)
+      systemctl enable sing-box >/dev/null 2>&1 || true
+      ;;
+    openrc)
+      rc-update add sing-box default >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+
+sing_box_service_active() {
+  case "$(sing_box_service_manager)" in
+    systemd)
+      systemctl is-active sing-box 2>/dev/null
+      ;;
+    openrc)
+      if rc-service sing-box status >/dev/null 2>&1; then
+        printf 'active\n'
+      else
+        printf 'inactive\n'
+      fi
+      ;;
+    *)
+      printf 'unknown\n'
+      ;;
+  esac
+}
+
+sing_box_service_enabled() {
+  case "$(sing_box_service_manager)" in
+    systemd)
+      systemctl is-enabled sing-box 2>/dev/null
+      ;;
+    openrc)
+      if rc-update show default 2>/dev/null | grep -Eq '(^|[[:space:]])sing-box([[:space:]]|$)'; then
+        printf 'enabled\n'
+      else
+        printf 'disabled\n'
+      fi
+      ;;
+    *)
+      printf 'unknown\n'
+      ;;
+  esac
+}
+
+sing_box_recent_logs() {
+  case "$(sing_box_service_manager)" in
+    systemd)
+      journalctl -u sing-box -n 30 --no-pager 2>/dev/null || true
+      ;;
+    openrc)
+      tail -n 30 "$SING_BOX_OPENRC_LOG_FILE" 2>/dev/null || true
+      ;;
+  esac
 }
 
 restart_sing_box() {
   if service_exists; then
-    systemctl enable sing-box >/dev/null 2>&1 || true
-    if ! systemctl restart sing-box; then
-      ui_show_text "sing-box 启动失败" "$(journalctl -u sing-box -n 30 --no-pager 2>/dev/null || echo '无法读取 sing-box 日志。')"
-      return 1
-    fi
+    enable_sing_box_service
+    case "$(sing_box_service_manager)" in
+      systemd)
+        systemctl restart sing-box || {
+          ui_show_text "sing-box 启动失败" "$(sing_box_recent_logs)"
+          return 1
+        }
+        ;;
+      openrc)
+        rc-service sing-box restart >/dev/null 2>&1 || rc-service sing-box start >/dev/null 2>&1 || {
+          ui_show_text "sing-box 启动失败" "$(sing_box_recent_logs)"
+          return 1
+        }
+        ;;
+    esac
   else
-    warn "未检测到 sing-box systemd 服务，请手动启动 sing-box。"
+    warn "未检测到可用的 sing-box 服务，请手动启动 sing-box。"
   fi
 }
 
 stop_sing_box() {
   if service_exists; then
-    systemctl stop sing-box >/dev/null 2>&1 || true
+    case "$(sing_box_service_manager)" in
+      systemd)
+        systemctl stop sing-box >/dev/null 2>&1 || true
+        ;;
+      openrc)
+        rc-service sing-box stop >/dev/null 2>&1 || true
+        ;;
+    esac
   fi
 }
 
@@ -2989,12 +3133,22 @@ update_manager_script() {
     return 1
   fi
 
-  if ! curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | sudo bash; then
-    ui_msg "更新脚本失败，请稍后重试。"
-    return 1
+  if have_cmd sudo; then
+    curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | sudo bash || {
+      ui_msg "更新脚本失败，请稍后重试。"
+      return 1
+    }
+  else
+    curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | bash || {
+      ui_msg "更新脚本失败，请稍后重试。"
+      return 1
+    }
   fi
 
-  exec sudo "$MANAGER_SCRIPT_PATH"
+  if have_cmd sudo; then
+    exec sudo "$MANAGER_SCRIPT_PATH"
+  fi
+  exec "$MANAGER_SCRIPT_PATH"
 }
 
 realm_submenu() {
@@ -3181,7 +3335,7 @@ show_overview() {
   node_name="$(state_get '.meta.node_name')"
 
   if service_exists; then
-    service_status="$(systemctl is-active sing-box 2>/dev/null || true)"
+    service_status="$(sing_box_service_active)"
   else
     service_status="unknown"
   fi
@@ -3232,7 +3386,8 @@ EOF
 }
 
 show_service_status() {
-  local text=""
+  local text="" service_manager
+  service_manager="$(sing_box_service_manager)"
 
   if have_cmd sing-box; then
     text+="sing-box version: $(sing-box version 2>/dev/null | head -n 1)\n"
@@ -3241,17 +3396,18 @@ show_service_status() {
   fi
 
   if service_exists; then
-    text+="service active: $(systemctl is-active sing-box 2>/dev/null)\n"
-    text+="service enabled: $(systemctl is-enabled sing-box 2>/dev/null)\n"
+    text+="service manager: ${service_manager}\n"
+    text+="service active: $(sing_box_service_active)\n"
+    text+="service enabled: $(sing_box_service_enabled)\n"
     text+="\n最近日志:\n"
-    text+="$(journalctl -u sing-box -n 20 --no-pager 2>/dev/null || true)"
+    text+="$(sing_box_recent_logs)"
   else
-    if has_systemd; then
-      text+="未检测到 sing-box systemd 服务。\n"
+    if [[ "$service_manager" != "none" ]]; then
+      text+="未检测到 sing-box ${service_manager} 服务。\n"
       text+="可尝试执行：sbox quick-install\n"
-      text+="如果 sing-box 已安装，脚本会自动补建 sing-box.service。"
+      text+="如果 sing-box 已安装，脚本会自动补建服务。"
     else
-      text+="当前系统未检测到可用的 systemd 环境。"
+      text+="当前系统未检测到可用的 systemd 或 OpenRC 环境。"
     fi
   fi
 
@@ -3270,9 +3426,17 @@ uninstall_sbox() {
     systemctl stop realm >/dev/null 2>&1 || true
     systemctl disable realm >/dev/null 2>&1 || true
   fi
+  if has_openrc; then
+    rc-service sing-box stop >/dev/null 2>&1 || true
+    rc-update del sing-box default >/dev/null 2>&1 || true
+  fi
 
   detect_pkg_manager
   case "$PKG_MANAGER" in
+    apk)
+      apk del sing-box >/dev/null 2>&1 || true
+      apk del sing-box-openrc >/dev/null 2>&1 || true
+      ;;
     apt)
       export DEBIAN_FRONTEND=noninteractive
       apt-get remove -y sing-box >/dev/null 2>&1 || true
@@ -3288,6 +3452,7 @@ uninstall_sbox() {
   esac
 
   rm -f /etc/systemd/system/sing-box.service /lib/systemd/system/sing-box.service /usr/lib/systemd/system/sing-box.service /etc/systemd/system/multi-user.target.wants/sing-box.service 2>/dev/null || true
+  rm -f "$SING_BOX_OPENRC_SERVICE_FILE" "$SING_BOX_OPENRC_LOG_FILE" 2>/dev/null || true
   rm -f "$REALM_SERVICE_FILE" /lib/systemd/system/realm.service /usr/lib/systemd/system/realm.service /etc/systemd/system/multi-user.target.wants/realm.service 2>/dev/null || true
   rm -rf /etc/sing-box "$REALM_DIR" "$STATE_DIR" 2>/dev/null || true
   rm -f /usr/local/bin/sbox /usr/local/bin/singbox-manager "$REALM_BIN" 2>/dev/null || true

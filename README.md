@@ -13,7 +13,7 @@
 - 退出后可直接输入 `sbox` 重新打开面板
 - 支持输入 `sbox uninstall` 一键卸载
 - 支持重新安装 / 修复时从 GitHub 拉取最新项目并保留现有规则
-- 安装时会询问节点名称，启用协议后生成可直接导入常见客户端的协议链接
+- 新建节点时询问节点名称和出口地址，启用协议后生成可直接导入常见客户端的协议链接
 - 支持 `Shadowsocks 2022`、`VLESS + Reality`、`Hysteria2`
 - 支持客户端新增、删除、导出
 - 自动生成 Reality 密钥、随机密码和 Hysteria2 自签名证书
@@ -23,7 +23,8 @@
 ## 适用环境
 
 - Linux VPS
-- `systemd`
+- Debian / Ubuntu、RHEL 系列或 Alpine Linux
+- `systemd` 或 OpenRC
 - `root` 或具备 `sudo` 权限的用户
 - 已开放协议对应的 TCP / UDP 端口
 
@@ -35,10 +36,11 @@
 curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | sudo bash
 ```
 
-如果需要手动指定节点域名或公网 IP：
+Alpine Linux 请先安装 Bash 和 curl，并使用 root 执行：
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | sudo bash -s -- --server-address your.domain.com
+```sh
+apk add --no-cache bash curl
+curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | bash
 ```
 
 安装脚本会：
@@ -181,7 +183,8 @@ journalctl -u sing-box -n 50 --no-pager
 
 - 确认协议至少保留 1 个客户端
 - 确认证书、私钥和伪装域名配置有效
-- 手动执行 `journalctl -u sing-box -n 50 --no-pager` 查看最近日志
+- systemd：执行 `journalctl -u sing-box -n 50 --no-pager` 查看最近日志
+- Alpine/OpenRC：执行 `tail -n 50 /var/log/sing-box.log` 查看最近日志
 
 ### 依赖安装失败
 
@@ -194,6 +197,9 @@ sudo apt install curl jq openssl ca-certificates git tar gzip
 
 # RHEL / CentOS
 sudo yum install curl jq openssl ca-certificates git tar gzip
+
+# Alpine Linux
+apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc coreutils findutils
 ```
 
 ## 安全提醒

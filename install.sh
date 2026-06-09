@@ -61,6 +61,10 @@ usage() {
   curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | sudo bash
   curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | sudo bash -s -- --repair
 
+Alpine Linux:
+  apk add --no-cache bash curl
+  curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | bash
+
 参数:
   --repair          重新安装 / 修复环境并保留现有规则
   -h, --help        查看帮助

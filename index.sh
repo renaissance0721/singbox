@@ -3113,6 +3113,8 @@ realm_install_status() {
 }
 
 main_menu_text() {
+  local realm_forward_count=0
+
   if ! have_cmd jq; then
     cat <<EOF
 Sing-box 状态：$(sing_box_install_status)
@@ -3123,11 +3125,14 @@ EOF
     return 0
   fi
 
+  if [[ -s "$REALM_STATE_FILE" ]]; then
+    realm_forward_count="$(realm_rule_group_count)"
+  fi
+
   cat <<EOF
 Sing-box 状态：$(sing_box_install_status)
-Shadowsocks 2022 规则个数：$(state_get '.protocols.shadowsocks.users | length')
-VLESS + Reality 规则个数：$(state_get '.protocols.vless_reality.users | length')
-Hysteria2 规则个数：$(state_get '.protocols.hysteria2.users | length')
+节点个数：$(state_get '[.protocols[]?.users[]?] | length') 个
+Realm转发个数：${realm_forward_count} 个
 分流落地：$(state_get '(.routing.split.outbounds // []) | length') 个
 
 请选择要执行的操作

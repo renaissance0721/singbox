@@ -2082,7 +2082,7 @@ EOF
 }
 
 build_node() {
-  local protocol_choice current_address server_address
+  local protocol_choice detected_address server_address
 
   protocol_choice="$(ui_menu "搭建节点" "请选择要搭建的节点协议" \
     "1" "Shadowsocks 2022" \
@@ -2102,8 +2102,8 @@ build_node() {
       ;;
   esac
 
-  current_address="$(state_get '.meta.server_address')"
-  server_address="$(prompt_nonempty "节点出口地址" "请输入节点出口 IP 或域名" "$current_address")" || return 1
+  detected_address="$(detect_public_address)"
+  server_address="$(prompt_nonempty "节点出口地址" "请输入节点出口 IP 或域名(留空默认使用本机 IP)" "$detected_address")" || return 1
   state_jq --arg addr "$server_address" --arg ts "$(utc_now)" \
     '.meta.server_address = $addr | .meta.updated_at = $ts'
 

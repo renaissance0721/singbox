@@ -190,10 +190,10 @@ journalctl -u sing-box -n 50 --no-pager
 ```bash
 # Debian / Ubuntu
 sudo apt update
-sudo apt install curl jq openssl ca-certificates whiptail uuid-runtime iproute2
+sudo apt install curl jq openssl ca-certificates git tar gzip
 
 # RHEL / CentOS
-sudo yum install curl jq openssl ca-certificates newt util-linux iproute
+sudo yum install curl jq openssl ca-certificates git tar gzip
 ```
 
 ## 安全提醒

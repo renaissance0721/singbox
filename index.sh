@@ -42,7 +42,6 @@ SCRIPT_REPO_NAME="${SCRIPT_REPO_NAME:-singbox}"
 SCRIPT_REPO_BRANCH="${SCRIPT_REPO_BRANCH:-main}"
 TMP_DIR="${TMP_DIR:-/tmp}"
 
-HAS_WHIPTAIL=0
 PKG_MANAGER=""
 
 if [[ "$SELF_PATH" != /* ]]; then
@@ -85,14 +84,6 @@ setup_terminal_env() {
       esac
     done < <(locale -a 2>/dev/null || true)
   fi
-}
-
-init_ui() {
-  HAS_WHIPTAIL=0
-}
-
-ensure_ui_backend() {
-  init_ui
 }
 
 log() {
@@ -198,42 +189,28 @@ ui_show_text() {
 
 ui_yesno() {
   local text=${1:-}
-  if (( HAS_WHIPTAIL )); then
-    whiptail --title "$APP_TITLE" --yesno "$text" 16 78
-  else
-    local answer
-    read -r -p "$text [y/N]: " answer
-    [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
-  fi
+  local answer
+  read -r -p "$text [y/N]: " answer
+  [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
 }
 
 ui_input() {
-  local title=${1:-$APP_TITLE}
   local text=${2:-}
   local default_value=${3:-}
   local result=""
 
-  if (( HAS_WHIPTAIL )); then
-    result="$(whiptail --title "$title" --inputbox "$text" 16 78 "$default_value" 3>&1 1>&2 2>&3)" || return 1
-  else
-    read -r -p "$text [$default_value]: " result || return 1
-    result=${result:-$default_value}
-  fi
+  read -r -p "$text [$default_value]: " result || return 1
+  result=${result:-$default_value}
 
   printf '%s\n' "$result"
 }
 
 ui_password() {
-  local title=${1:-$APP_TITLE}
   local text=${2:-}
   local result=""
 
-  if (( HAS_WHIPTAIL )); then
-    result="$(whiptail --title "$title" --passwordbox "$text" 16 78 3>&1 1>&2 2>&3)" || return 1
-  else
-    read -r -s -p "$text: " result || return 1
-    printf '\n' >&2
-  fi
+  read -r -s -p "$text: " result || return 1
+  printf '\n' >&2
 
   printf '%s\n' "$result"
 }
@@ -283,21 +260,19 @@ install_dependencies() {
     apt)
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -y
-      apt-get install -y curl jq openssl ca-certificates whiptail uuid-runtime iproute2 git tar gzip
+      apt-get install -y curl jq openssl ca-certificates git tar gzip
       ;;
     dnf)
-      dnf install -y curl jq openssl ca-certificates newt util-linux iproute git tar gzip
+      dnf install -y curl jq openssl ca-certificates git tar gzip
       ;;
     yum)
       yum install -y epel-release || true
-      yum install -y curl jq openssl ca-certificates newt util-linux iproute git tar gzip
+      yum install -y curl jq openssl ca-certificates git tar gzip
       ;;
     *)
-      die "暂不支持自动安装依赖，请手动安装 curl、jq、openssl、whiptail、uuidgen、git、tar、gzip 后再运行。"
+      die "暂不支持自动安装依赖，请手动安装 curl、jq、openssl、ca-certificates、git、tar、gzip 后再运行。"
       ;;
   esac
-
-  init_ui
 }
 
 install_sing_box_apt_repo() {
@@ -327,14 +302,14 @@ install_sing_box_rpm_repo() {
       dnf config-manager --add-repo https://sing-box.app/sing-box.repo >/dev/null 2>&1 ||
       return 1
     dnf install -y sing-box || return 1
-    return $?
+    return 0
   fi
 
   yum install -y yum-utils >/dev/null 2>&1 || true
   if have_cmd yum-config-manager; then
     yum-config-manager --add-repo https://sing-box.app/sing-box.repo >/dev/null 2>&1 || return 1
     yum install -y sing-box || return 1
-    return $?
+    return 0
   fi
 
   return 1
@@ -1344,119 +1319,6 @@ EOF
   rm -f "$openssl_conf"
 }
 
-ensure_ss_defaults() {
-  local current_password current_port vless_port user_count listen_addr
-  current_password="$(state_get '.protocols.shadowsocks.server_password')"
-  current_port="$(state_get '.protocols.shadowsocks.port')"
-  vless_port="$(state_get '.protocols.vless_reality.port')"
-  user_count="$(state_get '.protocols.shadowsocks.users | length')"
-  listen_addr="$(default_listen_address)"
-
-  if [[ -z "$current_port" || "$current_port" == "null" || "$current_port" == "8388" ]]; then
-    current_port="$(generate_random_service_port_excluding "$vless_port")"
-  fi
-
-  if [[ -z "$current_password" || "$current_password" == "null" ]]; then
-    current_password="$(generate_base64_bytes 32)"
-  fi
-
-  state_jq --argjson port "$current_port" --arg password "$current_password" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
-    .protocols.shadowsocks.enabled = true |
-    .protocols.shadowsocks.listen = $listen_addr |
-    .protocols.shadowsocks.port = $port |
-    .protocols.shadowsocks.network = "tcp" |
-    .protocols.shadowsocks.method = "2022-blake3-aes-256-gcm" |
-    .protocols.shadowsocks.multiplex = true |
-    .protocols.shadowsocks.server_password = $password |
-    .meta.updated_at = $ts
-  '
-
-  if [[ "$user_count" -eq 0 ]]; then
-    append_ss_user "ss-client-1" "$(generate_base64_bytes 32)"
-  fi
-}
-
-ensure_vless_defaults() {
-  local private_key public_key short_id user_count keypair listen_addr ss_port vless_port vless_sni
-  private_key="$(state_get '.protocols.vless_reality.private_key')"
-  public_key="$(state_get '.protocols.vless_reality.public_key')"
-  short_id="$(state_get '.protocols.vless_reality.short_id')"
-  user_count="$(state_get '.protocols.vless_reality.users | length')"
-  listen_addr="$(default_listen_address)"
-  ss_port="$(state_get '.protocols.shadowsocks.port')"
-  vless_port="$(state_get '.protocols.vless_reality.port')"
-  vless_sni="$(state_get '.protocols.vless_reality.server_name')"
-
-  if [[ -z "$vless_port" || "$vless_port" == "null" || "$vless_port" == "443" ]]; then
-    vless_port="$(generate_random_service_port_excluding "$ss_port")"
-  fi
-
-  if [[ -z "$vless_sni" || "$vless_sni" == "null" || "$vless_sni" == "www.cloudflare.com" ]]; then
-    vless_sni="www.tesla.com"
-  fi
-
-  if [[ -z "$private_key" || "$private_key" == "null" || -z "$public_key" || "$public_key" == "null" ]]; then
-    keypair="$(generate_reality_keypair)"
-    private_key="${keypair%%$'\t'*}"
-    public_key="${keypair##*$'\t'}"
-  fi
-
-  if [[ -z "$short_id" || "$short_id" == "null" ]]; then
-    short_id="$(generate_hex 8)"
-  fi
-
-  state_jq --argjson vless_port "$vless_port" --arg vless_sni "$vless_sni" --arg private_key "$private_key" --arg public_key "$public_key" --arg short_id "$short_id" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
-    .protocols.vless_reality.enabled = true |
-    .protocols.vless_reality.listen = $listen_addr |
-    .protocols.vless_reality.port = $vless_port |
-    .protocols.vless_reality.server_name = $vless_sni |
-    .protocols.vless_reality.handshake_server = (if .protocols.vless_reality.handshake_server == "" then .protocols.vless_reality.server_name else .protocols.vless_reality.handshake_server end) |
-    .protocols.vless_reality.handshake_port = (.protocols.vless_reality.handshake_port // 443) |
-    .protocols.vless_reality.private_key = $private_key |
-    .protocols.vless_reality.public_key = $public_key |
-    .protocols.vless_reality.short_id = $short_id |
-    .meta.updated_at = $ts
-  '
-
-  if [[ "$user_count" -eq 0 ]]; then
-    append_vless_user "vless-client-1" "$(generate_uuid)"
-  fi
-}
-
-ensure_hy2_defaults() {
-  local tls_server_name obfs_password user_count listen_addr
-  tls_server_name="$(state_get '.protocols.hysteria2.tls_server_name')"
-  obfs_password="$(state_get '.protocols.hysteria2.obfs_password')"
-  user_count="$(state_get '.protocols.hysteria2.users | length')"
-  listen_addr="$(default_listen_address)"
-
-  if [[ -z "$tls_server_name" || "$tls_server_name" == "null" ]]; then
-    tls_server_name="$(state_get '.meta.server_address')"
-  fi
-
-  if [[ -z "$obfs_password" || "$obfs_password" == "null" ]]; then
-    obfs_password="$(generate_password)"
-  fi
-
-  state_jq --arg tls_server_name "$tls_server_name" --arg obfs_password "$obfs_password" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
-    .protocols.hysteria2.enabled = true |
-    .protocols.hysteria2.listen = $listen_addr |
-    .protocols.hysteria2.port = (.protocols.hysteria2.port // 8443) |
-    .protocols.hysteria2.up_mbps = (.protocols.hysteria2.up_mbps // 100) |
-    .protocols.hysteria2.down_mbps = (.protocols.hysteria2.down_mbps // 100) |
-    .protocols.hysteria2.tls_server_name = $tls_server_name |
-    .protocols.hysteria2.obfs_password = $obfs_password |
-    .protocols.hysteria2.masquerade = (if .protocols.hysteria2.masquerade == "" then "https://www.bing.com" else .protocols.hysteria2.masquerade end) |
-    .meta.updated_at = $ts
-  '
-
-  ensure_hysteria_cert
-
-  if [[ "$user_count" -eq 0 ]]; then
-    append_hy2_user "hy2-client-1" "$(generate_password)"
-  fi
-}
-
 validate_state() {
   local errors=""
   local ss_enabled vless_enabled hy2_enabled
@@ -2002,7 +1864,7 @@ repair_install() {
   init_state_file
   install_dependencies
 
-  manager_target="$(manager_script_target_path)"
+  manager_target="$MANAGER_SCRIPT_PATH"
   if [[ "${SBOX_REPAIR_RESUMED:-0}" != "1" ]]; then
     if install_manager_project_from_repo; then
       log "已从 GitHub 仓库拉取最新项目并更新到 ${manager_target}。"
@@ -2017,7 +1879,6 @@ repair_install() {
   fi
 
   install_sing_box
-  ensure_sing_box_service
   apply_config || return 1
   ui_msg "重新安装 / 修复完成。原有节点、客户端和分流规则已保留。"
 
@@ -3106,10 +2967,6 @@ restart_realm_service() {
   ui_msg "Realm 服务已重启。"
 }
 
-manager_script_target_path() {
-  printf '%s\n' "$MANAGER_SCRIPT_PATH"
-}
-
 fetch_latest_project_from_repo() {
   local tmp_dir repo_dir archive_path extracted_dir
   local repo_url="https://github.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}.git"
@@ -3146,7 +3003,7 @@ fetch_latest_project_from_repo() {
 install_manager_project_from_repo() {
   local target_path project_dir
 
-  target_path="$(manager_script_target_path)"
+  target_path="$MANAGER_SCRIPT_PATH"
   project_dir="$(fetch_latest_project_from_repo)" || return 1
 
   if ! bash -n "$project_dir/index.sh"; then
@@ -3615,14 +3472,9 @@ EOF
 
 main() {
   setup_terminal_env
-  init_ui
 
   case "${1:-panel}" in
     quick-install)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
       quick_install
       ;;
     apply)
@@ -3642,7 +3494,6 @@ main() {
     add-client)
       require_linux
       require_root
-      ensure_ui_backend
       ensure_dirs
       init_state_file
       add_client
@@ -3650,7 +3501,6 @@ main() {
     remove-client)
       require_linux
       require_root
-      ensure_ui_backend
       ensure_dirs
       init_state_file
       remove_client
@@ -3658,7 +3508,6 @@ main() {
     node|nodes|manage-node)
       require_linux
       require_root
-      ensure_ui_backend
       ensure_dirs
       init_state_file
       node_submenu
@@ -3666,7 +3515,6 @@ main() {
     delete-node|remove-node)
       require_linux
       require_root
-      ensure_ui_backend
       ensure_dirs
       init_state_file
       delete_node
@@ -3674,7 +3522,6 @@ main() {
     split|split-menu|routing|ai|ai-menu|ai-route-menu)
       require_linux
       require_root
-      ensure_ui_backend
       ensure_dirs
       init_state_file
       split_routing_submenu
@@ -3682,7 +3529,6 @@ main() {
     split-route|ai-route)
       require_linux
       require_root
-      ensure_ui_backend
       ensure_dirs
       init_state_file
       configure_split_routing
@@ -3690,7 +3536,6 @@ main() {
     edit-split-route|edit-split-outbound)
       require_linux
       require_root
-      ensure_ui_backend
       ensure_dirs
       init_state_file
       edit_split_routing
@@ -3698,7 +3543,6 @@ main() {
     delete-split-route|remove-split-route|delete-split-outbound)
       require_linux
       require_root
-      ensure_ui_backend
       ensure_dirs
       init_state_file
       delete_split_outbound
@@ -3713,7 +3557,6 @@ main() {
     add-split-rule|add-split-rules|append-split-rule|append-split-rules|add-ai-rule|add-ai-rules|append-ai-rule|append-ai-rules)
       require_linux
       require_root
-      ensure_ui_backend
       ensure_dirs
       init_state_file
       append_split_routing_rules "${@:2}"
@@ -3721,7 +3564,6 @@ main() {
     delete-split-rule|remove-split-rule|delete-ai-rule|remove-ai-rule)
       require_linux
       require_root
-      ensure_ui_backend
       ensure_dirs
       init_state_file
       delete_split_routing_rule
@@ -3734,14 +3576,9 @@ main() {
       show_nekobox_routing_exports
       ;;
     repair-install|reinstall)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
       repair_install
       ;;
     realm)
-      ensure_ui_backend
       ensure_dirs
       prepare_realm_menu && realm_submenu
       ;;
@@ -3773,7 +3610,6 @@ main() {
     panel|"")
       require_linux
       require_root
-      ensure_ui_backend
       ensure_dirs
       init_state_file
       main_menu

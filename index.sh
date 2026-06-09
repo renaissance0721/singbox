@@ -3034,7 +3034,7 @@ update_manager_script() {
     return 1
   fi
 
-  ui_msg "脚本更新完成。"
+  exit 0
 }
 
 realm_submenu() {

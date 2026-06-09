@@ -3317,10 +3317,10 @@ main_menu() {
     choice="$(ui_menu "$APP_TITLE" "$menu_text" \
       "1" "安装 / 初始化 sing-box" \
       "2" "代理节点管理" \
-      "3" "查看当前概览" \
-      "4" "查看服务状态" \
-      "5" "分流管理" \
-      "6" "Realm 中转" \
+      "3" "分流管理" \
+      "4" "Realm 中转" \
+      "5" "查看当前概览" \
+      "6" "查看服务状态" \
       "7" "更新脚本" \
       "8" "卸载" \
       "0" "退出")" || break
@@ -3338,16 +3338,16 @@ main_menu() {
         node_submenu
         ;;
       3)
-        show_overview
-        ;;
-      4)
-        show_service_status
-        ;;
-      5)
         split_routing_submenu
         ;;
-      6)
+      4)
         prepare_realm_menu && realm_submenu
+        ;;
+      5)
+        show_overview
+        ;;
+      6)
+        show_service_status
         ;;
       7)
         update_manager_script

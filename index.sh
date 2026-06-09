@@ -14,7 +14,6 @@
 #   sbox add-client             打开新增客户端流程
 #   sbox remove-client          打开删除客户端流程
 #   sbox show                   查看客户端信息
-#   SINGBOX_SERVER_ADDRESS=your.domain sbox quick-install
 #
 
 set -Eeuo pipefail
@@ -1013,34 +1012,9 @@ normalize_protocol_listen_addresses() {
   '
 }
 
-set_node_name_if_empty() {
-  local current preset desired
-  current="$(state_get '.meta.node_name')"
-
-  if [[ -n "$current" && "$current" != "null" ]]; then
-    return 0
-  fi
-
-  preset="${SINGBOX_NODE_NAME:-${NODE_NAME:-我的节点}}"
-  desired="$preset"
-
-  if is_interactive; then
-    desired="$(ui_input "节点名称" "请输入该节点在客户端中显示的名称" "$desired")" || return 1
-  fi
-
-  desired="${desired//[$'\r\n']}"
-  [[ -n "$desired" ]] || die "节点名称不能为空。"
-
-  state_jq --arg node_name "$desired" --arg ts "$(utc_now)" \
-    '.meta.node_name = $node_name | .meta.updated_at = $ts'
-}
-
 prompt_node_name_for_protocol() {
-  local current desired
-  current="$(state_get '.meta.node_name')"
-  desired="$(ui_input "节点名称" "请输入该协议在客户端中显示的节点名称" "${current:-我的节点}")" || return 1
-  desired="${desired//[$'\r\n']}"
-  [[ -n "$desired" ]] || die "节点名称不能为空。"
+  local desired
+  desired="$(prompt_nonempty "节点名称" "请输入该协议在客户端中显示的节点名称" "")" || return 1
 
   state_jq --arg node_name "$desired" --arg ts "$(utc_now)" \
     '.meta.node_name = $node_name | .meta.updated_at = $ts'
@@ -1077,29 +1051,6 @@ migrate_legacy_auto_init_state() {
     .protocols.hysteria2.obfs_password = "" |
     .meta.updated_at = $ts
   '
-}
-
-set_server_address_if_empty() {
-  local current detected desired preset
-  current="$(state_get '.meta.server_address')"
-
-  if [[ -n "$current" && "$current" != "null" ]]; then
-    return 0
-  fi
-
-  preset="${SINGBOX_SERVER_ADDRESS:-${SERVER_ADDRESS:-}}"
-  detected="$(detect_public_address)"
-  desired="${preset:-$detected}"
-
-  if is_interactive; then
-    desired="$(ui_input "服务器地址" "请输入节点对外地址（域名或 IP）" "$desired")" || return 1
-  fi
-
-  desired="${desired// /}"
-  [[ -n "$desired" ]] || die "服务器地址不能为空。请在交互环境下运行，或通过环境变量 SINGBOX_SERVER_ADDRESS 指定。"
-
-  state_jq --arg addr "$desired" --arg ts "$(utc_now)" \
-    '.meta.server_address = $addr | .meta.updated_at = $ts'
 }
 
 prompt_nonempty() {
@@ -1847,8 +1798,6 @@ quick_install() {
   install_sing_box
   init_state_file
   migrate_legacy_auto_init_state
-  set_node_name_if_empty
-  set_server_address_if_empty
   normalize_protocol_listen_addresses
   ui_msg "基础环境安装完成，请继续在面板中按需启用并配置协议。"
 }
@@ -1915,26 +1864,13 @@ configure_node_name() {
 }
 
 configure_shadowsocks() {
-  local current_port vless_port port regenerate_password server_password listen_addr
+  local vless_port port server_password listen_addr
 
-  prompt_node_name_for_protocol
+  prompt_node_name_for_protocol || return 1
 
-  current_port="$(state_get '.protocols.shadowsocks.port')"
   vless_port="$(state_get '.protocols.vless_reality.port')"
-  if [[ -z "$current_port" || "$current_port" == "null" || "$current_port" == "8388" ]]; then
-    current_port="$(generate_random_service_port_excluding "$vless_port")"
-  fi
-  port="$(prompt_number "Shadowsocks 端口" "请输入 Shadowsocks 监听端口" "$current_port" 1 65535)" || return 1
-
-  regenerate_password="false"
-  if ui_yesno "是否重新生成 Shadowsocks 服务端主密码？"; then
-    regenerate_password="true"
-  fi
-
-  server_password="$(state_get '.protocols.shadowsocks.server_password')"
-  if [[ "$regenerate_password" == "true" || -z "$server_password" || "$server_password" == "null" ]]; then
-    server_password="$(generate_base64_bytes 32)"
-  fi
+  port="$(prompt_number "Shadowsocks 端口" "请输入 Shadowsocks 监听端口" "$(generate_random_service_port_excluding "$vless_port")" 1 65535)" || return 1
+  server_password="$(generate_base64_bytes 32)"
   listen_addr="$(default_listen_address)"
 
   state_jq --argjson port "$port" --arg server_password "$server_password" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
@@ -1956,46 +1892,19 @@ configure_shadowsocks() {
 }
 
 configure_vless_reality() {
-  local current_port ss_port port current_sni sni current_handshake_port handshake_port keypair private_key public_key short_id listen_addr
+  local ss_port port sni handshake_port keypair private_key public_key short_id listen_addr
 
-  prompt_node_name_for_protocol
+  prompt_node_name_for_protocol || return 1
 
-  current_port="$(state_get '.protocols.vless_reality.port')"
   ss_port="$(state_get '.protocols.shadowsocks.port')"
-  current_sni="$(state_get '.protocols.vless_reality.server_name')"
-  current_handshake_port="$(state_get '.protocols.vless_reality.handshake_port')"
+  port="$(prompt_number "VLESS 端口" "请输入 VLESS + Reality 监听端口" "$(generate_random_service_port_excluding "$ss_port")" 1 65535)" || return 1
+  sni="$(prompt_nonempty "Reality SNI" "请输入第三方 Reality 伪装域名（例如 www.cloudflare.com，不能填写本机 IP 或节点域名）" "www.tesla.com")" || return 1
+  handshake_port="$(prompt_number "Reality 握手端口" "请输入 Reality 伪装站点端口" "443" 1 65535)" || return 1
 
-  if [[ -z "$current_port" || "$current_port" == "null" || "$current_port" == "443" ]]; then
-    current_port="$(generate_random_service_port_excluding "$ss_port")"
-  fi
-  if [[ -z "$current_sni" || "$current_sni" == "null" || "$current_sni" == "www.cloudflare.com" ]]; then
-    current_sni="www.tesla.com"
-  fi
-
-  port="$(prompt_number "VLESS 端口" "请输入 VLESS + Reality 监听端口" "$current_port" 1 65535)" || return 1
-  sni="$(prompt_nonempty "Reality SNI" "请输入第三方 Reality 伪装域名（例如 www.cloudflare.com，不能填写本机 IP 或节点域名）" "$current_sni")" || return 1
-  handshake_port="$(prompt_number "Reality 握手端口" "请输入 Reality 伪装站点端口" "$current_handshake_port" 1 65535)" || return 1
-
-  private_key="$(state_get '.protocols.vless_reality.private_key')"
-  public_key="$(state_get '.protocols.vless_reality.public_key')"
-  short_id="$(state_get '.protocols.vless_reality.short_id')"
-
-  if ui_yesno "是否重新生成 Reality 密钥和 short_id？"; then
-    keypair="$(generate_reality_keypair)"
-    private_key="${keypair%%$'\t'*}"
-    public_key="${keypair##*$'\t'}"
-    short_id="$(generate_hex 8)"
-  fi
-
-  if [[ -z "$private_key" || "$private_key" == "null" || -z "$public_key" || "$public_key" == "null" ]]; then
-    keypair="$(generate_reality_keypair)"
-    private_key="${keypair%%$'\t'*}"
-    public_key="${keypair##*$'\t'}"
-  fi
-
-  if [[ -z "$short_id" || "$short_id" == "null" ]]; then
-    short_id="$(generate_hex 8)"
-  fi
+  keypair="$(generate_reality_keypair)"
+  private_key="${keypair%%$'\t'*}"
+  public_key="${keypair##*$'\t'}"
+  short_id="$(generate_hex 8)"
   listen_addr="$(default_listen_address)"
 
   state_jq --argjson port "$port" --arg sni "$sni" --arg handshake_server "$sni" --argjson handshake_port "$handshake_port" --arg private_key "$private_key" --arg public_key "$public_key" --arg short_id "$short_id" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
@@ -2019,30 +1928,17 @@ configure_vless_reality() {
 }
 
 configure_hysteria2() {
-  local current_port current_up current_down current_sni current_masquerade
   local port up_mbps down_mbps tls_server_name masquerade obfs_password listen_addr
 
-  prompt_node_name_for_protocol
+  prompt_node_name_for_protocol || return 1
 
-  current_port="$(state_get '.protocols.hysteria2.port')"
-  current_up="$(state_get '.protocols.hysteria2.up_mbps')"
-  current_down="$(state_get '.protocols.hysteria2.down_mbps')"
-  current_sni="$(state_get '.protocols.hysteria2.tls_server_name')"
-  current_masquerade="$(state_get '.protocols.hysteria2.masquerade')"
+  port="$(prompt_number "Hysteria2 端口" "请输入 Hysteria2 监听端口（UDP）" "$(generate_random_service_port)" 1 65535)" || return 1
+  up_mbps="$(prompt_number "上行带宽" "请输入上行 Mbps" "100" 1 100000)" || return 1
+  down_mbps="$(prompt_number "下行带宽" "请输入下行 Mbps" "100" 1 100000)" || return 1
+  tls_server_name="$(prompt_nonempty "TLS Server Name" "请输入 Hysteria2 证书域名或 IP" "$(state_get '.meta.server_address')")" || return 1
+  masquerade="$(prompt_nonempty "Masquerade" "请输入认证失败时伪装地址" "https://www.bing.com")" || return 1
 
-  port="$(prompt_number "Hysteria2 端口" "请输入 Hysteria2 监听端口（UDP）" "$current_port" 1 65535)" || return 1
-  up_mbps="$(prompt_number "上行带宽" "请输入上行 Mbps" "$current_up" 1 100000)" || return 1
-  down_mbps="$(prompt_number "下行带宽" "请输入下行 Mbps" "$current_down" 1 100000)" || return 1
-  tls_server_name="$(prompt_nonempty "TLS Server Name" "请输入 Hysteria2 证书域名或 IP" "$current_sni")" || return 1
-  masquerade="$(prompt_nonempty "Masquerade" "请输入认证失败时伪装地址" "$current_masquerade")" || return 1
-
-  obfs_password="$(state_get '.protocols.hysteria2.obfs_password')"
-  if ui_yesno "是否重新生成 Hysteria2 的 Salamander 混淆密码？"; then
-    obfs_password="$(generate_password)"
-  fi
-  if [[ -z "$obfs_password" || "$obfs_password" == "null" ]]; then
-    obfs_password="$(generate_password)"
-  fi
+  obfs_password="$(generate_password)"
   listen_addr="$(default_listen_address)"
 
   state_jq --argjson port "$port" --argjson up_mbps "$up_mbps" --argjson down_mbps "$down_mbps" --arg tls_server_name "$tls_server_name" --arg masquerade "$masquerade" --arg obfs_password "$obfs_password" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
@@ -2057,9 +1953,7 @@ configure_hysteria2() {
     .meta.updated_at = $ts
   '
 
-  if ui_yesno "是否重新生成 Hysteria2 自签名证书？"; then
-    rm -f "$(state_get '.protocols.hysteria2.cert_path')" "$(state_get '.protocols.hysteria2.key_path')" 2>/dev/null || true
-  fi
+  rm -f "$(state_get '.protocols.hysteria2.cert_path')" "$(state_get '.protocols.hysteria2.key_path')" 2>/dev/null || true
   ensure_hysteria_cert
 
   if [[ "$(state_get '.protocols.hysteria2.users | length')" -eq 0 ]]; then
@@ -3508,12 +3402,11 @@ usage() {
 说明:
   1. 面板使用纯命令行数字输入，不依赖方向键。
   2. Hysteria2 默认使用自签名证书。
-  3. 非交互安装可通过 SINGBOX_SERVER_ADDRESS=your.domain 指定节点地址。
-  4. 一键安装使用官方原生 sing-box 软件包。
-  5. 支持添加多个 SOCKS5 / Shadowsocks 分流落地，每个落地独立绑定规则集。
-  6. Shadowsocks 可选择多种 AEAD / 2022 加密方式；不预置任何规则集。
-  7. repair-install 会重装 / 更新脚本和 sing-box 核心，但不会删除状态文件、客户端或分流规则。
-  8. 一键安装只安装环境；当你启用协议或新增客户端后，才会生成对应的协议链接。
+  3. 一键安装使用官方原生 sing-box 软件包。
+  4. 支持添加多个 SOCKS5 / Shadowsocks 分流落地，每个落地独立绑定规则集。
+  5. Shadowsocks 可选择多种 AEAD / 2022 加密方式；不预置任何规则集。
+  6. repair-install 会重装 / 更新脚本和 sing-box 核心，但不会删除状态文件、客户端或分流规则。
+  7. 一键安装只安装环境；节点名称和出口地址在新建节点时填写。
 EOF
 }
 

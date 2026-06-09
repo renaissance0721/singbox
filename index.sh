@@ -2081,6 +2081,35 @@ Hysteria2：$(state_get '.protocols.hysteria2.enabled')
 EOF
 }
 
+build_node() {
+  local protocol_choice
+
+  protocol_choice="$(ui_menu "搭建节点" "请选择要搭建的节点协议" \
+    "1" "Shadowsocks 2022" \
+    "2" "VLESS + Reality" \
+    "3" "Hysteria2" \
+    "0" "返回")" || return 1
+
+  case "$protocol_choice" in
+    1)
+      configure_shadowsocks
+      ;;
+    2)
+      configure_vless_reality
+      ;;
+    3)
+      configure_hysteria2
+      ;;
+    0)
+      return 0
+      ;;
+    *)
+      ui_msg "无效选项，请重新选择。"
+      return 1
+      ;;
+  esac
+}
+
 node_submenu() {
   local choice menu_text
 
@@ -2089,13 +2118,11 @@ node_submenu() {
     choice="$(ui_menu "代理节点管理" "$menu_text" \
       "1" "设置节点对外地址" \
       "2" "设置节点名称" \
-      "3" "配置 Shadowsocks 2022" \
-      "4" "配置 VLESS + Reality" \
-      "5" "配置 Hysteria2" \
-      "6" "删除节点" \
-      "7" "管理客户端" \
-      "8" "查看订阅链接" \
-      "9" "重新生成配置并重载服务" \
+      "3" "新建节点" \
+      "4" "删除节点" \
+      "5" "管理客户端" \
+      "6" "查看订阅链接" \
+      "7" "重新生成配置并重载服务" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || return 0
 
@@ -2107,24 +2134,18 @@ node_submenu() {
         configure_node_name || true
         ;;
       3)
-        configure_shadowsocks || true
+        build_node || true
         ;;
       4)
-        configure_vless_reality || true
-        ;;
-      5)
-        configure_hysteria2 || true
-        ;;
-      6)
         delete_node || true
         ;;
-      7)
+      5)
         client_submenu
         ;;
-      8)
+      6)
         show_subscription_links
         ;;
-      9)
+      7)
         apply_config
         ;;
       0)

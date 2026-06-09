@@ -186,11 +186,38 @@ ui_show_text() {
   ui_pause
 }
 
+ui_input_error_return() {
+  local text=${1:-连续输入错误两次}
+
+  printf '\n\033[31m%s，按 Enter 退回菜单界面。\033[0m' "$text" >&2
+  if [[ -t 0 ]]; then
+    read -r _
+  fi
+  printf '\n' >&2
+}
+
 ui_yesno() {
   local text=${1:-}
-  local answer
-  read -r -p "$text [y/N]: " answer
-  [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
+  local answer attempts=0
+
+  while (( attempts < 2 )); do
+    read -r -p "$text [y/N]: " answer || return 2
+    case "$answer" in
+      [Yy]|[Yy][Ee][Ss])
+        return 0
+        ;;
+      ""|[Nn]|[Nn][Oo])
+        return 1
+        ;;
+    esac
+
+    attempts=$((attempts + 1))
+    if (( attempts >= 2 )); then
+      ui_input_error_return
+      return 2
+    fi
+    printf '请输入 y 或 n，再次输错将退回菜单界面。\n' >&2
+  done
 }
 
 ui_input() {
@@ -217,19 +244,41 @@ ui_password() {
 ui_menu() {
   local title=$1
   local text=$2
+  local choice option attempts=0
+  local -a allowed_options=()
+  local -a option_labels=()
   shift 2
+
+  while (( $# >= 2 )); do
+    allowed_options+=("$1")
+    option_labels+=("$2")
+    shift 2
+  done
 
   printf '\n========================================\n' >&2
   printf '%s\n' "$title" >&2
   printf '========================================\n' >&2
   printf '%s\n' "$text" >&2
-  while (( $# >= 2 )); do
-    printf '  %s) %s\n' "$1" "$2" >&2
-    shift 2
+  for (( option = 0; option < ${#allowed_options[@]}; option++ )); do
+    printf '  %s) %s\n' "${allowed_options[$option]}" "${option_labels[$option]}" >&2
   done
-  local choice
-  read -r -p "您要进行的操作是: " choice
-  printf '%s\n' "$choice"
+
+  while (( attempts < 2 )); do
+    read -r -p "您要进行的操作是: " choice || return 1
+    for option in "${allowed_options[@]}"; do
+      if [[ "$choice" == "$option" ]]; then
+        printf '%s\n' "$choice"
+        return 0
+      fi
+    done
+
+    attempts=$((attempts + 1))
+    if (( attempts >= 2 )); then
+      ui_input_error_return
+      return 1
+    fi
+    printf '输入的选项无效，再次输错将退回菜单界面。\n' >&2
+  done
 }
 
 ui_protocol_menu() {
@@ -1058,16 +1107,24 @@ prompt_nonempty() {
   local text=$2
   local default_value=${3:-}
   local value=""
+  local attempts=0
 
-  while true; do
+  while (( attempts < 2 )); do
     value="$(ui_input "$title" "$text" "$default_value")" || return 1
     value="${value#"${value%%[![:space:]]*}"}"
     value="${value%"${value##*[![:space:]]}"}"
-    [[ -n "$value" ]] && break
-    ui_msg "输入不能为空，请重新输入。"
-  done
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
 
-  printf '%s\n' "$value"
+    attempts=$((attempts + 1))
+    if (( attempts >= 2 )); then
+      ui_input_error_return
+      return 1
+    fi
+    printf '输入不能为空，再次输错将退回菜单界面。\n' >&2
+  done
 }
 
 prompt_number() {
@@ -1077,19 +1134,21 @@ prompt_number() {
   local min_value=$4
   local max_value=$5
   local value=""
+  local attempts=0
 
-  while true; do
+  while (( attempts < 2 )); do
     value="$(ui_input "$title" "$text" "$default_value")" || return 1
-    [[ "$value" =~ ^[0-9]+$ ]] || {
-      ui_msg "请输入数字。"
-      continue
-    }
-    (( value >= min_value && value <= max_value )) || {
-      ui_msg "请输入 ${min_value}-${max_value} 范围内的数字。"
-      continue
-    }
-    printf '%s\n' "$value"
-    return 0
+    if [[ "$value" =~ ^[0-9]+$ ]] && (( value >= min_value && value <= max_value )); then
+      printf '%s\n' "$value"
+      return 0
+    fi
+
+    attempts=$((attempts + 1))
+    if (( attempts >= 2 )); then
+      ui_input_error_return
+      return 1
+    fi
+    printf '请输入 %s-%s 范围内的数字，再次输错将退回菜单界面。\n' "$min_value" "$max_value" >&2
   done
 }
 
@@ -1116,11 +1175,11 @@ realm_prompt_nonempty_limited() {
     printf -v "$counter_var" '%s' "$attempts"
 
     if (( attempts >= 2 )); then
-      ui_msg "连续输入错误两次，已返回 Realm 菜单。"
+      ui_input_error_return
       return 1
     fi
 
-    ui_msg "输入不能为空，再次输错将返回 Realm 菜单。"
+    printf '输入不能为空，再次输错将退回菜单界面。\n' >&2
   done
 }
 
@@ -1147,11 +1206,11 @@ realm_prompt_number_limited() {
     printf -v "$counter_var" '%s' "$attempts"
 
     if (( attempts >= 2 )); then
-      ui_msg "连续输入错误两次，已返回 Realm 菜单。"
+      ui_input_error_return
       return 1
     fi
 
-    ui_msg "请输入 ${min_value}-${max_value} 范围内的数字，再次输错将返回 Realm 菜单。"
+    printf '请输入 %s-%s 范围内的数字，再次输错将退回菜单界面。\n' "$min_value" "$max_value" >&2
   done
 }
 
@@ -1837,7 +1896,7 @@ repair_install() {
 }
 
 configure_server_address() {
-  local current desired
+  local current desired yesno_result
   current="$(state_get '.meta.server_address')"
   desired="$(prompt_nonempty "服务器地址" "请输入节点对外地址（域名或 IP）" "$current")" || return 1
   state_jq --arg addr "$desired" --arg ts "$(utc_now)" '.meta.server_address = $addr | .meta.updated_at = $ts'
@@ -1848,6 +1907,9 @@ configure_server_address() {
         '.protocols.hysteria2.tls_server_name = $addr | .meta.updated_at = $ts'
       rm -f "$(state_get '.protocols.hysteria2.cert_path')" "$(state_get '.protocols.hysteria2.key_path')" 2>/dev/null || true
       ensure_hysteria_cert
+    else
+      yesno_result=$?
+      (( yesno_result == 2 )) && return 1
     fi
   fi
 
@@ -1965,7 +2027,6 @@ configure_hysteria2() {
 
 node_menu_text() {
   cat <<EOF
-节点名称：$(state_get '.meta.node_name // "-"')
 节点地址：$(state_get '.meta.server_address // "-"')
 Shadowsocks 2022：$(state_get '.protocols.shadowsocks.enabled')
 VLESS + Reality：$(state_get '.protocols.vless_reality.enabled')
@@ -2026,7 +2087,7 @@ node_submenu() {
       "4" "查看订阅链接" \
       "5" "重新生成配置并重载服务" \
       "0" "返回上一级菜单" \
-      "00" "退出脚本")" || return 0
+      "00" "退出脚本")" || continue
 
     case "$choice" in
       1)
@@ -2179,20 +2240,26 @@ select_split_outbound_id() {
 configure_split_routing() {
   local outbound_id=${1:-}
   local is_new=0 current_enabled current_type current_server current_port current_username current_password current_method current_rules
-  local type_choice outbound_type server port username password method_choice method rules_input rules_json name
+  local type_choice outbound_type server port username password method_choice method rules_input rules_json name yesno_result
+  local name_attempts=0 password_attempts=0
 
   if [[ -z "$outbound_id" ]]; then
     is_new=1
-    name="$(prompt_nonempty "新增分流落地" "请输入唯一名称，只能包含字母、数字、点、下划线和连字符" "route-$(($(split_outbound_count) + 1))")" || return 1
-    name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
-    [[ "$name" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || {
-      ui_msg "落地名称格式无效。"
-      return 1
-    }
-    if jq -e --arg id "$name" '.routing.split.outbounds[]? | select(.id == $id)' "$STATE_FILE" >/dev/null; then
-      ui_msg "该落地名称已存在。"
-      return 1
-    fi
+    while (( name_attempts < 2 )); do
+      name="$(prompt_nonempty "新增分流落地" "请输入唯一名称，只能包含字母、数字、点、下划线和连字符" "route-$(($(split_outbound_count) + 1))")" || return 1
+      name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+      if [[ "$name" =~ ^[a-z0-9][a-z0-9._-]*$ ]] &&
+        ! jq -e --arg id "$name" '.routing.split.outbounds[]? | select(.id == $id)' "$STATE_FILE" >/dev/null; then
+        break
+      fi
+
+      name_attempts=$((name_attempts + 1))
+      if (( name_attempts >= 2 )); then
+        ui_input_error_return
+        return 1
+      fi
+      printf '落地名称格式无效或已存在，再次输错将退回菜单界面。\n' >&2
+    done
     outbound_id="$name"
     current_enabled="false"
     current_type="socks"
@@ -2214,13 +2281,19 @@ configure_split_routing() {
     current_rules="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.rule_sets // []) | join(", ")')"
   fi
 
-  if (( ! is_new )) && ! ui_yesno "是否启用并编辑落地 ${name}？选择否将停用该落地。当前状态：${current_enabled}"; then
-    state_jq --arg id "$outbound_id" --arg ts "$(utc_now)" '
-      (.routing.split.outbounds[] | select(.id == $id) | .enabled) = false |
-      .meta.updated_at = $ts
-    '
-    apply_config
-    return 0
+  if (( ! is_new )); then
+    if ui_yesno "是否启用并编辑落地 ${name}？选择否将停用该落地。当前状态：${current_enabled}"; then
+      :
+    else
+      yesno_result=$?
+      (( yesno_result == 2 )) && return 1
+      state_jq --arg id "$outbound_id" --arg ts "$(utc_now)" '
+        (.routing.split.outbounds[] | select(.id == $id) | .enabled) = false |
+        .meta.updated_at = $ts
+      '
+      apply_config
+      return 0
+    fi
   fi
 
   type_choice="$(ui_menu "分流落地类型" "请选择落地代理类型。当前：${current_type}" \
@@ -2261,12 +2334,20 @@ configure_split_routing() {
     method="$(normalize_shadowsocks_method "$method")"
   fi
 
-  password="$(ui_password "分流落地密码" "请输入落地密码；留空则保留当前密码")" || return 1
-  [[ -n "$password" ]] || password="$current_password"
-  [[ -n "$password" && "$password" != "null" ]] || {
-    ui_msg "落地密码不能为空。"
-    return 1
-  }
+  while (( password_attempts < 2 )); do
+    password="$(ui_password "分流落地密码" "请输入落地密码；留空则保留当前密码")" || return 1
+    [[ -n "$password" ]] || password="$current_password"
+    if [[ -n "$password" && "$password" != "null" ]]; then
+      break
+    fi
+
+    password_attempts=$((password_attempts + 1))
+    if (( password_attempts >= 2 )); then
+      ui_input_error_return
+      return 1
+    fi
+    printf '落地密码不能为空，再次输错将退回菜单界面。\n' >&2
+  done
 
   rules_input="$(ui_input "落地规则集" "请输入该落地绑定的规则集名称，可用逗号或空格分隔" "$current_rules")" || return 1
   rules_json="$(build_split_rules_json "$rules_input")"
@@ -2440,7 +2521,7 @@ split_routing_submenu() {
       "6" "删除落地规则集" \
       "7" "导出 NekoBox 分流规则" \
       "0" "返回上一级菜单" \
-      "00" "退出脚本")" || return 1
+      "00" "退出脚本")" || continue
     case "$choice" in
       1) configure_split_routing ;;
       2) edit_split_routing ;;
@@ -2457,7 +2538,7 @@ split_routing_submenu() {
 }
 
 add_client() {
-  local protocol_choice name value
+  local protocol_choice name value duplicate_attempts=0
   protocol_choice="$(ui_protocol_menu)" || return 1
 
   case "$protocol_choice" in
@@ -2469,7 +2550,12 @@ add_client() {
       while true; do
         name="$(prompt_nonempty "新增客户端" "请输入 Shadowsocks 客户端名称" "ss-client-$(date +%H%M%S)")" || return 1
         if user_exists "shadowsocks" "$name"; then
-          ui_msg "该客户端名称已存在，请换一个名称。"
+          duplicate_attempts=$((duplicate_attempts + 1))
+          if (( duplicate_attempts >= 2 )); then
+            ui_input_error_return
+            return 1
+          fi
+          printf '该客户端名称已存在，再次输错将退回菜单界面。\n' >&2
           continue
         fi
         break
@@ -2486,7 +2572,12 @@ add_client() {
       while true; do
         name="$(prompt_nonempty "新增客户端" "请输入 VLESS 客户端名称" "vless-client-$(date +%H%M%S)")" || return 1
         if user_exists "vless_reality" "$name"; then
-          ui_msg "该客户端名称已存在，请换一个名称。"
+          duplicate_attempts=$((duplicate_attempts + 1))
+          if (( duplicate_attempts >= 2 )); then
+            ui_input_error_return
+            return 1
+          fi
+          printf '该客户端名称已存在，再次输错将退回菜单界面。\n' >&2
           continue
         fi
         break
@@ -2503,7 +2594,12 @@ add_client() {
       while true; do
         name="$(prompt_nonempty "新增客户端" "请输入 Hysteria2 客户端名称" "hy2-client-$(date +%H%M%S)")" || return 1
         if user_exists "hysteria2" "$name"; then
-          ui_msg "该客户端名称已存在，请换一个名称。"
+          duplicate_attempts=$((duplicate_attempts + 1))
+          if (( duplicate_attempts >= 2 )); then
+            ui_input_error_return
+            return 1
+          fi
+          printf '该客户端名称已存在，再次输错将退回菜单界面。\n' >&2
           continue
         fi
         break
@@ -2583,7 +2679,7 @@ client_submenu() {
       "2" "删除客户端" \
       "3" "查看客户端信息" \
       "0" "返回上一级菜单" \
-      "00" "退出脚本")" || return 1
+      "00" "退出脚本")" || continue
 
     case "$choice" in
       1)
@@ -2701,10 +2797,10 @@ add_realm_range_rule() {
 
     error_count=$((error_count + 1))
     if (( error_count >= 2 )); then
-      ui_msg "连续输入错误两次，已返回 Realm 菜单。"
+      ui_input_error_return
       return 1
     fi
-    ui_msg "本地结束端口不能小于起始端口，再次输错将返回 Realm 菜单。"
+    printf '本地结束端口不能小于起始端口，再次输错将退回菜单界面。\n' >&2
   done
 
   remote_host="$(realm_prompt_nonempty_limited error_count "落地地址" "请输入目标地址【落地机的ip或域名】" "")" || return 1
@@ -2719,19 +2815,19 @@ add_realm_range_rule() {
 
       error_count=$((error_count + 1))
       if (( error_count >= 2 )); then
-        ui_msg "连续输入错误两次，已返回 Realm 菜单。"
+        ui_input_error_return
         return 1
       fi
-      ui_msg "本地端口段和目标端口段长度必须一致，再次输错将返回 Realm 菜单。"
+      printf '本地端口段和目标端口段长度必须一致，再次输错将退回菜单界面。\n' >&2
       continue
     fi
 
     error_count=$((error_count + 1))
     if (( error_count >= 2 )); then
-      ui_msg "连续输入错误两次，已返回 Realm 菜单。"
+      ui_input_error_return
       return 1
     fi
-    ui_msg "目标结束端口不能小于起始端口，再次输错将返回 Realm 菜单。"
+    printf '目标结束端口不能小于起始端口，再次输错将退回菜单界面。\n' >&2
   done
 
   count=$((listen_end - listen_start))
@@ -2984,7 +3080,7 @@ realm_submenu() {
       "9" "重启服务" \
       "10" "更新脚本" \
       "0" "返回上一级菜单" \
-      "00" "退出脚本")" || return 1
+      "00" "退出脚本")" || continue
 
     case "$choice" in
       1)
@@ -3323,7 +3419,7 @@ main_menu() {
       "6" "查看服务状态" \
       "7" "更新脚本" \
       "8" "卸载" \
-      "0" "退出")" || break
+      "0" "退出")" || continue
 
     if ! have_cmd jq && [[ "$choice" != "1" && "$choice" != "0" ]]; then
       ui_msg "管理环境尚未初始化，请先选择 1 安装 / 初始化 sing-box。"

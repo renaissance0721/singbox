@@ -372,7 +372,7 @@ install_sing_box_rpm_repo() {
 
 install_sing_box_official_script() {
   local tmp_script
-  tmp_script="$(mktemp "$TMP_DIR/sing-box-official-install.XXXXXX.sh")"
+  tmp_script="$(mktemp "$TMP_DIR/sing-box-official-install.XXXXXX")" || return 1
   if ! download_to_file "$tmp_script" "https://sing-box.app/install.sh"; then
     rm -f "$tmp_script"
     return 1
@@ -1725,7 +1725,7 @@ EOF
 
 write_realm_config_file() {
   local tmp_config
-  tmp_config="$(mktemp "$TMP_DIR/realm-config.XXXXXX.toml")"
+  tmp_config="$(mktemp "$TMP_DIR/realm-config.XXXXXX")" || return 1
   render_realm_config >"$tmp_config"
   cp "$tmp_config" "$REALM_CONFIG_FILE"
   rm -f "$tmp_config"
@@ -1902,7 +1902,10 @@ apply_config() {
   normalize_protocol_listen_addresses
   validate_state || return 1
 
-  tmp_config="$(mktemp "$TMP_DIR/singbox-config.XXXXXX.json")"
+  tmp_config="$(mktemp "$TMP_DIR/singbox-config.XXXXXX")" || {
+    ui_msg "无法创建临时配置文件。"
+    return 1
+  }
   render_config >"$tmp_config"
 
   check_bin="$(sing_box_check_bin 2>/dev/null || true)"

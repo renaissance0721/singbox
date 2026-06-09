@@ -3046,7 +3046,7 @@ update_manager_script() {
     return 1
   fi
 
-  exit 0
+  exec sudo "$MANAGER_SCRIPT_PATH"
 }
 
 realm_submenu() {

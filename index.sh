@@ -3113,6 +3113,16 @@ realm_install_status() {
 }
 
 main_menu_text() {
+  if ! have_cmd jq; then
+    cat <<EOF
+Sing-box 状态：$(sing_box_install_status)
+管理环境：未初始化
+
+请先选择 1 安装 / 初始化 sing-box
+EOF
+    return 0
+  fi
+
   cat <<EOF
 Sing-box 状态：$(sing_box_install_status)
 Shadowsocks 2022 规则个数：$(state_get '.protocols.shadowsocks.users | length')
@@ -3366,7 +3376,7 @@ main_menu() {
   while true; do
     menu_text="$(main_menu_text)"
     choice="$(ui_menu "$APP_TITLE" "$menu_text" \
-      "1" "一键安装 / 初始化环境" \
+      "1" "安装 / 初始化 sing-box" \
       "2" "管理节点" \
       "3" "管理客户端" \
       "4" "查看订阅链接" \
@@ -3378,6 +3388,11 @@ main_menu() {
       "10" "重新安装 / 修复（保留规则）" \
       "11" "卸载" \
       "0" "退出")" || break
+
+    if ! have_cmd jq && [[ "$choice" != "1" && "$choice" != "0" ]]; then
+      ui_msg "管理环境尚未初始化，请先选择 1 安装 / 初始化 sing-box。"
+      continue
+    fi
 
     case "$choice" in
       1)
@@ -3611,7 +3626,9 @@ main() {
       require_linux
       require_root
       ensure_dirs
-      init_state_file
+      if have_cmd jq; then
+        init_state_file
+      fi
       main_menu
       ;;
     *)

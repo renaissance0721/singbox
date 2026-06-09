@@ -9,7 +9,7 @@ TARGET_PATH="${TARGET_PATH:-/usr/local/bin/sbox}"
 LEGACY_PATH="/usr/local/bin/singbox-manager"
 INDEX_URL="${INDEX_URL:-https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/index.sh}"
 SERVER_ADDRESS="${SINGBOX_SERVER_ADDRESS:-${SERVER_ADDRESS:-}}"
-INSTALL_COMMAND="quick-install"
+INSTALL_COMMAND=""
 
 log() {
   printf '[*] %s\n' "$*" >&2
@@ -65,7 +65,8 @@ usage() {
   curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | sudo bash -s -- --server-address node.example.com
 
 参数:
-  --server-address  指定节点对外地址，适合非交互安装
+  --server-address  预设节点对外地址，初始化 sing-box 时使用
+  --repair          重新安装 / 修复环境并保留现有规则
   -h, --help        查看帮助
 EOF
 }
@@ -105,20 +106,22 @@ if [[ -n "$SERVER_ADDRESS" ]]; then
   export SINGBOX_SERVER_ADDRESS="$SERVER_ADDRESS"
   log "将使用指定节点地址: $SERVER_ADDRESS"
 else
-  log "未显式指定节点地址，将尝试自动探测公网 IP。"
+  log "未显式指定节点地址，初始化 sing-box 时将尝试自动探测公网 IP。"
 fi
 
-"$TARGET_PATH" "$INSTALL_COMMAND"
+if [[ -n "$INSTALL_COMMAND" ]]; then
+  "$TARGET_PATH" "$INSTALL_COMMAND"
+fi
 
-printf '\n安装完成，正在打开 sbox 管理面板...\n\n'
+printf '\n管理脚本安装完成，正在打开 sbox 管理面板...\n\n'
 
 if attach_tty; then
   exec "$TARGET_PATH"
 fi
 
 cat <<EOF
-安装已完成，但当前未检测到可交互终端。
+管理脚本已安装，但当前未检测到可交互终端。
 
-请手动执行以下命令重新打开面板：
+请手动执行以下命令打开面板，并选择 1 安装 / 初始化 sing-box：
   sbox
 EOF

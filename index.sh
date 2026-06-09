@@ -2082,13 +2082,30 @@ EOF
 }
 
 build_node() {
-  local protocol_choice
+  local protocol_choice current_address server_address
 
   protocol_choice="$(ui_menu "搭建节点" "请选择要搭建的节点协议" \
     "1" "Shadowsocks 2022" \
     "2" "VLESS + Reality" \
     "3" "Hysteria2" \
     "0" "返回")" || return 1
+
+  case "$protocol_choice" in
+    1|2|3)
+      ;;
+    0)
+      return 0
+      ;;
+    *)
+      ui_msg "无效选项，请重新选择。"
+      return 1
+      ;;
+  esac
+
+  current_address="$(state_get '.meta.server_address')"
+  server_address="$(prompt_nonempty "节点出口地址" "请输入节点出口 IP 或域名" "$current_address")" || return 1
+  state_jq --arg addr "$server_address" --arg ts "$(utc_now)" \
+    '.meta.server_address = $addr | .meta.updated_at = $ts'
 
   case "$protocol_choice" in
     1)
@@ -2100,13 +2117,6 @@ build_node() {
     3)
       configure_hysteria2
       ;;
-    0)
-      return 0
-      ;;
-    *)
-      ui_msg "无效选项，请重新选择。"
-      return 1
-      ;;
   esac
 }
 
@@ -2116,36 +2126,28 @@ node_submenu() {
   while true; do
     menu_text="$(node_menu_text)"
     choice="$(ui_menu "代理节点管理" "$menu_text" \
-      "1" "设置节点对外地址" \
-      "2" "设置节点名称" \
-      "3" "新建节点" \
-      "4" "删除节点" \
-      "5" "管理客户端" \
-      "6" "查看订阅链接" \
-      "7" "重新生成配置并重载服务" \
+      "1" "新建节点" \
+      "2" "删除节点" \
+      "3" "管理客户端" \
+      "4" "查看订阅链接" \
+      "5" "重新生成配置并重载服务" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || return 0
 
     case "$choice" in
       1)
-        configure_server_address || true
-        ;;
-      2)
-        configure_node_name || true
-        ;;
-      3)
         build_node || true
         ;;
-      4)
+      2)
         delete_node || true
         ;;
-      5)
+      3)
         client_submenu
         ;;
-      6)
+      4)
         show_subscription_links
         ;;
-      7)
+      5)
         apply_config
         ;;
       0)

@@ -36,6 +36,8 @@ REALM_CONFIG_FILE="${REALM_CONFIG_FILE:-$REALM_DIR/config.toml}"
 REALM_STATE_FILE="${REALM_STATE_FILE:-$STATE_DIR/realm-state.json}"
 REALM_BIN="${REALM_BIN:-/usr/local/bin/realm}"
 REALM_SERVICE_FILE="${REALM_SERVICE_FILE:-/etc/systemd/system/realm.service}"
+REALM_OPENRC_SERVICE_FILE="${REALM_OPENRC_SERVICE_FILE:-/etc/init.d/realm}"
+REALM_OPENRC_LOG_FILE="${REALM_OPENRC_LOG_FILE:-/var/log/realm.log}"
 MANAGER_SCRIPT_PATH="${MANAGER_SCRIPT_PATH:-/usr/local/bin/sbox}"
 PROJECT_INSTALL_DIR="${PROJECT_INSTALL_DIR:-/usr/local/share/sbox}"
 SCRIPT_REPO_OWNER="${SCRIPT_REPO_OWNER:-renaissance0721}"
@@ -310,7 +312,7 @@ install_dependencies() {
 
   case "$PKG_MANAGER" in
     apk)
-      apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc coreutils findutils
+      apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc coreutils findutils iptables
       ;;
     apt)
       export DEBIAN_FRONTEND=noninteractive
@@ -663,17 +665,38 @@ stop_sing_box() {
 }
 
 realm_service_exists() {
-  has_systemd || return 1
+  case "$(realm_service_manager)" in
+    systemd)
+      systemctl cat realm >/dev/null 2>&1 && return 0
+      systemctl list-unit-files realm.service --no-legend 2>/dev/null | grep -q '^realm\.service' && return 0
+      [[ -f "$REALM_SERVICE_FILE" || -f /lib/systemd/system/realm.service || -f /usr/lib/systemd/system/realm.service ]]
+      ;;
+    openrc)
+      [[ -x "$REALM_OPENRC_SERVICE_FILE" ]]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
 
-  systemctl cat realm >/dev/null 2>&1 && return 0
-  systemctl list-unit-files realm.service --no-legend 2>/dev/null | grep -q '^realm\.service' && return 0
-  [[ -f "$REALM_SERVICE_FILE" || -f /lib/systemd/system/realm.service || -f /usr/lib/systemd/system/realm.service ]]
+realm_service_manager() {
+  if has_systemd; then
+    printf 'systemd\n'
+  elif has_openrc; then
+    printf 'openrc\n'
+  else
+    printf 'none\n'
+  fi
 }
 
 ensure_realm_service() {
-  has_systemd || return 0
+  local service_manager
+  service_manager="$(realm_service_manager)"
+  [[ "$service_manager" != "none" ]] || return 0
 
-  cat >"$REALM_SERVICE_FILE" <<EOF
+  if [[ "$service_manager" == "systemd" ]]; then
+    cat >"$REALM_SERVICE_FILE" <<EOF
 [Unit]
 Description=Realm relay service
 Documentation=https://github.com/zhboner/realm
@@ -691,19 +714,147 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 EOF
 
-  systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  cat >"$REALM_OPENRC_SERVICE_FILE" <<EOF
+#!/sbin/openrc-run
+
+name="realm"
+description="Realm relay service"
+command="${REALM_BIN}"
+command_args="-c ${REALM_CONFIG_FILE}"
+command_background="yes"
+pidfile="/run/realm.pid"
+output_log="${REALM_OPENRC_LOG_FILE}"
+error_log="${REALM_OPENRC_LOG_FILE}"
+
+depend() {
+  need net
+  after firewall
+}
+
+start_pre() {
+  checkpath --directory --mode 0755 /run
+  checkpath --file --mode 0644 "${REALM_OPENRC_LOG_FILE}"
+}
+EOF
+  chmod 755 "$REALM_OPENRC_SERVICE_FILE"
+}
+
+enable_realm_service() {
+  case "$(realm_service_manager)" in
+    systemd)
+      systemctl enable realm >/dev/null 2>&1 || true
+      ;;
+    openrc)
+      rc-update add realm default >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+
+disable_realm_service() {
+  case "$(realm_service_manager)" in
+    systemd)
+      systemctl disable realm >/dev/null 2>&1 || true
+      ;;
+    openrc)
+      rc-update del realm default >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+
+realm_service_active() {
+  case "$(realm_service_manager)" in
+    systemd)
+      systemctl is-active realm 2>/dev/null
+      ;;
+    openrc)
+      if rc-service realm status >/dev/null 2>&1; then
+        printf 'active\n'
+      else
+        printf 'inactive\n'
+      fi
+      ;;
+    *)
+      printf 'unknown\n'
+      ;;
+  esac
+}
+
+realm_recent_logs() {
+  case "$(realm_service_manager)" in
+    systemd)
+      journalctl -u realm -n 30 --no-pager 2>/dev/null || true
+      ;;
+    openrc)
+      tail -n 30 "$REALM_OPENRC_LOG_FILE" 2>/dev/null || true
+      ;;
+  esac
+}
+
+start_realm_service_raw() {
+  case "$(realm_service_manager)" in
+    systemd)
+      systemctl start realm
+      ;;
+    openrc)
+      rc-service realm start
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+stop_realm_service_raw() {
+  case "$(realm_service_manager)" in
+    systemd)
+      systemctl stop realm
+      ;;
+    openrc)
+      rc-service realm stop
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+restart_realm_service_raw() {
+  case "$(realm_service_manager)" in
+    systemd)
+      systemctl restart realm
+      ;;
+    openrc)
+      rc-service realm restart || rc-service realm start
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 detect_realm_arch() {
+  local libc_target="gnu"
+  if have_cmd apk || [[ -f /etc/alpine-release ]]; then
+    libc_target="musl"
+  fi
+
   case "$(uname -m)" in
     x86_64|amd64)
-      printf 'x86_64-unknown-linux-gnu\n'
+      printf 'x86_64-unknown-linux-%s\n' "$libc_target"
       ;;
     aarch64|arm64)
-      printf 'aarch64-unknown-linux-gnu\n'
+      printf 'aarch64-unknown-linux-%s\n' "$libc_target"
       ;;
     armv7l|armv7)
-      printf 'armv7-unknown-linux-gnueabihf\n'
+      if [[ "$libc_target" == "musl" ]]; then
+        printf 'armv7-unknown-linux-musleabihf\n'
+      else
+        printf 'armv7-unknown-linux-gnueabihf\n'
+      fi
       ;;
     *)
       return 1
@@ -714,7 +865,7 @@ detect_realm_arch() {
 install_realm_binary() {
   local arch tmp_dir archive_path extracted_bin
   arch="$(detect_realm_arch)" || die "当前架构暂不支持自动安装 Realm：$(uname -m)"
-  tmp_dir="$(mktemp -d "$TMP_DIR/realm-install.XXXXXX")"
+  tmp_dir="$(mktemp -d "$TMP_DIR/realm-install.XXXXXX")" || return 1
   archive_path="$tmp_dir/realm.tar.gz"
 
   if ! download_to_file \
@@ -724,7 +875,10 @@ install_realm_binary() {
     die "下载 Realm 失败，请稍后重试。"
   fi
 
-  tar -xzf "$archive_path" -C "$tmp_dir"
+  if ! tar -xzf "$archive_path" -C "$tmp_dir"; then
+    rm -rf "$tmp_dir"
+    return 1
+  fi
   extracted_bin="$(find "$tmp_dir" -type f -name realm | head -n 1)"
   [[ -n "$extracted_bin" ]] || {
     rm -rf "$tmp_dir"
@@ -1671,6 +1825,36 @@ enabled_protocol_count() {
   state_get '[.protocols[] | select(.enabled == true)] | length'
 }
 
+allow_iptables_port() {
+  local port=$1
+  local protocol=$2
+
+  if have_cmd iptables; then
+    iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 ||
+      iptables -I INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 ||
+      true
+  fi
+
+  if have_cmd ip6tables; then
+    ip6tables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 ||
+      ip6tables -I INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 ||
+      true
+  fi
+}
+
+persist_openrc_firewall_rules() {
+  has_openrc || return 0
+
+  if [[ -x /etc/init.d/iptables ]]; then
+    rc-update add iptables default >/dev/null 2>&1 || true
+    rc-service iptables save >/dev/null 2>&1 || true
+  fi
+  if [[ -x /etc/init.d/ip6tables ]]; then
+    rc-update add ip6tables default >/dev/null 2>&1 || true
+    rc-service ip6tables save >/dev/null 2>&1 || true
+  fi
+}
+
 apply_firewall_rules() {
   local ss_enabled vless_enabled hy2_enabled
   ss_enabled="$(state_get '.protocols.shadowsocks.enabled')"
@@ -1683,12 +1867,17 @@ apply_firewall_rules() {
     [[ "$hy2_enabled" == "true" ]] && ufw allow "$(state_get '.protocols.hysteria2.port')/udp" >/dev/null 2>&1 || true
   fi
 
-  if have_cmd firewall-cmd && systemctl is-active firewalld >/dev/null 2>&1; then
+  if have_cmd firewall-cmd && has_systemd && systemctl is-active firewalld >/dev/null 2>&1; then
     [[ "$ss_enabled" == "true" ]] && firewall-cmd --permanent --add-port="$(state_get '.protocols.shadowsocks.port')/tcp" >/dev/null 2>&1 || true
     [[ "$vless_enabled" == "true" ]] && firewall-cmd --permanent --add-port="$(state_get '.protocols.vless_reality.port')/tcp" >/dev/null 2>&1 || true
     [[ "$hy2_enabled" == "true" ]] && firewall-cmd --permanent --add-port="$(state_get '.protocols.hysteria2.port')/udp" >/dev/null 2>&1 || true
     firewall-cmd --reload >/dev/null 2>&1 || true
   fi
+
+  [[ "$ss_enabled" == "true" ]] && allow_iptables_port "$(state_get '.protocols.shadowsocks.port')" tcp
+  [[ "$vless_enabled" == "true" ]] && allow_iptables_port "$(state_get '.protocols.vless_reality.port')" tcp
+  [[ "$hy2_enabled" == "true" ]] && allow_iptables_port "$(state_get '.protocols.hysteria2.port')" udp
+  persist_openrc_firewall_rules
 }
 
 realm_rule_group_count() {
@@ -1742,7 +1931,7 @@ realm_apply_firewall_rules() {
     done < <(jq -r '.rules[]?.entries[]?.listen | capture(":(?<port>[0-9]+)$").port' "$REALM_STATE_FILE" | sort -un)
   fi
 
-  if have_cmd firewall-cmd && systemctl is-active firewalld >/dev/null 2>&1; then
+  if have_cmd firewall-cmd && has_systemd && systemctl is-active firewalld >/dev/null 2>&1; then
     while IFS= read -r port; do
       [[ -n "$port" ]] || continue
       firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1 || true
@@ -1750,6 +1939,13 @@ realm_apply_firewall_rules() {
     done < <(jq -r '.rules[]?.entries[]?.listen | capture(":(?<port>[0-9]+)$").port' "$REALM_STATE_FILE" | sort -un)
     firewall-cmd --reload >/dev/null 2>&1 || true
   fi
+
+  while IFS= read -r port; do
+    [[ -n "$port" ]] || continue
+    allow_iptables_port "$port" tcp
+    allow_iptables_port "$port" udp
+  done < <(jq -r '.rules[]?.entries[]?.listen | capture(":(?<port>[0-9]+)$").port' "$REALM_STATE_FILE" | sort -un)
+  persist_openrc_firewall_rules
 }
 
 apply_realm_config() {
@@ -1764,7 +1960,7 @@ apply_realm_config() {
   rule_count="$(realm_rule_group_count)"
   if [[ "$rule_count" -eq 0 ]]; then
     if realm_service_exists; then
-      systemctl stop realm >/dev/null 2>&1 || true
+      stop_realm_service_raw >/dev/null 2>&1 || true
     fi
     ui_msg "Realm 当前没有任何转发规则，配置已保存，服务已停止。"
     return 0
@@ -1772,16 +1968,16 @@ apply_realm_config() {
 
   realm_apply_firewall_rules
 
-  systemctl enable realm >/dev/null 2>&1 || true
-  if realm_service_exists && [[ "$(systemctl is-active realm 2>/dev/null || true)" == "active" ]]; then
-    systemctl restart realm >/dev/null 2>&1 || {
-      ui_show_text "Realm 启动失败" "$(journalctl -u realm -n 30 --no-pager 2>/dev/null || echo '无法读取 Realm 日志。')"
+  enable_realm_service
+  if realm_service_exists && [[ "$(realm_service_active)" == "active" ]]; then
+    restart_realm_service_raw >/dev/null 2>&1 || {
+      ui_show_text "Realm 启动失败" "$(realm_recent_logs)"
       return 1
     }
     message="Realm 配置已保存到 ${REALM_CONFIG_FILE}，服务已重启。"
   else
-    systemctl start realm >/dev/null 2>&1 || {
-      ui_show_text "Realm 启动失败" "$(journalctl -u realm -n 30 --no-pager 2>/dev/null || echo '无法读取 Realm 日志。')"
+    start_realm_service_raw >/dev/null 2>&1 || {
+      ui_show_text "Realm 启动失败" "$(realm_recent_logs)"
       return 1
     }
     message="Realm 配置已保存到 ${REALM_CONFIG_FILE}，服务已自动启动。"
@@ -2789,8 +2985,8 @@ client_submenu() {
 realm_install_or_reset() {
   require_linux
   require_root
-  has_systemd || {
-    ui_msg "Realm 服务管理仅支持 systemd 环境。"
+  [[ "$(realm_service_manager)" != "none" ]] || {
+    ui_msg "Realm 服务管理需要 systemd 或 OpenRC 环境。"
     return 1
   }
   ensure_realm_dirs
@@ -2806,8 +3002,8 @@ realm_install_or_reset() {
   render_realm_config >"$REALM_CONFIG_FILE"
 
   if realm_service_exists; then
-    systemctl stop realm >/dev/null 2>&1 || true
-    systemctl disable realm >/dev/null 2>&1 || true
+    stop_realm_service_raw >/dev/null 2>&1 || true
+    disable_realm_service
   fi
 
   ui_msg "Realm 安装 / 重置完成。当前规则已清空，请继续添加转发规则。"
@@ -2817,11 +3013,12 @@ realm_uninstall() {
   ui_yesno "这将卸载 Realm，并删除所有中转规则和配置。是否继续？" || return 0
 
   if realm_service_exists; then
-    systemctl stop realm >/dev/null 2>&1 || true
-    systemctl disable realm >/dev/null 2>&1 || true
+    stop_realm_service_raw >/dev/null 2>&1 || true
+    disable_realm_service
   fi
 
-  rm -f "$REALM_BIN" "$REALM_SERVICE_FILE" "$REALM_CONFIG_FILE" "$REALM_STATE_FILE" 2>/dev/null || true
+  rm -f "$REALM_BIN" "$REALM_SERVICE_FILE" "$REALM_OPENRC_SERVICE_FILE" \
+    "$REALM_OPENRC_LOG_FILE" "$REALM_CONFIG_FILE" "$REALM_STATE_FILE" 2>/dev/null || true
   rm -rf "$REALM_DIR" 2>/dev/null || true
 
   if has_systemd; then
@@ -3002,8 +3199,8 @@ show_realm_config() {
 }
 
 start_realm_service() {
-  has_systemd || {
-    ui_msg "Realm 服务管理仅支持 systemd 环境。"
+  [[ "$(realm_service_manager)" != "none" ]] || {
+    ui_msg "Realm 服务管理需要 systemd 或 OpenRC 环境。"
     return 1
   }
   ensure_realm_dirs
@@ -3022,9 +3219,9 @@ start_realm_service() {
   write_realm_config_file
   realm_apply_firewall_rules
   ensure_realm_service
-  systemctl enable realm >/dev/null 2>&1 || true
-  if ! systemctl start realm; then
-    ui_show_text "Realm 启动失败" "$(journalctl -u realm -n 30 --no-pager 2>/dev/null || echo '无法读取 Realm 日志。')"
+  enable_realm_service
+  if ! start_realm_service_raw; then
+    ui_show_text "Realm 启动失败" "$(realm_recent_logs)"
     return 1
   fi
 
@@ -3032,21 +3229,21 @@ start_realm_service() {
 }
 
 stop_realm_service() {
-  has_systemd || {
-    ui_msg "Realm 服务管理仅支持 systemd 环境。"
+  [[ "$(realm_service_manager)" != "none" ]] || {
+    ui_msg "Realm 服务管理需要 systemd 或 OpenRC 环境。"
     return 1
   }
   if realm_service_exists; then
-    systemctl stop realm >/dev/null 2>&1 || true
+    stop_realm_service_raw >/dev/null 2>&1 || true
     ui_msg "Realm 服务已停止。"
   else
-    ui_msg "当前未检测到 Realm systemd 服务。"
+    ui_msg "当前未检测到 Realm 服务。"
   fi
 }
 
 restart_realm_service() {
-  has_systemd || {
-    ui_msg "Realm 服务管理仅支持 systemd 环境。"
+  [[ "$(realm_service_manager)" != "none" ]] || {
+    ui_msg "Realm 服务管理需要 systemd 或 OpenRC 环境。"
     return 1
   }
   ensure_realm_dirs
@@ -3065,9 +3262,9 @@ restart_realm_service() {
   write_realm_config_file
   realm_apply_firewall_rules
   ensure_realm_service
-  systemctl enable realm >/dev/null 2>&1 || true
-  if ! systemctl restart realm; then
-    ui_show_text "Realm 重启失败" "$(journalctl -u realm -n 30 --no-pager 2>/dev/null || echo '无法读取 Realm 日志。')"
+  enable_realm_service
+  if ! restart_realm_service_raw; then
+    ui_show_text "Realm 重启失败" "$(realm_recent_logs)"
     return 1
   fi
 
@@ -3137,12 +3334,12 @@ update_manager_script() {
   fi
 
   if have_cmd sudo; then
-    curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | sudo bash || {
+    curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | sudo env SBOX_INSTALL_NO_PANEL=1 bash || {
       ui_msg "更新脚本失败，请稍后重试。"
       return 1
     }
   else
-    curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | bash || {
+    curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | env SBOX_INSTALL_NO_PANEL=1 bash || {
       ui_msg "更新脚本失败，请稍后重试。"
       return 1
     }
@@ -3280,8 +3477,8 @@ EOF
 prepare_realm_menu() {
   require_linux
   require_root
-  has_systemd || {
-    ui_msg "Realm 服务管理仅支持 systemd 环境。"
+  [[ "$(realm_service_manager)" != "none" ]] || {
+    ui_msg "Realm 服务管理需要 systemd 或 OpenRC 环境。"
     return 1
   }
 
@@ -3432,6 +3629,8 @@ uninstall_sbox() {
   if has_openrc; then
     rc-service sing-box stop >/dev/null 2>&1 || true
     rc-update del sing-box default >/dev/null 2>&1 || true
+    rc-service realm stop >/dev/null 2>&1 || true
+    rc-update del realm default >/dev/null 2>&1 || true
   fi
 
   detect_pkg_manager
@@ -3457,6 +3656,7 @@ uninstall_sbox() {
   rm -f /etc/systemd/system/sing-box.service /lib/systemd/system/sing-box.service /usr/lib/systemd/system/sing-box.service /etc/systemd/system/multi-user.target.wants/sing-box.service 2>/dev/null || true
   rm -f "$SING_BOX_OPENRC_SERVICE_FILE" "$SING_BOX_OPENRC_LOG_FILE" 2>/dev/null || true
   rm -f "$REALM_SERVICE_FILE" /lib/systemd/system/realm.service /usr/lib/systemd/system/realm.service /etc/systemd/system/multi-user.target.wants/realm.service 2>/dev/null || true
+  rm -f "$REALM_OPENRC_SERVICE_FILE" "$REALM_OPENRC_LOG_FILE" 2>/dev/null || true
   rm -rf /etc/sing-box "$REALM_DIR" "$STATE_DIR" 2>/dev/null || true
   rm -f /usr/local/bin/sbox /usr/local/bin/singbox-manager "$REALM_BIN" 2>/dev/null || true
 

@@ -184,7 +184,7 @@ journalctl -u sing-box -n 50 --no-pager
 - 确认协议至少保留 1 个客户端
 - 确认证书、私钥和伪装域名配置有效
 - systemd：执行 `journalctl -u sing-box -n 50 --no-pager` 查看最近日志
-- Alpine/OpenRC：执行 `tail -n 50 /var/log/sing-box.log` 查看最近日志
+- Alpine/OpenRC：sing-box 执行 `tail -n 50 /var/log/sing-box.log`，Realm 执行 `tail -n 50 /var/log/realm.log`
 
 ### 依赖安装失败
 
@@ -199,7 +199,7 @@ sudo apt install curl jq openssl ca-certificates git tar gzip
 sudo yum install curl jq openssl ca-certificates git tar gzip
 
 # Alpine Linux
-apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc coreutils findutils
+apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc coreutils findutils iptables
 ```
 
 ## 安全提醒

@@ -46,5 +46,13 @@ jobs:
               detect_pkg_manager
               test "$PKG_MANAGER" = "apk"
               test "$(sing_box_service_manager)" = "openrc"
+              test "$(realm_service_manager)" = "openrc"
+              test "$(detect_realm_arch)" = "x86_64-unknown-linux-musl"
+              REALM_OPENRC_SERVICE_FILE=/tmp/realm
+              REALM_OPENRC_LOG_FILE=/tmp/realm.log
+              ensure_realm_service
+              test -x "$REALM_OPENRC_SERVICE_FILE"
+              bash -n "$REALM_OPENRC_SERVICE_FILE"
+              grep -q "^command_background=\"yes\"$" "$REALM_OPENRC_SERVICE_FILE"
             '"'"'
           '

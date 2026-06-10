@@ -101,6 +101,10 @@ if [[ -n "$INSTALL_COMMAND" ]]; then
   "$TARGET_PATH" "$INSTALL_COMMAND"
 fi
 
+if [[ "${SBOX_INSTALL_NO_PANEL:-0}" == "1" ]]; then
+  exit 0
+fi
+
 printf '\n管理脚本安装完成，正在打开 sbox 管理面板...\n\n'
 
 if attach_tty; then

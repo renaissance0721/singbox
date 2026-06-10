@@ -387,11 +387,32 @@ install_sing_box_official_script() {
   rm -f "$tmp_script"
 }
 
-install_sing_box_apk_release() {
-  local arch release_json version package_name package_path package_url
+cleanup_sing_box_install_dir() {
+  local work_dir=${1:-}
+
+  [[ -n "$work_dir" && "$work_dir" == "$TMP_DIR"/sing-box-install.* ]] || return 1
+  rm -rf -- "$work_dir"
+}
+
+install_sing_box_alpine_release() {
+  local alpine_arch release_arch release_json version archive_name archive_path archive_url
+  local work_dir extract_dir binary_path
   local release_api="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 
-  arch="$(apk --print-arch)" || return 1
+  alpine_arch="$(apk --print-arch)" || return 1
+  case "$alpine_arch" in
+    x86_64) release_arch="amd64-musl" ;;
+    x86) release_arch="386-musl" ;;
+    aarch64) release_arch="arm64-musl" ;;
+    armv7) release_arch="armv7-musl" ;;
+    loongarch64) release_arch="loong64-musl" ;;
+    riscv64) release_arch="riscv64-musl" ;;
+    *)
+      warn "暂不支持该 Alpine 架构：$alpine_arch"
+      return 1
+      ;;
+  esac
+
   release_json="$(mktemp "$TMP_DIR/sing-box-release.XXXXXX")" || return 1
 
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
@@ -412,21 +433,33 @@ install_sing_box_apk_release() {
   version="${version#v}"
   [[ -n "$version" ]] || return 1
 
-  package_name="sing-box_${version}_linux_${arch}.apk"
-  package_path="$(mktemp "$TMP_DIR/sing-box-package.XXXXXX.apk")" || return 1
-  package_url="https://github.com/SagerNet/sing-box/releases/download/v${version}/${package_name}"
+  work_dir="$(mktemp -d "$TMP_DIR/sing-box-install.XXXXXX")" || return 1
+  archive_name="sing-box-${version}-linux-${release_arch}.tar.gz"
+  archive_path="$work_dir/$archive_name"
+  archive_url="https://github.com/SagerNet/sing-box/releases/download/v${version}/${archive_name}"
+  extract_dir="$work_dir/sing-box-${version}-linux-${release_arch}"
+  binary_path="$extract_dir/sing-box"
 
-  log "下载 sing-box ${version} Alpine 软件包..."
-  if ! download_to_file "$package_path" "$package_url"; then
-    rm -f "$package_path"
+  log "下载 sing-box ${version} Alpine musl 二进制包..."
+  if ! download_to_file "$archive_path" "$archive_url"; then
+    cleanup_sing_box_install_dir "$work_dir"
     return 1
   fi
 
-  if ! apk add --allow-untrusted "$package_path"; then
-    rm -f "$package_path"
+  if ! tar -xzf "$archive_path" -C "$work_dir" || [[ ! -f "$binary_path" ]]; then
+    cleanup_sing_box_install_dir "$work_dir"
     return 1
   fi
-  rm -f "$package_path"
+
+  if ! mkdir -p /usr/local/bin; then
+    cleanup_sing_box_install_dir "$work_dir"
+    return 1
+  fi
+  if ! install -m 755 "$binary_path" /usr/local/bin/sing-box; then
+    cleanup_sing_box_install_dir "$work_dir"
+    return 1
+  fi
+  cleanup_sing_box_install_dir "$work_dir"
 }
 
 install_sing_box() {
@@ -455,8 +488,8 @@ install_sing_box() {
 
   if (( ! installed )); then
     if [[ "$PKG_MANAGER" == "apk" ]]; then
-      log "官方仓库安装未完成，改用 sing-box 官方 Alpine 软件包。"
-      install_sing_box_apk_release || die "安装官方 sing-box Alpine 软件包失败。"
+      log "官方仓库安装未完成，改用 sing-box 官方 Alpine musl 二进制包。"
+      install_sing_box_alpine_release || die "安装官方 sing-box Alpine 二进制包失败。"
     else
       log "官方仓库安装未完成，改用 sing-box 官方安装脚本。"
       install_sing_box_official_script || die "安装官方 sing-box 失败。"

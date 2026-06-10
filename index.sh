@@ -387,6 +387,48 @@ install_sing_box_official_script() {
   rm -f "$tmp_script"
 }
 
+install_sing_box_apk_release() {
+  local arch release_json version package_name package_path package_url
+  local release_api="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+
+  arch="$(apk --print-arch)" || return 1
+  release_json="$(mktemp "$TMP_DIR/sing-box-release.XXXXXX")" || return 1
+
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    if ! curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" "$release_api" -o "$release_json"; then
+      rm -f "$release_json"
+      return 1
+    fi
+  elif ! download_to_file "$release_json" "$release_api"; then
+    rm -f "$release_json"
+    return 1
+  fi
+
+  if ! version="$(jq -r '.tag_name // empty' "$release_json")"; then
+    rm -f "$release_json"
+    return 1
+  fi
+  rm -f "$release_json"
+  version="${version#v}"
+  [[ -n "$version" ]] || return 1
+
+  package_name="sing-box_${version}_linux_${arch}.apk"
+  package_path="$(mktemp "$TMP_DIR/sing-box-package.XXXXXX.apk")" || return 1
+  package_url="https://github.com/SagerNet/sing-box/releases/download/v${version}/${package_name}"
+
+  log "下载 sing-box ${version} Alpine 软件包..."
+  if ! download_to_file "$package_path" "$package_url"; then
+    rm -f "$package_path"
+    return 1
+  fi
+
+  if ! apk add --allow-untrusted "$package_path"; then
+    rm -f "$package_path"
+    return 1
+  fi
+  rm -f "$package_path"
+}
+
 install_sing_box() {
   local installed=0 version_text=""
 
@@ -412,8 +454,13 @@ install_sing_box() {
   esac
 
   if (( ! installed )); then
-    log "官方仓库安装未完成，改用 sing-box 官方安装脚本。"
-    install_sing_box_official_script || die "安装官方 sing-box 失败。"
+    if [[ "$PKG_MANAGER" == "apk" ]]; then
+      log "官方仓库安装未完成，改用 sing-box 官方 Alpine 软件包。"
+      install_sing_box_apk_release || die "安装官方 sing-box Alpine 软件包失败。"
+    else
+      log "官方仓库安装未完成，改用 sing-box 官方安装脚本。"
+      install_sing_box_official_script || die "安装官方 sing-box 失败。"
+    fi
   fi
 
   hash -r 2>/dev/null || true

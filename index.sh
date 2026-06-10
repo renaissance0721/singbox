@@ -1232,7 +1232,12 @@ migrate_state_schema() {
 }
 
 format_split_rule_list() {
-  jq -r '[.routing.split.outbounds[]?.rule_sets[]?] | unique | join(", ")' "$STATE_FILE"
+  jq -r '
+    [.routing.split.outbounds[]?.rule_sets[]?]
+    | unique
+    | map(if startswith("domain:") then (ltrimstr("domain:") + "（网址）") else . end)
+    | join(", ")
+  ' "$STATE_FILE"
 }
 
 build_split_rules_json() {
@@ -1244,6 +1249,38 @@ build_split_rules_json() {
     | split(",")
     | map(gsub("^\\s+|\\s+$"; ""))
     | map(select(test("^[a-z0-9][a-z0-9._-]*$")))
+    | unique
+  '
+}
+
+build_split_domains_json() {
+  local input=$1
+  jq -nc --arg input "$input" '
+    ($input | ascii_downcase)
+    | gsub("，|、|；"; ",")
+    | gsub("[,;[:space:]]+"; ",")
+    | split(",")
+    | map(
+        gsub("^\\s+|\\s+$"; "")
+        | sub("^https?://"; "")
+        | sub("^//"; "")
+        | split("/")[0]
+        | split("?")[0]
+        | split("#")[0]
+        | sub("^.*@"; "")
+        | sub(":[0-9]+$"; "")
+        | sub("^www\\."; "")
+        | sub("\\.$"; "")
+      )
+    | map(select(
+        (split(".") | length) >= 2
+        and (split(".")[-1] | test("[a-z]"))
+        and all(split(".")[];
+          test("^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+          and (length <= 63)
+        )
+      ))
+    | map("domain:" + .)
     | unique
   '
 }
@@ -1695,7 +1732,7 @@ validate_state() {
       is_supported_split_shadowsocks_method "$split_method" || errors+="分流落地 ${split_name} 的 Shadowsocks 加密方式不受支持。"$'\n'
     fi
     [[ -n "$split_password" && "$split_password" != "null" ]] || errors+="分流落地 ${split_name} 密码不能为空。"$'\n'
-    [[ "$split_rule_count" -gt 0 ]] || errors+="分流落地 ${split_name} 至少需要一个规则集。"$'\n'
+    [[ "$split_rule_count" -gt 0 ]] || errors+="分流落地 ${split_name} 至少需要一个分流规则。"$'\n'
   done < <(jq -r '
     .routing.split.outbounds[]? |
     [
@@ -1867,9 +1904,11 @@ render_config() {
               type: "inline",
               tag: split_rule_tag($outbound.id; .),
               rules: [
-                {
-                  domain_keyword: [.]
-                }
+                if startswith("domain:") then
+                  { domain_suffix: [ltrimstr("domain:")] }
+                else
+                  { domain_keyword: [.] }
+                end
               ]
             }
         )
@@ -2599,7 +2638,7 @@ select_split_outbound_id() {
 
 configure_split_routing() {
   local outbound_id=${1:-}
-  local is_new=0 current_enabled current_type current_server current_port current_username current_password current_method current_rules
+  local is_new=0 current_enabled current_type current_server current_port current_username current_password current_method current_rules current_domains
   local type_choice outbound_type server port username password method_choice method rules_input rules_json name yesno_result
   local name_attempts=0 password_attempts=0
 
@@ -2629,6 +2668,7 @@ configure_split_routing() {
     current_password=""
     current_method="2022-blake3-aes-256-gcm"
     current_rules=""
+    current_domains="[]"
   else
     name="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | .name')"
     current_enabled="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.enabled // false)')"
@@ -2638,7 +2678,20 @@ configure_split_routing() {
     current_username="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.username // "")')"
     current_password="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.password // "")')"
     current_method="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.method // "2022-blake3-aes-256-gcm")')"
-    current_rules="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.rule_sets // []) | join(", ")')"
+    current_rules="$(state_get --arg id "$outbound_id" '
+      .routing.split.outbounds[]
+      | select(.id == $id)
+      | (.rule_sets // [])
+      | map(select(startswith("domain:") | not))
+      | join(", ")
+    ')"
+    current_domains="$(jq -c --arg id "$outbound_id" '
+      [.routing.split.outbounds[]
+        | select(.id == $id)
+        | (.rule_sets // [])[]
+        | select(startswith("domain:"))
+      ]
+    ' "$STATE_FILE")"
   fi
 
   if (( ! is_new )); then
@@ -2709,29 +2762,30 @@ configure_split_routing() {
     printf '落地密码不能为空，再次输错将退回菜单界面。\n' >&2
   done
 
-  rules_input="$(ui_input "落地规则集" "请输入该落地绑定的规则集名称，可用逗号或空格分隔" "$current_rules")" || return 1
+  rules_input="$(ui_input "落地关键词规则" "请输入该落地绑定的关键词，可用逗号或空格分隔；已有网址规则会保留" "$current_rules")" || return 1
   rules_json="$(build_split_rules_json "$rules_input")"
 
   state_jq --arg id "$outbound_id" --arg name "$name" --arg outbound_type "$outbound_type" \
     --arg server "$server" --argjson port "$port" --arg username "$username" --arg password "$password" \
-    --arg method "$method" --argjson rules "$rules_json" --arg ts "$(utc_now)" '
+    --arg method "$method" --argjson rules "$rules_json" --argjson domains "$current_domains" --arg ts "$(utc_now)" '
+    (($rules + $domains) | unique) as $all_rules |
     {
       id: $id,
       name: $name,
-      enabled: (($rules | length) > 0),
+      enabled: (($all_rules | length) > 0),
       outbound_type: $outbound_type,
       server: $server,
       port: $port,
       username: $username,
       password: $password,
       method: $method,
-      rule_sets: $rules
+      rule_sets: $all_rules
     } as $outbound |
     .routing.split.outbounds |= map(
       if .id == $id then
         .
       else
-        .rule_sets = ((.rule_sets // []) - $rules) |
+        .rule_sets = ((.rule_sets // []) - $all_rules) |
         .enabled = ((.enabled // false) and ((.rule_sets | length) > 0))
       end
     ) |
@@ -2743,8 +2797,8 @@ configure_split_routing() {
     .meta.updated_at = $ts
   '
 
-  if [[ "$(printf '%s' "$rules_json" | jq -r 'length')" -eq 0 ]]; then
-    ui_msg "落地已保存但未启用，请为它添加至少一个规则集。"
+  if [[ "$(jq -nc --argjson rules "$rules_json" --argjson domains "$current_domains" '$rules + $domains | length')" -eq 0 ]]; then
+    ui_msg "落地已保存但未启用，请为它添加至少一个关键词或网址分流规则。"
   else
     apply_config
   fi
@@ -2782,29 +2836,54 @@ show_split_routing_rules() {
           + "address = \(.server):\(.port)\n"
           + "username = \(.username // "-")\n"
           + "method = \(.method // "-")\n"
-          + "rule_sets = \((.rule_sets // []) | join(", "))"
+          + "keyword_rules = \((.rule_sets // []) | map(select(startswith("domain:") | not)) | join(", "))\n"
+          + "domains = \((.rule_sets // []) | map(select(startswith("domain:")) | ltrimstr("domain:")) | join(", "))"
         )
       | join("\n\n")
     end
   ' "$STATE_FILE")"
-  ui_show_text "分流落地与规则集" "$summary"
+  ui_show_text "分流落地与分流规则" "$summary"
 }
 
 append_split_routing_rules() {
-  local outbound_id rules_input rules_json
+  local outbound_id rule_type rules_input rules_json
   [[ "$(split_outbound_count)" -gt 0 ]] || {
     ui_msg "请先新增分流落地。"
     return 0
   }
-  outbound_id="$(select_split_outbound_id "新增分流规则集" "请选择规则集要绑定的落地")" || return 0
+  outbound_id="$(select_split_outbound_id "新增分流规则" "请选择规则要绑定的落地")" || return 0
   if (( $# > 0 )); then
+    rule_type="keyword"
     rules_input="$*"
   else
-    rules_input="$(prompt_nonempty "新增分流规则集" "请输入规则集名称，可用逗号或空格分隔；例如 chatgpt, claude" "")" || return 1
+    rule_type="$(ui_menu "新增分流规则" "请选择规则类型" \
+      "1" "关键词规则，例如 chatgpt" \
+      "2" "自定义网址 / 域名，例如 nodeseek.com" \
+      "0" "返回")" || return 1
+    case "$rule_type" in
+      1)
+        rule_type="keyword"
+        rules_input="$(prompt_nonempty "新增关键词规则" "请输入关键词，可用逗号或空格分隔；例如 chatgpt, claude" "")" || return 1
+        ;;
+      2)
+        rule_type="domain"
+        rules_input="$(prompt_nonempty "新增自定义网址" "请输入网址或域名，可不带 http:// 或 https://；例如 nodeseek.com" "")" || return 1
+        ;;
+      0) return 0 ;;
+      *) ui_msg "无效选项，请重新选择。"; return 1 ;;
+    esac
   fi
-  rules_json="$(build_split_rules_json "$rules_input")"
+  if [[ "$rule_type" == "domain" ]]; then
+    rules_json="$(build_split_domains_json "$rules_input")"
+  else
+    rules_json="$(build_split_rules_json "$rules_input")"
+  fi
   [[ "$(printf '%s' "$rules_json" | jq -r 'length')" -gt 0 ]] || {
-    ui_msg "规则集名称格式无效。"
+    if [[ "$rule_type" == "domain" ]]; then
+      ui_msg "网址格式无效，请输入类似 nodeseek.com 的域名。"
+    else
+      ui_msg "关键词规则格式无效。"
+    fi
     return 1
   }
   state_jq --arg id "$outbound_id" --argjson rules "$rules_json" --arg ts "$(utc_now)" '
@@ -2826,7 +2905,7 @@ delete_split_routing_rule() {
   local outbound_id total_count choice selected_index selected_rule
   local -a rule_values=()
   local -a options=()
-  outbound_id="$(select_split_outbound_id "删除分流规则集" "请选择规则集所属的落地")" || return 0
+  outbound_id="$(select_split_outbound_id "删除分流规则" "请选择规则所属的落地")" || return 0
   total_count="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.rule_sets // []) | length')"
   [[ "$total_count" -gt 0 ]] || {
     ui_msg "该落地没有可删除的规则集。"
@@ -2834,10 +2913,14 @@ delete_split_routing_rule() {
   }
   while IFS= read -r selected_rule; do
     rule_values+=("$selected_rule")
-    options+=("${#rule_values[@]}" "$selected_rule")
+    if [[ "$selected_rule" == domain:* ]]; then
+      options+=("${#rule_values[@]}" "网址：${selected_rule#domain:}")
+    else
+      options+=("${#rule_values[@]}" "关键词：$selected_rule")
+    fi
   done < <(jq -r --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | .rule_sets[]?' "$STATE_FILE")
   options+=("0" "返回")
-  choice="$(ui_menu "删除分流规则集" "请选择要删除的规则集" "${options[@]}")" || return 1
+  choice="$(ui_menu "删除分流规则" "请选择要删除的分流规则" "${options[@]}")" || return 1
   [[ "$choice" == "0" ]] && return 0
   [[ "$choice" =~ ^[0-9]+$ ]] || return 1
   selected_index=$((choice - 1))
@@ -2861,9 +2944,9 @@ split_routing_menu_text() {
   cat <<EOF
 分流落地数量：$(split_outbound_count)
 已启用落地数量：$(state_get '[.routing.split.outbounds[]? | select(.enabled == true)] | length')
-规则集总数：$(state_get '[.routing.split.outbounds[]?.rule_sets[]?] | length')
+分流规则总数：$(state_get '[.routing.split.outbounds[]?.rule_sets[]?] | length')
 
-每个落地独立绑定规则集，例如 chatgpt 走落地 A、claude 走落地 B。
+每个落地可绑定关键词或自定义网址，例如 chatgpt、nodeseek.com。
 请选择要执行的操作（输入 0 返回上一级，输入 00 退出脚本）
 EOF
 }
@@ -2876,9 +2959,9 @@ split_routing_submenu() {
       "1" "新增分流落地" \
       "2" "编辑 / 停用分流落地" \
       "3" "删除分流落地" \
-      "4" "查看全部落地与规则集" \
-      "5" "为落地新增规则集" \
-      "6" "删除落地规则集" \
+      "4" "查看全部落地与分流规则" \
+      "5" "为落地新增分流规则" \
+      "6" "删除落地分流规则" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || continue
     case "$choice" in
@@ -3831,11 +3914,11 @@ usage() {
                           编辑或停用分流落地
   $SCRIPT_NAME delete-split-route
                           删除分流落地
-  $SCRIPT_NAME split-rules    查看全部分流落地与规则集
+  $SCRIPT_NAME split-rules    查看全部分流落地与规则
   $SCRIPT_NAME add-split-rule chatgpt claude
-                          新增分流规则集
+                          新增关键词分流规则
   $SCRIPT_NAME delete-split-rule
-                          删除分流规则集
+                          删除关键词或网址分流规则
   $SCRIPT_NAME repair-install 重新安装 / 修复环境并保留现有规则
   $SCRIPT_NAME realm          打开 Realm 中转菜单
   $SCRIPT_NAME apply          重新生成配置并重载服务

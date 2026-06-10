@@ -102,7 +102,7 @@ plain
 
 其中 `plain` 会按 `none` 生成配置，两个不带 `ietf` 的 Poly1305 名称会转换为 sing-box 支持的标准名称。
 
-脚本不预置任何规则集。新增落地或为已有落地追加规则时，只需输入名称，例如：
+脚本不预置任何规则集。新增落地或为已有落地追加规则时，可以选择关键词规则，例如：
 
 ```text
 chatgpt
@@ -117,13 +117,22 @@ sbox add-split-rule chatgpt claude
 
 执行后会提示选择这些规则要绑定到哪个落地。
 
-查看全部落地和规则集：
+也可以在“为落地新增分流规则”中选择“自定义网址 / 域名”，直接输入：
+
+```text
+nodeseek.com
+https://www.nodeseek.com/space
+```
+
+网址可以不带 `http://` 或 `https://`。脚本会自动去除协议、`www.`、端口和路径，并让该域名及其子域名通过指定落地。
+
+查看全部落地和分流规则：
 
 ```bash
 sbox split-rules
 ```
 
-删除规则集：
+删除关键词或网址分流规则：
 
 ```bash
 sbox delete-split-rule

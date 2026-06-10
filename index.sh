@@ -2117,10 +2117,6 @@ write_client_exports() {
   : >"$all_file"
   : >"$links_file"
   rm -f "$CLIENT_DIR"/shadowsocks/*.txt "$CLIENT_DIR"/vless-reality/*.txt "$CLIENT_DIR"/hysteria2/*.txt 2>/dev/null || true
-  rm -f "$CLIENT_DIR"/nekobox-split-route-rule.json \
-    "$CLIENT_DIR"/nekobox-split-domain-rules.txt \
-    "$CLIENT_DIR"/nekobox-split-ip-rules.txt \
-    "$CLIENT_DIR"/nekobox-split-routing-guide.txt 2>/dev/null || true
 
   if [[ "$(state_get '.protocols.shadowsocks.enabled')" == "true" ]]; then
     local ss_port ss_method ss_server_password
@@ -2292,36 +2288,6 @@ repair_install() {
   if [[ "${SBOX_REPAIR_OPEN_PANEL:-0}" == "1" && -x "$manager_target" ]]; then
     exec "$manager_target"
   fi
-}
-
-configure_server_address() {
-  local current desired yesno_result
-  current="$(state_get '.meta.server_address')"
-  desired="$(prompt_nonempty "服务器地址" "请输入节点对外地址（域名或 IP）" "$current")" || return 1
-  state_jq --arg addr "$desired" --arg ts "$(utc_now)" '.meta.server_address = $addr | .meta.updated_at = $ts'
-
-  if [[ "$(state_get '.protocols.hysteria2.enabled')" == "true" ]]; then
-    if ui_yesno "是否同步更新 Hysteria2 的证书域名并重新生成自签名证书？"; then
-      state_jq --arg addr "$desired" --arg ts "$(utc_now)" \
-        '.protocols.hysteria2.tls_server_name = $addr | .meta.updated_at = $ts'
-      rm -f "$(state_get '.protocols.hysteria2.cert_path')" "$(state_get '.protocols.hysteria2.key_path')" 2>/dev/null || true
-      ensure_hysteria_cert
-    else
-      yesno_result=$?
-      (( yesno_result == 2 )) && return 1
-    fi
-  fi
-
-  apply_config
-}
-
-configure_node_name() {
-  local current desired
-  current="$(state_get '.meta.node_name')"
-  desired="$(prompt_nonempty "节点名称" "请输入该节点在客户端中显示的名称" "${current:-我的节点}")" || return 1
-  state_jq --arg node_name "$desired" --arg ts "$(utc_now)" '.meta.node_name = $node_name | .meta.updated_at = $ts'
-  write_client_exports
-  ui_msg "节点名称已更新。"
 }
 
 configure_shadowsocks() {

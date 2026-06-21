@@ -307,6 +307,140 @@ detect_pkg_manager() {
   fi
 }
 
+debian_os_value() {
+  local key=$1
+
+  [[ -r /etc/os-release ]] || return 1
+  awk -F= -v key="$key" '
+    $1 == key {
+      value = $2
+      gsub(/^"/, "", value)
+      gsub(/"$/, "", value)
+      print value
+      exit
+    }
+  ' /etc/os-release
+}
+
+disable_debian_list_sources() {
+  local file tmp_file backup_file timestamp
+  timestamp=$1
+
+  for file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+    [[ -f "$file" ]] || continue
+    grep -Eq '^[[:space:]]*deb(-src)?[[:space:]].*(deb\.debian\.org/debian|security\.debian\.org|archive\.debian\.org/debian|ftp\.[^[:space:]]*debian\.org/debian)' "$file" || continue
+
+    backup_file="/etc/apt/sbox-sources-backup/$(basename "$file").$timestamp"
+    cp -p "$file" "$backup_file" || return 1
+    tmp_file="$(mktemp "$TMP_DIR/sbox-sources.XXXXXX")" || return 1
+    awk '
+      /^[[:space:]]*deb(-src)?[[:space:]]/ &&
+      $0 ~ /(deb\.debian\.org\/debian|security\.debian\.org|archive\.debian\.org\/debian|ftp\.[^[:space:]]*debian\.org\/debian)/ {
+        print "# disabled by sbox Debian source normalization: " $0
+        next
+      }
+      { print }
+    ' "$file" >"$tmp_file" || {
+      rm -f "$tmp_file"
+      return 1
+    }
+    mv "$tmp_file" "$file" || {
+      rm -f "$tmp_file"
+      return 1
+    }
+  done
+}
+
+disable_debian_deb822_sources() {
+  local file timestamp
+  timestamp=$1
+
+  for file in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/*debian*.sources; do
+    [[ -f "$file" ]] || continue
+    [[ "$(basename "$file")" == "sbox-debian.sources" ]] && continue
+    grep -Eq 'URIs:[[:space:]].*(deb\.debian\.org/debian|security\.debian\.org|archive\.debian\.org/debian|ftp\.[^[:space:]]*debian\.org/debian)' "$file" || continue
+
+    mv "$file" "/etc/apt/sbox-sources-backup/$(basename "$file").$timestamp" || return 1
+  done
+}
+
+normalize_debian_apt_sources() {
+  local os_id version_id version_major codename components timestamp
+  local debian_uri security_uri security_suite suites managed_file
+
+  [[ "${SBOX_SKIP_APT_SOURCE_FIX:-0}" == "1" ]] && return 0
+  [[ -r /etc/os-release ]] || return 0
+
+  os_id="$(debian_os_value ID || true)"
+  version_id="$(debian_os_value VERSION_ID || true)"
+  codename="$(debian_os_value VERSION_CODENAME || true)"
+  version_major="${version_id%%.*}"
+
+  [[ "$os_id" == "debian" ]] || return 0
+
+  case "$version_major" in
+    10)
+      codename="${codename:-buster}"
+      debian_uri="http://archive.debian.org/debian"
+      security_uri="http://archive.debian.org/debian-security"
+      security_suite="${codename}/updates"
+      components="main contrib non-free"
+      ;;
+    11)
+      codename="${codename:-bullseye}"
+      debian_uri="http://archive.debian.org/debian"
+      security_uri="http://security.debian.org/debian-security"
+      security_suite="${codename}-security"
+      components="main contrib non-free"
+      ;;
+    12)
+      codename="${codename:-bookworm}"
+      debian_uri="http://deb.debian.org/debian"
+      security_uri="http://security.debian.org/debian-security"
+      security_suite="${codename}-security"
+      components="main contrib non-free non-free-firmware"
+      ;;
+    13)
+      codename="${codename:-trixie}"
+      debian_uri="http://deb.debian.org/debian"
+      security_uri="http://security.debian.org/debian-security"
+      security_suite="${codename}-security"
+      components="main contrib non-free non-free-firmware"
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  mkdir -p /etc/apt/sources.list.d /etc/apt/apt.conf.d /etc/apt/sbox-sources-backup || return 1
+  timestamp="$(date +%Y%m%d%H%M%S)"
+
+  disable_debian_list_sources "$timestamp" || return 1
+  disable_debian_deb822_sources "$timestamp" || return 1
+
+  suites="$codename ${codename}-updates ${codename}-backports"
+  managed_file="/etc/apt/sources.list.d/sbox-debian.sources"
+  cat >"$managed_file" <<EOF || return 1
+Types: deb
+URIs: $debian_uri
+Suites: $suites
+Components: $components
+
+Types: deb
+URIs: $security_uri
+Suites: $security_suite
+Components: $components
+EOF
+
+  if [[ "$version_major" == "10" || "$version_major" == "11" ]]; then
+    cat >/etc/apt/apt.conf.d/99sbox-debian-archive <<'EOF' || return 1
+Acquire::Check-Valid-Until "false";
+EOF
+  else
+    rm -f /etc/apt/apt.conf.d/99sbox-debian-archive 2>/dev/null || true
+  fi
+}
+
 install_dependencies() {
   detect_pkg_manager
 
@@ -316,6 +450,7 @@ install_dependencies() {
       ;;
     apt)
       export DEBIAN_FRONTEND=noninteractive
+      normalize_debian_apt_sources || warn "Debian apt 源自动修复失败，将继续尝试 apt-get update。"
       apt-get update -y
       apt-get install -y curl jq openssl ca-certificates git tar gzip
       ;;
@@ -333,6 +468,7 @@ install_dependencies() {
 }
 
 install_sing_box_apt_repo() {
+  normalize_debian_apt_sources || warn "Debian apt 源自动修复失败，将继续尝试安装 sing-box。"
   mkdir -p /etc/apt/keyrings || return 1
   curl -fsSL https://sing-box.app/gpg.key -o /etc/apt/keyrings/sagernet.asc || return 1
   chmod a+r /etc/apt/keyrings/sagernet.asc || return 1

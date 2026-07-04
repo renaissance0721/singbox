@@ -14,7 +14,7 @@
 - 支持输入 `sbox uninstall` 一键卸载
 - 支持重新安装 / 修复时从 GitHub 拉取最新项目并保留现有规则
 - 新建节点时询问节点名称和出口地址，启用协议后生成可直接导入常见客户端的协议链接
-- 支持 `Shadowsocks 2022`、`VLESS + Reality`、`Hysteria2`
+- 支持 `Shadowsocks`、`VLESS + Reality`、`Hysteria2`
 - 支持客户端新增、删除、导出
 - 自动生成 Reality 密钥、随机密码和 Hysteria2 自签名证书
 - 支持零预置的自定义分流规则集，可随时新增、查看和删除
@@ -161,11 +161,14 @@ sbox uninstall
 
 ## 协议说明
 
-### Shadowsocks 2022
+### Shadowsocks
 
-- 默认使用 `2022-blake3-aes-256-gcm`
+- 新建节点时可选择加密方式，兼容 Nekobox / v2rayNG 常用 `ss://` 导入
+
+- 默认使用 `2022-blake3-aes-128-gcm`
 - 默认端口在 `10000-60000` 范围内随机生成
-- 服务端主密码和用户密码会分开生成
+- AEAD 2022 会分开生成服务端主密码和用户密码；传统 AEAD 会按普通 Shadowsocks 密码导出
+- 支持 `aes-128-gcm`、`aes-256-gcm`、`chacha20-ietf-poly1305`、`xchacha20-ietf-poly1305`、`none` 和 AEAD 2022 加密方式
 
 ### VLESS + Reality
 

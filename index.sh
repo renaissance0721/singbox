@@ -2,7 +2,7 @@
 #
 # Sing-box 一键安装与管理面板
 # 用于在 Linux VPS 上快速安装和管理 sing-box 的 Shell 脚本
-# 支持 Shadowsocks 2022、VLESS + Reality 和 Hysteria2
+# 支持 Shadowsocks、VLESS + Reality 和 Hysteria2
 #
 # 作者: renaissance0721
 # 版本: 0.1.0
@@ -287,7 +287,7 @@ ui_menu() {
 
 ui_protocol_menu() {
   ui_menu "$APP_TITLE" "请选择需要操作的协议" \
-    "1" "Shadowsocks 2022" \
+    "1" "Shadowsocks" \
     "2" "VLESS + Reality" \
     "3" "Hysteria2" \
     "0" "返回"
@@ -1216,7 +1216,7 @@ init_state_file() {
       "listen": "0.0.0.0",
       "port": $ss_default_port,
       "network": "tcp",
-      "method": "2022-blake3-aes-256-gcm",
+      "method": "2022-blake3-aes-128-gcm",
       "server_password": "",
       "multiplex": true,
       "users": []
@@ -1320,7 +1320,7 @@ migrate_state_schema() {
         port: (.port // 1080),
         username: (.username // ""),
         password: (.password // ""),
-        method: ((.method // "2022-blake3-aes-256-gcm") | normalize_method),
+        method: ((.method // "2022-blake3-aes-128-gcm") | normalize_method),
         rule_sets: ((.rule_sets // []) | clean_rules)
       };
     def legacy_ai:
@@ -1339,7 +1339,7 @@ migrate_state_schema() {
           if (.outbound_type // "") == "shadowsocks" then (.password // "")
           else "" end
         ),
-        method: ((.method // "2022-blake3-aes-256-gcm") | normalize_method),
+        method: ((.method // "2022-blake3-aes-128-gcm") | normalize_method),
         rule_sets: (
           ((.domain_suffix // []) + (.domain_keyword // [])) | clean_rules
         )
@@ -1438,7 +1438,7 @@ normalize_shadowsocks_method() {
   esac
 }
 
-is_supported_split_shadowsocks_method() {
+is_supported_shadowsocks_method() {
   case "$(normalize_shadowsocks_method "$1")" in
     aes-256-gcm|aes-128-gcm|chacha20-ietf-poly1305|xchacha20-ietf-poly1305|none|2022-blake3-aes-128-gcm|2022-blake3-aes-256-gcm|2022-blake3-chacha20-poly1305)
       return 0
@@ -1449,8 +1449,82 @@ is_supported_split_shadowsocks_method() {
   esac
 }
 
+is_supported_split_shadowsocks_method() {
+  is_supported_shadowsocks_method "$1"
+}
+
+is_shadowsocks_2022_method() {
+  case "$(normalize_shadowsocks_method "$1")" in
+    2022-blake3-aes-128-gcm|2022-blake3-aes-256-gcm|2022-blake3-chacha20-poly1305)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+shadowsocks_2022_key_bytes() {
+  case "$(normalize_shadowsocks_method "$1")" in
+    2022-blake3-aes-128-gcm)
+      printf '16\n'
+      ;;
+    2022-blake3-aes-256-gcm|2022-blake3-chacha20-poly1305)
+      printf '32\n'
+      ;;
+    *)
+      printf '0\n'
+      ;;
+  esac
+}
+
+generate_shadowsocks_password() {
+  local method=$1 key_bytes
+  key_bytes="$(shadowsocks_2022_key_bytes "$method")"
+
+  if [[ "$key_bytes" -gt 0 ]]; then
+    generate_base64_bytes "$key_bytes"
+  else
+    generate_password
+  fi
+}
+
+shadowsocks_share_password() {
+  local method=$1 server_password=$2 user_password=$3
+
+  if is_shadowsocks_2022_method "$method"; then
+    printf '%s:%s\n' "$server_password" "$user_password"
+  else
+    printf '%s\n' "$user_password"
+  fi
+}
+
+select_shadowsocks_method() {
+  local current_method=${1:-2022-blake3-aes-128-gcm}
+  local method_choice method
+
+  method_choice="$(ui_split_shadowsocks_method_menu "$current_method")" || return 1
+  case "$method_choice" in
+    1) method="aes-256-gcm" ;;
+    2) method="aes-128-gcm" ;;
+    3) method="chacha20-poly1305" ;;
+    4) method="chacha20-ietf-poly1305" ;;
+    5) method="xchacha20-poly1305" ;;
+    6) method="xchacha20-ietf-poly1305" ;;
+    7) method="none" ;;
+    8) method="plain" ;;
+    9) method="2022-blake3-aes-128-gcm" ;;
+    10) method="2022-blake3-aes-256-gcm" ;;
+    11) method="2022-blake3-chacha20-poly1305" ;;
+    0) return 1 ;;
+    *) ui_msg "Invalid Shadowsocks method."; return 1 ;;
+  esac
+
+  normalize_shadowsocks_method "$method"
+}
+
 ui_split_shadowsocks_method_menu() {
-  local current_method=${1:-2022-blake3-aes-256-gcm}
+  local current_method=${1:-2022-blake3-aes-128-gcm}
   ui_menu "Shadowsocks 加密方式" "请选择加密方式。当前：${current_method}" \
     "1" "aes-256-gcm" \
     "2" "aes-128-gcm" \
@@ -1710,6 +1784,20 @@ append_ss_user() {
   local password=$2
   state_jq --arg name "$name" --arg password "$password" --arg ts "$(utc_now)" \
     '.protocols.shadowsocks.users += [{name: $name, password: $password}] | .meta.updated_at = $ts'
+}
+
+reset_ss_user_passwords_for_method() {
+  local method=$1 users_json='[]' name password
+
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    password="$(generate_shadowsocks_password "$method")"
+    users_json="$(jq -c --arg name "$name" --arg password "$password" \
+      '. + [{name: $name, password: $password}]' <<<"$users_json")"
+  done < <(jq -r '.protocols.shadowsocks.users[]?.name' "$STATE_FILE")
+
+  state_jq --argjson users "$users_json" --arg ts "$(utc_now)" \
+    '.protocols.shadowsocks.users = $users | .meta.updated_at = $ts'
 }
 
 append_vless_user() {
@@ -2255,24 +2343,25 @@ write_client_exports() {
   rm -f "$CLIENT_DIR"/shadowsocks/*.txt "$CLIENT_DIR"/vless-reality/*.txt "$CLIENT_DIR"/hysteria2/*.txt 2>/dev/null || true
 
   if [[ "$(state_get '.protocols.shadowsocks.enabled')" == "true" ]]; then
-    local ss_port ss_method ss_server_password
+    local ss_port ss_method ss_server_password ss_share_password
     ss_port="$(state_get '.protocols.shadowsocks.port')"
     ss_method="$(state_get '.protocols.shadowsocks.method')"
     ss_server_password="$(state_get '.protocols.shadowsocks.server_password')"
 
     while IFS=$'\t' read -r name user_password; do
       [[ -n "$name" ]] || continue
+      ss_share_password="$(shadowsocks_share_password "$ss_method" "$ss_server_password" "$user_password")"
       cat >"$CLIENT_DIR/shadowsocks/${name}.txt" <<EOF
-[Shadowsocks 2022]
+[Shadowsocks]
 name = $display_name
 server = $server_address
 port = $ss_port
 method = $ss_method
-password = ${ss_server_password}:${user_password}
+password = $ss_share_password
 network = tcp
 multiplex = true
 EOF
-      link="ss://$(base64_urlsafe "${ss_method}:${ss_server_password}:${user_password}")@${host}:${ss_port}#$(uri_encode "$display_name")"
+      link="ss://$(base64_urlsafe "${ss_method}:${ss_share_password}")@${host}:${ss_port}#$(uri_encode "$display_name")"
       printf '%s（%s）的订阅链接是：%s\n' "$display_name" "$name" "$link" >>"$links_file"
       cat "$CLIENT_DIR/shadowsocks/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
@@ -2427,28 +2516,31 @@ repair_install() {
 }
 
 configure_shadowsocks() {
-  local vless_port port server_password listen_addr
+  local vless_port port server_password listen_addr method
 
   prompt_node_name_for_protocol || return 1
 
   vless_port="$(state_get '.protocols.vless_reality.port')"
   port="$(prompt_number "Shadowsocks 端口" "请输入 Shadowsocks 监听端口" "$(generate_random_service_port_excluding "$vless_port")" 1 65535)" || return 1
-  server_password="$(generate_base64_bytes 32)"
+  method="$(select_shadowsocks_method "$(state_get '.protocols.shadowsocks.method // "2022-blake3-aes-128-gcm"')")" || return 1
+  server_password="$(generate_shadowsocks_password "$method")"
   listen_addr="$(default_listen_address)"
 
-  state_jq --argjson port "$port" --arg server_password "$server_password" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
+  state_jq --argjson port "$port" --arg method "$method" --arg server_password "$server_password" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
     .protocols.shadowsocks.enabled = true |
     .protocols.shadowsocks.listen = $listen_addr |
     .protocols.shadowsocks.port = $port |
     .protocols.shadowsocks.network = "tcp" |
-    .protocols.shadowsocks.method = "2022-blake3-aes-256-gcm" |
+    .protocols.shadowsocks.method = $method |
     .protocols.shadowsocks.server_password = $server_password |
     .protocols.shadowsocks.multiplex = true |
     .meta.updated_at = $ts
   '
 
   if [[ "$(state_get '.protocols.shadowsocks.users | length')" -eq 0 ]]; then
-    append_ss_user "ss-client-1" "$(generate_base64_bytes 32)"
+    append_ss_user "ss-client-1" "$(generate_shadowsocks_password "$method")"
+  else
+    reset_ss_user_passwords_for_method "$method"
   fi
 
   apply_config
@@ -2529,7 +2621,7 @@ configure_hysteria2() {
 node_menu_text() {
   cat <<EOF
 节点地址：$(state_get '.meta.server_address // "-"')
-Shadowsocks 2022：$(state_get '.protocols.shadowsocks.enabled')
+Shadowsocks：$(state_get '.protocols.shadowsocks.enabled')
 VLESS + Reality：$(state_get '.protocols.vless_reality.enabled')
 Hysteria2：$(state_get '.protocols.hysteria2.enabled')
 
@@ -2541,7 +2633,7 @@ build_node() {
   local protocol_choice detected_address server_address
 
   protocol_choice="$(ui_menu "搭建节点" "请选择要搭建的节点协议" \
-    "1" "Shadowsocks 2022" \
+    "1" "Shadowsocks" \
     "2" "VLESS + Reality" \
     "3" "Hysteria2" \
     "0" "返回")" || return 1
@@ -2627,7 +2719,7 @@ delete_node() {
 
   if [[ "$(state_get '.protocols.shadowsocks.enabled')" == "true" ]]; then
     protocols+=("shadowsocks")
-    labels+=("Shadowsocks 2022")
+    labels+=("Shadowsocks")
   fi
   if [[ "$(state_get '.protocols.vless_reality.enabled')" == "true" ]]; then
     protocols+=("vless_reality")
@@ -2768,7 +2860,7 @@ configure_split_routing() {
     current_port="1080"
     current_username=""
     current_password=""
-    current_method="2022-blake3-aes-256-gcm"
+    current_method="2022-blake3-aes-128-gcm"
     current_rules=""
     current_domains="[]"
   else
@@ -2779,7 +2871,7 @@ configure_split_routing() {
     current_port="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.port // 1080)')"
     current_username="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.username // "")')"
     current_password="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.password // "")')"
-    current_method="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.method // "2022-blake3-aes-256-gcm")')"
+    current_method="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.method // "2022-blake3-aes-128-gcm")')"
     current_rules="$(state_get --arg id "$outbound_id" '
       .routing.split.outbounds[]
       | select(.id == $id)
@@ -3081,7 +3173,7 @@ split_routing_submenu() {
 }
 
 add_client() {
-  local protocol_choice name value duplicate_attempts=0
+  local protocol_choice name value ss_method duplicate_attempts=0
   protocol_choice="$(ui_protocol_menu)" || return 1
 
   case "$protocol_choice" in
@@ -3103,7 +3195,8 @@ add_client() {
         fi
         break
       done
-      value="$(generate_base64_bytes 32)"
+      ss_method="$(state_get '.protocols.shadowsocks.method // "2022-blake3-aes-128-gcm"')"
+      value="$(generate_shadowsocks_password "$ss_method")"
       append_ss_user "$name" "$value"
       apply_config
       ;;
@@ -3164,7 +3257,7 @@ remove_client() {
   case "$protocol_choice" in
     1)
       protocol_key="shadowsocks"
-      protocol_label="Shadowsocks 2022"
+      protocol_label="Shadowsocks"
       ;;
     2)
       protocol_key="vless_reality"
@@ -3204,7 +3297,7 @@ remove_client() {
 
 client_menu_text() {
   cat <<EOF
-Shadowsocks 2022 客户端数：$(state_get '.protocols.shadowsocks.users | length')
+Shadowsocks 客户端数：$(state_get '.protocols.shadowsocks.users | length')
 VLESS + Reality 客户端数：$(state_get '.protocols.vless_reality.users | length')
 Hysteria2 客户端数：$(state_get '.protocols.hysteria2.users | length')
 
@@ -3820,7 +3913,7 @@ sing-box 状态: $service_status
 客户端导出目录: $CLIENT_DIR
 导入链接文件: ${links_file}
 
-[Shadowsocks 2022]
+[Shadowsocks]
 enabled = $(state_get '.protocols.shadowsocks.enabled')
 port = $(state_get '.protocols.shadowsocks.port')
 users = $ss_users

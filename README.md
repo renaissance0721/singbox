@@ -13,7 +13,7 @@
 - 退出后可直接输入 `sbox` 重新打开面板
 - 支持输入 `sbox uninstall` 一键卸载
 - 支持重新安装 / 修复时从 GitHub 拉取最新项目并保留现有规则
-- 新建节点时询问节点名称和出口地址，启用协议后生成可直接导入常见客户端的协议链接
+- 新建节点时询问节点名称和出口地址，并支持在节点管理中随时更改地址
 - 支持 `Shadowsocks`、`VLESS + Reality`、`Hysteria2`
 - 支持客户端新增、删除、导出
 - 自动生成 Reality 密钥、随机密码和 Hysteria2 自签名证书
@@ -54,6 +54,14 @@ curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/instal
 ```bash
 sbox
 ```
+
+如需直接更改所有协议共用的节点出口 IP 或域名，也可以执行：
+
+```bash
+sbox change-address
+```
+
+修改后会自动重新生成客户端配置和订阅链接，并按需重载 sing-box 服务。
 
 ## 分流管理
 

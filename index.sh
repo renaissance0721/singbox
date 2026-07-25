@@ -2668,6 +2668,33 @@ build_node() {
   esac
 }
 
+change_node_address() {
+  local current_address new_address
+  local vless_server_name handshake_server
+
+  current_address="$(state_get '.meta.server_address // ""')"
+  new_address="$(prompt_nonempty "更改节点地址" "请输入新的节点出口 IP 或域名" "$current_address")" || return 1
+
+  if [[ "$new_address" == "$current_address" ]]; then
+    ui_msg "节点地址未发生变化。"
+    return 0
+  fi
+
+  if [[ "$(state_get '.protocols.vless_reality.enabled')" == "true" ]]; then
+    vless_server_name="$(state_get '.protocols.vless_reality.server_name')"
+    handshake_server="$(state_get '.protocols.vless_reality.handshake_server')"
+    if [[ "$new_address" == "$vless_server_name" || "$new_address" == "$handshake_server" ]]; then
+      ui_msg "新的节点地址不能与 VLESS + Reality 的伪装域名相同。"
+      return 1
+    fi
+  fi
+
+  state_jq --arg addr "$new_address" --arg ts "$(utc_now)" \
+    '.meta.server_address = $addr | .meta.updated_at = $ts'
+
+  apply_config
+}
+
 node_submenu() {
   local choice menu_text
 
@@ -2679,6 +2706,7 @@ node_submenu() {
       "3" "管理客户端" \
       "4" "查看订阅链接" \
       "5" "重新生成配置并重载服务" \
+      "6" "更改节点地址" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || continue
 
@@ -2697,6 +2725,9 @@ node_submenu() {
         ;;
       5)
         apply_config
+        ;;
+      6)
+        change_node_address || true
         ;;
       0)
         return 0
@@ -4100,6 +4131,7 @@ usage() {
   $SCRIPT_NAME                打开管理面板
   $SCRIPT_NAME quick-install  一键安装并初始化
   $SCRIPT_NAME node           打开代理节点管理菜单
+  $SCRIPT_NAME change-address 更改节点出口 IP 或域名
   $SCRIPT_NAME delete-node    删除已启用的协议节点
   $SCRIPT_NAME add-client     打开新增客户端流程
   $SCRIPT_NAME remove-client  打开删除客户端流程
@@ -4175,6 +4207,13 @@ main() {
       ensure_dirs
       init_state_file
       node_submenu
+      ;;
+    change-address|edit-address)
+      require_linux
+      require_root
+      ensure_dirs
+      init_state_file
+      change_node_address
       ;;
     delete-node|remove-node)
       require_linux

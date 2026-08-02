@@ -97,6 +97,8 @@ chmod 755 "$TARGET_PATH"
 
 log "管理脚本已安装到 $TARGET_PATH"
 
+"$TARGET_PATH" migrate-realm-tcp-only
+
 if [[ -n "$INSTALL_COMMAND" ]]; then
   "$TARGET_PATH" "$INSTALL_COMMAND"
 fi

@@ -20,7 +20,7 @@ set -Eeuo pipefail
 
 ORIGINAL_ARGS=("$@")
 SELF_PATH="${BASH_SOURCE[0]}"
-SCRIPT_VERSION="0.3.0"
+SCRIPT_VERSION="0.3.1"
 SCRIPT_NAME="${0##*/}"
 APP_TITLE="Sing-box 管理面板 | 输入 sbox 快捷打开脚本"
 STATE_DIR="${STATE_DIR:-/etc/sing-box-manager}"
@@ -1192,6 +1192,7 @@ backup_config_if_exists() {
 init_state_file() {
   if [[ -s "$STATE_FILE" ]]; then
     migrate_state_schema
+    migrate_realm_tcp_only
     return 0
   fi
 
@@ -1255,6 +1256,8 @@ init_state_file() {
   }
 }
 EOF
+
+  migrate_realm_tcp_only
 }
 
 state_get() {
@@ -1542,6 +1545,7 @@ ui_split_shadowsocks_method_menu() {
 
 init_realm_state_file() {
   if [[ -s "$REALM_STATE_FILE" ]]; then
+    migrate_realm_tcp_only
     return 0
   fi
 
@@ -1552,12 +1556,13 @@ init_realm_state_file() {
 {
   "meta": {
     "version": "$SCRIPT_VERSION",
-    "updated_at": "$now"
+    "updated_at": "$now",
+    "realm_tcp_only_migrated": true
   },
   "global": {
     "log_level": "warn",
     "log_output": "stdout",
-    "use_udp": true,
+    "use_udp": false,
     "no_tcp": false
   },
   "rules": []
@@ -2185,6 +2190,23 @@ allow_iptables_port() {
   fi
 }
 
+remove_iptables_port() {
+  local port=$1
+  local protocol=$2
+
+  if have_cmd iptables; then
+    while iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1; do
+      iptables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 || break
+    done
+  fi
+
+  if have_cmd ip6tables; then
+    while ip6tables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1; do
+      ip6tables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 || break
+    done
+  fi
+}
+
 persist_openrc_firewall_rules() {
   has_openrc || return 0
 
@@ -2227,6 +2249,13 @@ realm_rule_group_count() {
   realm_state_get '.rules | length'
 }
 
+realm_managed_ports() {
+  jq -r '
+    .rules[]?.entries[]?.listen
+    | try capture(":(?<port>[0-9]+)$").port catch empty
+  ' "$REALM_STATE_FILE" | sort -un
+}
+
 render_realm_config() {
   local log_level log_output use_udp no_tcp
   log_level="$(realm_state_get '.global.log_level')"
@@ -2263,31 +2292,104 @@ write_realm_config_file() {
   rm -f "$tmp_config"
 }
 
+realm_remove_udp_firewall_rules() {
+  local port firewalld_changed=false
+
+  while IFS= read -r port; do
+    [[ -n "$port" ]] || continue
+
+    if have_cmd ufw; then
+      ufw --force delete allow "${port}/udp" >/dev/null 2>&1 || true
+    fi
+
+    if have_cmd firewall-cmd && has_systemd && systemctl is-active firewalld >/dev/null 2>&1; then
+      firewall-cmd --permanent --remove-port="${port}/udp" >/dev/null 2>&1 || true
+      firewalld_changed=true
+    fi
+
+    remove_iptables_port "$port" udp
+  done < <(realm_managed_ports)
+
+  if [[ "$firewalld_changed" == "true" ]]; then
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+
+  persist_openrc_firewall_rules
+}
+
+migrate_realm_tcp_only() {
+  [[ -s "$REALM_STATE_FILE" ]] || return 0
+
+  if ! jq -e . "$REALM_STATE_FILE" >/dev/null 2>&1; then
+    warn "Realm 状态文件无效，已跳过 TCP-only 迁移：$REALM_STATE_FILE"
+    return 1
+  fi
+
+  if jq -e '
+    (.global.use_udp? == false)
+    and (.meta.realm_tcp_only_migrated? == true)
+  ' "$REALM_STATE_FILE" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  ensure_realm_dirs
+  realm_state_jq --arg version "$SCRIPT_VERSION" --arg ts "$(utc_now)" '
+    .global = (.global // {}) |
+    .global.use_udp = false |
+    .global.no_tcp = (.global.no_tcp // false) |
+    .meta = (.meta // {}) |
+    .meta.version = $version |
+    .meta.updated_at = $ts |
+    del(.meta.realm_tcp_only_migrated)
+  '
+
+  if ! write_realm_config_file; then
+    warn "写入 Realm TCP-only 配置失败，下次运行脚本时将自动重试。"
+    return 1
+  fi
+
+  realm_remove_udp_firewall_rules
+
+  if realm_service_exists && [[ "$(realm_service_active)" == "active" ]]; then
+    if ! restart_realm_service_raw >/dev/null 2>&1; then
+      warn "关闭 UDP 后重启 Realm 失败，下次运行脚本时将自动重试。"
+      return 1
+    fi
+  fi
+
+  realm_state_jq --arg ts "$(utc_now)" '
+    .meta.realm_tcp_only_migrated = true |
+    .meta.updated_at = $ts
+  '
+
+  log "Realm TCP-only 迁移完成：已关闭 UDP 转发并清理脚本管理的 UDP 防火墙规则。"
+  warn "如果 VPS 商家另有云防火墙或安全组，请同时删除其中的 Realm UDP 端口。"
+}
+
 realm_apply_firewall_rules() {
   local port
+
+  realm_remove_udp_firewall_rules
 
   if have_cmd ufw && ufw status 2>/dev/null | grep -q 'Status: active'; then
     while IFS= read -r port; do
       [[ -n "$port" ]] || continue
       ufw allow "${port}/tcp" >/dev/null 2>&1 || true
-      ufw allow "${port}/udp" >/dev/null 2>&1 || true
-    done < <(jq -r '.rules[]?.entries[]?.listen | capture(":(?<port>[0-9]+)$").port' "$REALM_STATE_FILE" | sort -un)
+    done < <(realm_managed_ports)
   fi
 
   if have_cmd firewall-cmd && has_systemd && systemctl is-active firewalld >/dev/null 2>&1; then
     while IFS= read -r port; do
       [[ -n "$port" ]] || continue
       firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1 || true
-      firewall-cmd --permanent --add-port="${port}/udp" >/dev/null 2>&1 || true
-    done < <(jq -r '.rules[]?.entries[]?.listen | capture(":(?<port>[0-9]+)$").port' "$REALM_STATE_FILE" | sort -un)
+    done < <(realm_managed_ports)
     firewall-cmd --reload >/dev/null 2>&1 || true
   fi
 
   while IFS= read -r port; do
     [[ -n "$port" ]] || continue
     allow_iptables_port "$port" tcp
-    allow_iptables_port "$port" udp
-  done < <(jq -r '.rules[]?.entries[]?.listen | capture(":(?<port>[0-9]+)$").port' "$REALM_STATE_FILE" | sort -un)
+  done < <(realm_managed_ports)
   persist_openrc_firewall_rules
 }
 
@@ -4277,6 +4379,12 @@ main() {
     realm)
       ensure_dirs
       prepare_realm_menu && realm_submenu
+      ;;
+    migrate-realm-tcp-only)
+      require_linux
+      require_root
+      ensure_dirs
+      migrate_realm_tcp_only
       ;;
     overview)
       require_linux

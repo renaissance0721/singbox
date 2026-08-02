@@ -195,9 +195,7 @@ ui_show_text() {
 }
 
 ui_input_error_return() {
-  local text=${1:-连续输入错误两次}
-
-  printf '\n\033[31m%s，按 Enter 退回菜单界面。\033[0m' "$text" >&2
+  printf '\n\033[31m连续输入错误两次，按 Enter 退回菜单界面。\033[0m' >&2
   if [[ -t 0 ]]; then
     read -r _
   fi
@@ -2660,7 +2658,14 @@ sync_managed_firewall_rules() {
     return 1
   }
 
-  [[ -s "$FIREWALL_STATE_FILE" ]] && cp "$FIREWALL_STATE_FILE" "$old_rules" || : >"$old_rules"
+  if [[ -s "$FIREWALL_STATE_FILE" ]]; then
+    if ! cp "$FIREWALL_STATE_FILE" "$old_rules"; then
+      rm -f "$old_rules" "$desired_rules"
+      return 1
+    fi
+  else
+    : >"$old_rules"
+  fi
   if ! desired_managed_firewall_rules | sort -u >"$desired_rules"; then
     warn "节点或 Realm 状态文件无效，已拒绝修改防火墙规则。"
     rm -f "$old_rules" "$desired_rules"

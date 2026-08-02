@@ -4,7 +4,16 @@
 
 ## [Unreleased]
 
-暂无。
+### 安全
+
+- VLESS、Hysteria2 与 Shadowsocks 统一阻断本机、私网、链路本地和云元数据目标，并在域名解析后再次检查
+- sing-box 与 Realm 改由无登录权限的 `sbox-runtime` 用户运行，systemd 服务增加最小权限沙箱，OpenRC 使用最小文件能力兼容低端口
+- 状态、客户端订阅、备份和密钥目录强制使用最小权限
+- 应用防火墙前检查端口占用；冲突时恢复旧服务且不修改防火墙
+- iptables/ip6tables 托管规则增加 `sbox-managed` 标记，置于现有规则之后、无条件终止规则之前，避免越过拒绝、限速和 Fail2ban 且兼容默认拒绝策略
+- 管理脚本远程更新必须提供可信 SHA-256；取消未经校验的 `curl | sudo bash` 更新链
+- 安装器校验内置 `index.sh` SHA-256 后原子替换，取消执行未经校验的 sing-box 后备安装脚本
+- APT 仓库密钥固定校验官方指纹；Realm 发布包校验 GitHub 发布摘要并以低权限解压和运行
 
 ## [0.4.1] - 2026-08-02
 

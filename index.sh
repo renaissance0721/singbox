@@ -5,7 +5,7 @@
 # 支持 Shadowsocks、VLESS + Reality 和 Hysteria2
 #
 # 作者: renaissance0721
-# 版本: 0.4.1
+# 版本: 0.5.0
 # 许可证: MIT
 #
 # 使用方法:
@@ -17,10 +17,11 @@
 #
 
 set -Eeuo pipefail
+umask 077
 
 ORIGINAL_ARGS=("$@")
 SELF_PATH="${BASH_SOURCE[0]}"
-SCRIPT_VERSION="0.4.1"
+SCRIPT_VERSION="0.5.0"
 SCRIPT_NAME="${0##*/}"
 APP_TITLE="Sing-box 管理面板 | 输入 sbox 快捷打开脚本"
 STATE_DIR="${STATE_DIR:-/etc/sing-box-manager}"
@@ -39,9 +40,16 @@ REALM_SERVICE_FILE="${REALM_SERVICE_FILE:-/etc/systemd/system/realm.service}"
 REALM_OPENRC_SERVICE_FILE="${REALM_OPENRC_SERVICE_FILE:-/etc/init.d/realm}"
 REALM_OPENRC_LOG_FILE="${REALM_OPENRC_LOG_FILE:-/var/log/realm.log}"
 FIREWALL_STATE_FILE="${FIREWALL_STATE_FILE:-$STATE_DIR/firewall-managed.tsv}"
+IPTABLES_MIGRATION_MARKER="${IPTABLES_MIGRATION_MARKER:-$STATE_DIR/iptables-comment-rules.migrated}"
+IPTABLES_RULE_COMMENT="${IPTABLES_RULE_COMMENT:-sbox-managed}"
 FIREWALL_SYSTEMD_SERVICE_FILE="${FIREWALL_SYSTEMD_SERVICE_FILE:-/etc/systemd/system/sbox-firewall.service}"
 SING_BOX_FIREWALL_DROPIN_DIR="${SING_BOX_FIREWALL_DROPIN_DIR:-/etc/systemd/system/sing-box.service.d}"
 REALM_FIREWALL_DROPIN_DIR="${REALM_FIREWALL_DROPIN_DIR:-/etc/systemd/system/realm.service.d}"
+SING_BOX_HARDENING_DROPIN_FILE="${SING_BOX_HARDENING_DROPIN_FILE:-$SING_BOX_FIREWALL_DROPIN_DIR/20-sbox-hardening.conf}"
+REALM_HARDENING_DROPIN_FILE="${REALM_HARDENING_DROPIN_FILE:-$REALM_FIREWALL_DROPIN_DIR/20-sbox-hardening.conf}"
+RUNTIME_USER="${RUNTIME_USER:-sbox-runtime}"
+RUNTIME_GROUP="${RUNTIME_GROUP:-sbox-runtime}"
+SAGERNET_GPG_FINGERPRINT="2C317FBD5D886B4E89BAE8DA6D9152172A2B2F0C"
 MANAGER_SCRIPT_PATH="${MANAGER_SCRIPT_PATH:-/usr/local/bin/sbox}"
 PROJECT_INSTALL_DIR="${PROJECT_INSTALL_DIR:-/usr/local/share/sbox}"
 SCRIPT_REPO_OWNER="${SCRIPT_REPO_OWNER:-renaissance0721}"
@@ -134,6 +142,17 @@ download_to_file() {
   return 1
 }
 
+sha256_file() {
+  local file=$1
+  if have_cmd sha256sum; then
+    sha256sum "$file" | awk '{print tolower($1)}'
+  elif have_cmd openssl; then
+    openssl dgst -sha256 "$file" | awk '{print tolower($NF)}'
+  else
+    return 1
+  fi
+}
+
 is_interactive() {
   [[ -t 0 && -t 1 ]]
 }
@@ -144,7 +163,10 @@ require_root() {
   fi
 
   if have_cmd sudo; then
-    exec sudo -E bash "$SELF_PATH" "${ORIGINAL_ARGS[@]}"
+    exec sudo env -i \
+      PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+      TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" LC_CTYPE="${LC_CTYPE:-C.UTF-8}" \
+      bash "$SELF_PATH" "${ORIGINAL_ARGS[@]}"
   fi
 
   die "请使用 root 运行此脚本，或先安装 sudo。"
@@ -159,12 +181,75 @@ utc_now() {
 }
 
 ensure_dirs() {
-  mkdir -p "$STATE_DIR" "$BACKUP_DIR" "$CLIENT_DIR" "$CERT_DIR" "$(dirname "$CONFIG_FILE")"
-  mkdir -p "$CLIENT_DIR/shadowsocks" "$CLIENT_DIR/vless-reality" "$CLIENT_DIR/hysteria2"
+  install -d -m 0750 "$STATE_DIR" "$CERT_DIR" "$(dirname "$CONFIG_FILE")"
+  install -d -m 0700 "$BACKUP_DIR" "$CLIENT_DIR"
+  install -d -m 0700 "$CLIENT_DIR/shadowsocks" "$CLIENT_DIR/vless-reality" "$CLIENT_DIR/hysteria2"
+
+  if runtime_account_exists; then
+    chown root:"$RUNTIME_GROUP" "$STATE_DIR" "$CERT_DIR" "$(dirname "$CONFIG_FILE")"
+  fi
 }
 
 ensure_realm_dirs() {
-  mkdir -p "$REALM_DIR" "$STATE_DIR"
+  install -d -m 0750 "$REALM_DIR" "$STATE_DIR"
+  if runtime_account_exists; then
+    chown root:"$RUNTIME_GROUP" "$REALM_DIR" "$STATE_DIR"
+  fi
+}
+
+runtime_account_exists() {
+  id -u "$RUNTIME_USER" >/dev/null 2>&1 &&
+    { getent group "$RUNTIME_GROUP" >/dev/null 2>&1 || grep -q "^${RUNTIME_GROUP}:" /etc/group 2>/dev/null; }
+}
+
+ensure_runtime_account() {
+  local nologin_shell
+
+  if ! { getent group "$RUNTIME_GROUP" >/dev/null 2>&1 || grep -q "^${RUNTIME_GROUP}:" /etc/group 2>/dev/null; }; then
+    if have_cmd groupadd; then
+      groupadd --system "$RUNTIME_GROUP"
+    elif have_cmd addgroup; then
+      addgroup -S "$RUNTIME_GROUP"
+    else
+      die "无法创建 sing-box 低权限运行组：缺少 groupadd/addgroup。"
+    fi
+  fi
+
+  if ! id -u "$RUNTIME_USER" >/dev/null 2>&1; then
+    nologin_shell="$(command -v nologin 2>/dev/null || true)"
+    nologin_shell="${nologin_shell:-/sbin/nologin}"
+    if have_cmd useradd; then
+      useradd --system --gid "$RUNTIME_GROUP" --home-dir /nonexistent --shell "$nologin_shell" "$RUNTIME_USER"
+    elif have_cmd adduser; then
+      adduser -S -D -H -G "$RUNTIME_GROUP" -s "$nologin_shell" "$RUNTIME_USER"
+    else
+      die "无法创建 sing-box 低权限运行用户：缺少 useradd/adduser。"
+    fi
+  fi
+
+  runtime_account_exists || die "sing-box 低权限运行用户创建失败。"
+  ensure_dirs
+  ensure_realm_dirs
+}
+
+run_as_runtime() {
+  ensure_runtime_account
+  if have_cmd runuser; then
+    runuser -u "$RUNTIME_USER" -- "$@"
+  elif have_cmd su-exec; then
+    su-exec "${RUNTIME_USER}:${RUNTIME_GROUP}" "$@"
+  else
+    die "缺少 runuser 或 su-exec，无法以低权限运行 sing-box/Realm。"
+  fi
+}
+
+ensure_openrc_low_port_capability() {
+  local binary_path=$1 label=$2
+  has_openrc && ! has_systemd || return 0
+  [[ -x "$binary_path" ]] || return 0
+  have_cmd setcap || die "OpenRC 下需要 setcap 才能让低权限 ${label} 监听 1-1023 端口。"
+  setcap 'cap_net_bind_service=+ep' "$binary_path" ||
+    die "无法为 ${label} 设置低端口监听能力，已拒绝回退为 root 运行。"
 }
 
 ui_pause() {
@@ -446,22 +531,22 @@ EOF
 install_dependencies() {
   detect_pkg_manager
 
-  case "$PKG_MANAGER" in
-    apk)
-      apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc coreutils findutils iptables iproute2
+    case "$PKG_MANAGER" in
+      apk)
+      apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc coreutils findutils iptables iproute2 su-exec libcap-setcap
       ;;
     apt)
       export DEBIAN_FRONTEND=noninteractive
       normalize_debian_apt_sources || warn "Debian apt 源自动修复失败，将继续尝试 apt-get update。"
       apt-get update -y
-      apt-get install -y curl jq openssl ca-certificates git tar gzip iproute2 iptables
+      apt-get install -y curl jq openssl ca-certificates git tar gzip iproute2 iptables gnupg
       ;;
     dnf)
-      dnf install -y curl jq openssl ca-certificates git tar gzip iproute iptables
+      dnf install -y curl jq openssl ca-certificates git tar gzip iproute iptables gnupg2
       ;;
     yum)
       yum install -y epel-release || true
-      yum install -y curl jq openssl ca-certificates git tar gzip iproute iptables
+      yum install -y curl jq openssl ca-certificates git tar gzip iproute iptables gnupg2
       ;;
     *)
       die "暂不支持自动安装依赖，请手动安装 bash、curl、jq、openssl、ca-certificates、git、tar、gzip 后再运行。"
@@ -470,10 +555,25 @@ install_dependencies() {
 }
 
 install_sing_box_apt_repo() {
+  local key_tmp key_fingerprint
   normalize_debian_apt_sources || warn "Debian apt 源自动修复失败，将继续尝试安装 sing-box。"
   mkdir -p /etc/apt/keyrings || return 1
-  curl -fsSL https://sing-box.app/gpg.key -o /etc/apt/keyrings/sagernet.asc || return 1
-  chmod a+r /etc/apt/keyrings/sagernet.asc || return 1
+  key_tmp="$(mktemp "$TMP_DIR/sagernet-key.XXXXXX")" || return 1
+  curl -fsSL https://sing-box.app/gpg.key -o "$key_tmp" || {
+    rm -f "$key_tmp"
+    return 1
+  }
+  key_fingerprint="$(gpg --show-keys --with-colons "$key_tmp" 2>/dev/null | awk -F: '$1 == "fpr" {print toupper($10); exit}')"
+  if [[ "$key_fingerprint" != "$SAGERNET_GPG_FINGERPRINT" ]]; then
+    rm -f "$key_tmp"
+    warn "SagerNet 软件源签名密钥指纹不匹配，已拒绝安装。"
+    return 1
+  fi
+  install -m 0644 "$key_tmp" /etc/apt/keyrings/sagernet.asc || {
+    rm -f "$key_tmp"
+    return 1
+  }
+  rm -f "$key_tmp"
   cat >/etc/apt/sources.list.d/sagernet.sources <<'EOF' || return 1
 Types: deb
 URIs: https://deb.sagernet.org/
@@ -510,96 +610,6 @@ install_sing_box_rpm_repo() {
   return 1
 }
 
-install_sing_box_official_script() {
-  local tmp_script
-  tmp_script="$(mktemp "$TMP_DIR/sing-box-official-install.XXXXXX")" || return 1
-  if ! download_to_file "$tmp_script" "https://sing-box.app/install.sh"; then
-    rm -f "$tmp_script"
-    return 1
-  fi
-
-  sh "$tmp_script" || {
-    rm -f "$tmp_script"
-    return 1
-  }
-  rm -f "$tmp_script"
-}
-
-cleanup_sing_box_install_dir() {
-  local work_dir=${1:-}
-
-  [[ -n "$work_dir" && "$work_dir" == "$TMP_DIR"/sing-box-install.* ]] || return 1
-  rm -rf -- "$work_dir"
-}
-
-install_sing_box_alpine_release() {
-  local alpine_arch release_arch release_json version archive_name archive_path archive_url
-  local work_dir extract_dir binary_path
-  local release_api="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-
-  alpine_arch="$(apk --print-arch)" || return 1
-  case "$alpine_arch" in
-    x86_64) release_arch="amd64-musl" ;;
-    x86) release_arch="386-musl" ;;
-    aarch64) release_arch="arm64-musl" ;;
-    armv7) release_arch="armv7-musl" ;;
-    loongarch64) release_arch="loong64-musl" ;;
-    riscv64) release_arch="riscv64-musl" ;;
-    *)
-      warn "暂不支持该 Alpine 架构：$alpine_arch"
-      return 1
-      ;;
-  esac
-
-  release_json="$(mktemp "$TMP_DIR/sing-box-release.XXXXXX")" || return 1
-
-  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    if ! curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" "$release_api" -o "$release_json"; then
-      rm -f "$release_json"
-      return 1
-    fi
-  elif ! download_to_file "$release_json" "$release_api"; then
-    rm -f "$release_json"
-    return 1
-  fi
-
-  if ! version="$(jq -r '.tag_name // empty' "$release_json")"; then
-    rm -f "$release_json"
-    return 1
-  fi
-  rm -f "$release_json"
-  version="${version#v}"
-  [[ -n "$version" ]] || return 1
-
-  work_dir="$(mktemp -d "$TMP_DIR/sing-box-install.XXXXXX")" || return 1
-  archive_name="sing-box-${version}-linux-${release_arch}.tar.gz"
-  archive_path="$work_dir/$archive_name"
-  archive_url="https://github.com/SagerNet/sing-box/releases/download/v${version}/${archive_name}"
-  extract_dir="$work_dir/sing-box-${version}-linux-${release_arch}"
-  binary_path="$extract_dir/sing-box"
-
-  log "下载 sing-box ${version} Alpine musl 二进制包..."
-  if ! download_to_file "$archive_path" "$archive_url"; then
-    cleanup_sing_box_install_dir "$work_dir"
-    return 1
-  fi
-
-  if ! tar -xzf "$archive_path" -C "$work_dir" || [[ ! -f "$binary_path" ]]; then
-    cleanup_sing_box_install_dir "$work_dir"
-    return 1
-  fi
-
-  if ! mkdir -p /usr/local/bin; then
-    cleanup_sing_box_install_dir "$work_dir"
-    return 1
-  fi
-  if ! install -m 755 "$binary_path" /usr/local/bin/sing-box; then
-    cleanup_sing_box_install_dir "$work_dir"
-    return 1
-  fi
-  cleanup_sing_box_install_dir "$work_dir"
-}
-
 install_sing_box() {
   local installed=0 version_text=""
 
@@ -625,13 +635,7 @@ install_sing_box() {
   esac
 
   if (( ! installed )); then
-    if [[ "$PKG_MANAGER" == "apk" ]]; then
-      log "官方仓库安装未完成，改用 sing-box 官方 Alpine musl 二进制包。"
-      install_sing_box_alpine_release || die "安装官方 sing-box Alpine 二进制包失败。"
-    else
-      log "官方仓库安装未完成，改用 sing-box 官方安装脚本。"
-      install_sing_box_official_script || die "安装官方 sing-box 失败。"
-    fi
+    die "sing-box 签名软件包安装失败；为避免以 root 执行未校验的远程脚本或二进制，已拒绝不安全的后备安装。"
   fi
 
   hash -r 2>/dev/null || true
@@ -639,7 +643,7 @@ install_sing_box() {
   ensure_sing_box_service
   enable_sing_box_service
 
-  version_text="$(sing-box version 2>/dev/null | head -n 1 || true)"
+  version_text="$(run_as_runtime sing-box version 2>/dev/null | head -n 1 || true)"
   log "sing-box 已安装：${version_text:-version unknown}"
 }
 
@@ -735,6 +739,7 @@ sing_box_check_bin() {
 ensure_sing_box_service() {
   local sing_box_bin service_manager
 
+  ensure_runtime_account
   service_manager="$(sing_box_service_manager)"
   [[ "$service_manager" != "none" ]] || return 0
 
@@ -742,8 +747,8 @@ ensure_sing_box_service() {
   [[ -n "$sing_box_bin" ]] || return 0
 
   if [[ "$service_manager" == "systemd" ]]; then
-    service_exists && return 0
-    cat >/etc/systemd/system/sing-box.service <<EOF
+    if ! service_exists; then
+      cat >/etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=sing-box service
 Documentation=https://sing-box.sagernet.org
@@ -761,11 +766,39 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
+    fi
+
+    install -d -m 0755 "$SING_BOX_FIREWALL_DROPIN_DIR"
+    cat >"$SING_BOX_HARDENING_DROPIN_FILE" <<EOF
+[Service]
+User=${RUNTIME_USER}
+Group=${RUNTIME_GROUP}
+UMask=0077
+WorkingDirectory=/
+ExecStart=
+ExecStart=${sing_box_bin} run -c ${CONFIG_FILE}
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+EOF
 
     systemctl daemon-reload >/dev/null 2>&1 || true
     return 0
   fi
 
+  ensure_openrc_low_port_capability "$sing_box_bin" "sing-box"
   cat >"$SING_BOX_OPENRC_SERVICE_FILE" <<EOF
 #!/sbin/openrc-run
 
@@ -773,6 +806,7 @@ name="sing-box"
 description="sing-box service"
 command="${sing_box_bin}"
 command_args="run -c ${CONFIG_FILE}"
+command_user="${RUNTIME_USER}:${RUNTIME_GROUP}"
 command_background="yes"
 pidfile="/run/sing-box.pid"
 output_log="${SING_BOX_OPENRC_LOG_FILE}"
@@ -785,7 +819,7 @@ depend() {
 
 start_pre() {
   checkpath --directory --mode 0755 /run
-  checkpath --file --mode 0644 "${SING_BOX_OPENRC_LOG_FILE}"
+  checkpath --file --owner "${RUNTIME_USER}:${RUNTIME_GROUP}" --mode 0640 "${SING_BOX_OPENRC_LOG_FILE}"
 }
 EOF
   chmod 755 "$SING_BOX_OPENRC_SERVICE_FILE"
@@ -912,6 +946,7 @@ realm_service_manager() {
 
 ensure_realm_service() {
   local service_manager
+  ensure_runtime_account
   service_manager="$(realm_service_manager)"
   [[ "$service_manager" != "none" ]] || return 0
 
@@ -925,10 +960,28 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=${RUNTIME_USER}
+Group=${RUNTIME_GROUP}
+UMask=0077
 ExecStart=${REALM_BIN} -c ${REALM_CONFIG_FILE}
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=1048576
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
@@ -938,6 +991,7 @@ EOF
     return 0
   fi
 
+  ensure_openrc_low_port_capability "$REALM_BIN" "Realm"
   cat >"$REALM_OPENRC_SERVICE_FILE" <<EOF
 #!/sbin/openrc-run
 
@@ -945,6 +999,7 @@ name="realm"
 description="Realm relay service"
 command="${REALM_BIN}"
 command_args="-c ${REALM_CONFIG_FILE}"
+command_user="${RUNTIME_USER}:${RUNTIME_GROUP}"
 command_background="yes"
 pidfile="/run/realm.pid"
 output_log="${REALM_OPENRC_LOG_FILE}"
@@ -957,7 +1012,7 @@ depend() {
 
 start_pre() {
   checkpath --directory --mode 0755 /run
-  checkpath --file --mode 0644 "${REALM_OPENRC_LOG_FILE}"
+  checkpath --file --owner "${RUNTIME_USER}:${RUNTIME_GROUP}" --mode 0640 "${REALM_OPENRC_LOG_FILE}"
 }
 EOF
   chmod 755 "$REALM_OPENRC_SERVICE_FILE"
@@ -1083,19 +1138,38 @@ detect_realm_arch() {
 }
 
 install_realm_binary() {
-  local arch tmp_dir archive_path extracted_bin
+  local arch tmp_dir archive_path extracted_bin release_json asset_name asset_url expected_digest actual_digest
   arch="$(detect_realm_arch)" || die "当前架构暂不支持自动安装 Realm：$(uname -m)"
+  ensure_runtime_account
   tmp_dir="$(mktemp -d "$TMP_DIR/realm-install.XXXXXX")" || return 1
   archive_path="$tmp_dir/realm.tar.gz"
+  release_json="$tmp_dir/release.json"
+  asset_name="realm-${arch}.tar.gz"
 
-  if ! download_to_file \
-    "$archive_path" \
-    "https://github.com/zhboner/realm/releases/latest/download/realm-${arch}.tar.gz"; then
+  if ! download_to_file "$release_json" "https://api.github.com/repos/zhboner/realm/releases/latest"; then
+    rm -rf "$tmp_dir"
+    die "读取 Realm 官方发布元数据失败，请稍后重试。"
+  fi
+  asset_url="$(jq -r --arg name "$asset_name" '.assets[]? | select(.name == $name) | .browser_download_url // empty' "$release_json" | head -n 1)"
+  expected_digest="$(jq -r --arg name "$asset_name" '.assets[]? | select(.name == $name) | .digest // empty' "$release_json" | head -n 1)"
+  expected_digest="${expected_digest#sha256:}"
+  [[ -n "$asset_url" && "$expected_digest" =~ ^[A-Fa-f0-9]{64}$ ]] || {
+    rm -rf "$tmp_dir"
+    die "Realm 官方发布未提供可用的 SHA-256 摘要，已拒绝安装。"
+  }
+  download_to_file "$archive_path" "$asset_url" || {
     rm -rf "$tmp_dir"
     die "下载 Realm 失败，请稍后重试。"
-  fi
+  }
+  actual_digest="$(sha256_file "$archive_path")"
+  [[ "$actual_digest" == "${expected_digest,,}" ]] || {
+    rm -rf "$tmp_dir"
+    die "Realm 下载包 SHA-256 校验失败，已拒绝安装。"
+  }
 
-  if ! tar -xzf "$archive_path" -C "$tmp_dir"; then
+  chown -R "$RUNTIME_USER":"$RUNTIME_GROUP" "$tmp_dir"
+
+  if ! run_as_runtime tar -xzf "$archive_path" -C "$tmp_dir"; then
     rm -rf "$tmp_dir"
     return 1
   fi
@@ -1170,7 +1244,7 @@ generate_random_service_port_excluding() {
 generate_base64_bytes() {
   local length=${1:-32}
   if have_cmd sing-box; then
-    sing-box generate rand --base64 "$length" | tr -d '\n'
+    run_as_runtime sing-box generate rand --base64 "$length" | tr -d '\n'
   else
     openssl rand -base64 "$length" | tr -d '\n'
   fi
@@ -1178,7 +1252,7 @@ generate_base64_bytes() {
 
 generate_reality_keypair() {
   local output private_key public_key
-  output="$(sing-box generate reality-keypair 2>/dev/null || true)"
+  output="$(run_as_runtime sing-box generate reality-keypair 2>/dev/null || true)"
   private_key="$(printf '%s\n' "$output" | awk -F': ' '/PrivateKey/ {print $2; exit}')"
   public_key="$(printf '%s\n' "$output" | awk -F': ' '/PublicKey/ {print $2; exit}')"
 
@@ -1189,7 +1263,7 @@ generate_reality_keypair() {
 
 backup_config_if_exists() {
   if [[ -f "$CONFIG_FILE" ]]; then
-    cp "$CONFIG_FILE" "$BACKUP_DIR/config-$(date +%Y%m%d-%H%M%S).json"
+    install -m 0600 "$CONFIG_FILE" "$BACKUP_DIR/config-$(date +%Y%m%d-%H%M%S).json"
   fi
 }
 
@@ -1262,6 +1336,8 @@ init_state_file() {
 }
 EOF
 
+  chmod 0600 "$STATE_FILE"
+
   migrate_realm_tcp_only
 }
 
@@ -1273,7 +1349,8 @@ state_jq() {
   local tmp_file
   tmp_file="$(mktemp "$TMP_DIR/singbox-state.XXXXXX")"
   jq "$@" "$STATE_FILE" >"$tmp_file"
-  mv "$tmp_file" "$STATE_FILE"
+  install -m 0600 "$tmp_file" "$STATE_FILE"
+  rm -f "$tmp_file"
 }
 
 cleanup_removed_traffic_state() {
@@ -1559,6 +1636,8 @@ init_realm_state_file() {
   "rules": []
 }
 EOF
+
+  chmod 0600 "$REALM_STATE_FILE"
 }
 
 realm_state_get() {
@@ -1569,7 +1648,8 @@ realm_state_jq() {
   local tmp_file
   tmp_file="$(mktemp "$TMP_DIR/realm-state.XXXXXX")"
   jq "$@" "$REALM_STATE_FILE" >"$tmp_file"
-  mv "$tmp_file" "$REALM_STATE_FILE"
+  install -m 0600 "$tmp_file" "$REALM_STATE_FILE"
+  rm -f "$tmp_file"
 }
 
 uri_encode() {
@@ -1915,6 +1995,8 @@ ensure_hysteria_cert() {
   mkdir -p "$(dirname "$cert_path")" "$(dirname "$key_path")"
 
   if [[ -f "$cert_path" && -f "$key_path" ]]; then
+    chown root:"$RUNTIME_GROUP" "$cert_path" "$key_path"
+    chmod 0640 "$cert_path" "$key_path"
     return 0
   fi
 
@@ -1948,7 +2030,8 @@ EOF
     -out "$cert_path" \
     -config "$openssl_conf" >/dev/null 2>&1
 
-  chmod 600 "$key_path"
+  chown root:"$RUNTIME_GROUP" "$cert_path" "$key_path"
+  chmod 0640 "$cert_path" "$key_path"
   rm -f "$openssl_conf"
 }
 
@@ -2201,10 +2284,14 @@ render_config() {
       ],
       rules: [
         (
-          if .protocols.shadowsocks.enabled then
+          if (.protocols.shadowsocks.enabled or .protocols.vless_reality.enabled or .protocols.hysteria2.enabled) then
             [
               {
-                inbound: ["ss-in"],
+                inbound: [
+                  if .protocols.shadowsocks.enabled then "ss-in" else empty end,
+                  if .protocols.vless_reality.enabled then "vless-reality-in" else empty end,
+                  if .protocols.hysteria2.enabled then "hy2-in" else empty end
+                ],
                 ip_cidr: [
                   "169.254.169.254/32",
                   "100.100.100.200/32",
@@ -2213,7 +2300,11 @@ render_config() {
                 action: "reject"
               },
               {
-                inbound: ["ss-in"],
+                inbound: [
+                  if .protocols.shadowsocks.enabled then "ss-in" else empty end,
+                  if .protocols.vless_reality.enabled then "vless-reality-in" else empty end,
+                  if .protocols.hysteria2.enabled then "hy2-in" else empty end
+                ],
                 ip_is_private: true,
                 action: "reject"
               }
@@ -2242,15 +2333,23 @@ render_config() {
             }
         ),
         (
-          if .protocols.shadowsocks.enabled then
+          if (.protocols.shadowsocks.enabled or .protocols.vless_reality.enabled or .protocols.hysteria2.enabled) then
             [
               {
-                inbound: ["ss-in"],
+                inbound: [
+                  if .protocols.shadowsocks.enabled then "ss-in" else empty end,
+                  if .protocols.vless_reality.enabled then "vless-reality-in" else empty end,
+                  if .protocols.hysteria2.enabled then "hy2-in" else empty end
+                ],
                 action: "resolve",
                 server: "local"
               },
               {
-                inbound: ["ss-in"],
+                inbound: [
+                  if .protocols.shadowsocks.enabled then "ss-in" else empty end,
+                  if .protocols.vless_reality.enabled then "vless-reality-in" else empty end,
+                  if .protocols.hysteria2.enabled then "hy2-in" else empty end
+                ],
                 ip_cidr: [
                   "169.254.169.254/32",
                   "100.100.100.200/32",
@@ -2259,7 +2358,11 @@ render_config() {
                 action: "reject"
               },
               {
-                inbound: ["ss-in"],
+                inbound: [
+                  if .protocols.shadowsocks.enabled then "ss-in" else empty end,
+                  if .protocols.vless_reality.enabled then "vless-reality-in" else empty end,
+                  if .protocols.hysteria2.enabled then "hy2-in" else empty end
+                ],
                 ip_is_private: true,
                 action: "reject"
               }
@@ -2277,6 +2380,27 @@ enabled_protocol_count() {
   state_get '[.protocols[] | select(.enabled == true)] | length'
 }
 
+add_managed_iptables_rule() {
+  local command_name=$1 insert_position
+  shift
+
+  insert_position="$("$command_name" -S INPUT 2>/dev/null | awk '
+    $1 == "-A" && $2 == "INPUT" {
+      position++
+      if ($3 == "-j" && ($4 == "DROP" || $4 == "REJECT")) {
+        print position
+        exit
+      }
+    }
+  ')"
+
+  if [[ "$insert_position" =~ ^[0-9]+$ ]]; then
+    "$command_name" -I INPUT "$insert_position" "$@"
+  else
+    "$command_name" -A INPUT "$@"
+  fi
+}
+
 allow_iptables_port() {
   local port=$1
   local protocol=$2
@@ -2286,24 +2410,24 @@ allow_iptables_port() {
   if [[ "$source" == "*" ]]; then
     if have_cmd iptables; then
       applied=true
-      iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 ||
-        iptables -I INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 || return 1
+      iptables -C INPUT -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1 ||
+        add_managed_iptables_rule iptables -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1 || return 1
     fi
     if have_cmd ip6tables; then
       applied=true
-      ip6tables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 ||
-        ip6tables -I INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 || return 1
+      ip6tables -C INPUT -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1 ||
+        add_managed_iptables_rule ip6tables -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1 || return 1
     fi
   elif [[ "$source" == *:* ]]; then
     if have_cmd ip6tables; then
       applied=true
-      ip6tables -C INPUT -p "$protocol" -s "$source" --dport "$port" -j ACCEPT >/dev/null 2>&1 ||
-        ip6tables -I INPUT -p "$protocol" -s "$source" --dport "$port" -j ACCEPT >/dev/null 2>&1 || return 1
+      ip6tables -C INPUT -p "$protocol" -s "$source" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1 ||
+        add_managed_iptables_rule ip6tables -p "$protocol" -s "$source" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1 || return 1
     fi
   elif have_cmd iptables; then
     applied=true
-    iptables -C INPUT -p "$protocol" -s "$source" --dport "$port" -j ACCEPT >/dev/null 2>&1 ||
-      iptables -I INPUT -p "$protocol" -s "$source" --dport "$port" -j ACCEPT >/dev/null 2>&1 || return 1
+    iptables -C INPUT -p "$protocol" -s "$source" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1 ||
+      add_managed_iptables_rule iptables -p "$protocol" -s "$source" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1 || return 1
   fi
   [[ "$applied" == "true" ]]
 }
@@ -2312,6 +2436,33 @@ remove_iptables_port() {
   local port=$1
   local protocol=$2
   local source=${3:-*}
+
+  if [[ "$source" == "*" ]]; then
+    if have_cmd iptables; then
+      while iptables -C INPUT -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1; do
+        iptables -D INPUT -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1 || break
+      done
+    fi
+    if have_cmd ip6tables; then
+      while ip6tables -C INPUT -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1; do
+        ip6tables -D INPUT -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1 || break
+      done
+    fi
+  elif [[ "$source" == *:* ]]; then
+    if have_cmd ip6tables; then
+      while ip6tables -C INPUT -p "$protocol" -s "$source" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1; do
+        ip6tables -D INPUT -p "$protocol" -s "$source" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1 || break
+      done
+    fi
+  elif have_cmd iptables; then
+    while iptables -C INPUT -p "$protocol" -s "$source" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1; do
+      iptables -D INPUT -p "$protocol" -s "$source" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1 || break
+    done
+  fi
+}
+
+remove_legacy_iptables_port() {
+  local port=$1 protocol=$2 source=${3:-*}
 
   if [[ "$source" == "*" ]]; then
     if have_cmd iptables; then
@@ -2335,6 +2486,34 @@ remove_iptables_port() {
       iptables -D INPUT -p "$protocol" -s "$source" --dport "$port" -j ACCEPT >/dev/null 2>&1 || break
     done
   fi
+}
+
+migrate_legacy_iptables_rules() {
+  local owner protocol port source rules
+  [[ -e "$IPTABLES_MIGRATION_MARKER" ]] && return 0
+
+  rules="$(mktemp "$TMP_DIR/firewall-legacy.XXXXXX")" || return 1
+  if [[ -s "$FIREWALL_STATE_FILE" ]]; then
+    cp "$FIREWALL_STATE_FILE" "$rules"
+  fi
+
+  while IFS=$'\t' read -r owner protocol port source; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    remove_legacy_iptables_port "$port" "$protocol" "${source:-*}"
+    if have_cmd iptables; then
+      while iptables -C INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1; do
+        iptables -D INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 || break
+      done
+    fi
+    if have_cmd ip6tables; then
+      while ip6tables -C INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1; do
+        ip6tables -D INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 || break
+      done
+    fi
+  done <"$rules"
+  rm -f "$rules"
+  : >"$IPTABLES_MIGRATION_MARKER"
+  chmod 0600 "$IPTABLES_MIGRATION_MARKER"
 }
 
 persist_openrc_firewall_rules() {
@@ -2459,13 +2638,13 @@ remove_firewall_restriction() {
     firewall-cmd --permanent --remove-rich-rule="$rich_rule" >/dev/null 2>&1 || true
   fi
   if have_cmd iptables; then
-    while iptables -C INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1; do
-      iptables -D INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 || break
+    while iptables -C INPUT -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j DROP >/dev/null 2>&1; do
+      iptables -D INPUT -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j DROP >/dev/null 2>&1 || break
     done
   fi
   if have_cmd ip6tables; then
-    while ip6tables -C INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1; do
-      ip6tables -D INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 || break
+    while ip6tables -C INPUT -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j DROP >/dev/null 2>&1; do
+      ip6tables -D INPUT -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j DROP >/dev/null 2>&1 || break
     done
   fi
 }
@@ -2481,13 +2660,13 @@ add_firewall_restriction() {
       firewall-cmd --permanent --add-rich-rule="$rich_rule" >/dev/null 2>&1
       ;;
     iptables)
-      if have_cmd iptables; then
-        iptables -C INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 ||
-          iptables -I INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 || return 1
+        if have_cmd iptables; then
+          iptables -C INPUT -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j DROP >/dev/null 2>&1 ||
+          add_managed_iptables_rule iptables -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j DROP >/dev/null 2>&1 || return 1
       fi
-      if have_cmd ip6tables; then
-        ip6tables -C INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 ||
-          ip6tables -I INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 || return 1
+        if have_cmd ip6tables; then
+          ip6tables -C INPUT -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j DROP >/dev/null 2>&1 ||
+          add_managed_iptables_rule ip6tables -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j DROP >/dev/null 2>&1 || return 1
       fi
       ;;
   esac
@@ -2572,15 +2751,15 @@ firewall_allow_rule_exists() {
     iptables)
       if [[ "$source" == "*" ]]; then
         if have_cmd iptables; then
-          iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 || return 1
+          iptables -C INPUT -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1 || return 1
         fi
         if have_cmd ip6tables; then
-          ip6tables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 || return 1
+          ip6tables -C INPUT -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1 || return 1
         fi
       elif [[ "$source" == *:* ]]; then
-        have_cmd ip6tables && ip6tables -C INPUT -p "$protocol" -s "$source" --dport "$port" -j ACCEPT >/dev/null 2>&1
+        have_cmd ip6tables && ip6tables -C INPUT -p "$protocol" -s "$source" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1
       else
-        have_cmd iptables && iptables -C INPUT -p "$protocol" -s "$source" --dport "$port" -j ACCEPT >/dev/null 2>&1
+        have_cmd iptables && iptables -C INPUT -p "$protocol" -s "$source" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j ACCEPT >/dev/null 2>&1
       fi
       ;;
     *)
@@ -2602,10 +2781,10 @@ firewall_restriction_exists() {
       ;;
     iptables)
       if have_cmd iptables; then
-        iptables -C INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 || return 1
+        iptables -C INPUT -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j DROP >/dev/null 2>&1 || return 1
       fi
       if have_cmd ip6tables; then
-        ip6tables -C INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 || return 1
+        ip6tables -C INPUT -p "$protocol" --dport "$port" -m comment --comment "$IPTABLES_RULE_COMMENT" -j DROP >/dev/null 2>&1 || return 1
       fi
       ;;
     *)
@@ -2672,6 +2851,14 @@ sync_managed_firewall_rules() {
     return 1
   fi
 
+  backend="$(active_firewall_backend)"
+  if [[ "$backend" == "iptables" ]]; then
+    migrate_legacy_iptables_rules || {
+      rm -f "$old_rules" "$desired_rules"
+      return 1
+    }
+  fi
+
   while IFS=$'\t' read -r owner protocol port source; do
     [[ -n "$protocol" && -n "$port" ]] || continue
     remove_firewall_rule "$protocol" "$port" "${source:-*}"
@@ -2684,7 +2871,6 @@ sync_managed_firewall_rules() {
     remove_firewall_restriction "$protocol" "$port"
   done < <(awk -F '\t' '{print $2 "\t" $3}' "$desired_rules" | sort -u)
 
-  backend="$(active_firewall_backend)"
   if [[ "$backend" == "none" && -s "$desired_rules" ]]; then
     warn "未检测到可用的 UFW、firewalld 或 iptables，无法应用脚本托管端口规则。"
     install -m 600 "$desired_rules" "$FIREWALL_STATE_FILE"
@@ -2692,17 +2878,17 @@ sync_managed_firewall_rules() {
     [[ "$strict" == "false" ]] && return 0
     return 1
   fi
+  while IFS=$'\t' read -r owner protocol port source; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    add_firewall_rule "$backend" "$protocol" "$port" "${source:-*}" || failed=true
+  done <"$desired_rules"
+
   if [[ "$backend" == "iptables" ]]; then
     while IFS=$'\t' read -r protocol port; do
       [[ -n "$protocol" && -n "$port" ]] || continue
       add_firewall_restriction "$backend" "$protocol" "$port" || failed=true
     done < <(awk -F '\t' '$4 != "*" {print $2 "\t" $3}' "$desired_rules" | sort -u)
   fi
-
-  while IFS=$'\t' read -r owner protocol port source; do
-    [[ -n "$protocol" && -n "$port" ]] || continue
-    add_firewall_rule "$backend" "$protocol" "$port" "${source:-*}" || failed=true
-  done <"$desired_rules"
 
   if [[ "$backend" == "ufw" || "$backend" == "firewalld" ]]; then
     while IFS=$'\t' read -r protocol port; do
@@ -2797,6 +2983,53 @@ port_is_listening() {
       return 1
       ;;
   esac
+}
+
+desired_sing_box_listeners() {
+  jq -r '
+    (if .protocols.shadowsocks.enabled then ["tcp", (.protocols.shadowsocks.port | tostring), "Shadowsocks"] | @tsv else empty end),
+    (if .protocols.vless_reality.enabled then ["tcp", (.protocols.vless_reality.port | tostring), "VLESS + Reality"] | @tsv else empty end),
+    (if .protocols.hysteria2.enabled then ["udp", (.protocols.hysteria2.port | tostring), "Hysteria2"] | @tsv else empty end)
+  ' "$STATE_FILE"
+}
+
+validate_sing_box_listener_ports_available() {
+  local rows duplicates protocol port label
+  have_cmd ss || {
+    printf '缺少 ss 命令，无法在放行防火墙前检查端口冲突。\n'
+    return 1
+  }
+
+  rows="$(desired_sing_box_listeners)" || return 1
+  duplicates="$(printf '%s\n' "$rows" | awk -F '\t' 'NF >= 2 {key=$1 FS $2; count[key]++; labels[key]=labels[key] (labels[key] ? ", " : "") $3} END {for (key in count) if (count[key] > 1) print key FS labels[key]}')"
+  if [[ -n "$duplicates" ]]; then
+    printf '配置中的协议监听端口发生冲突：\n%s\n' "$duplicates"
+    return 1
+  fi
+
+  while IFS=$'\t' read -r protocol port label; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    if port_is_listening "$protocol" "$port"; then
+      printf '%s 计划使用的 %s/%s 已被其他进程占用。\n' "$label" "$protocol" "$port"
+      return 1
+    fi
+  done <<<"$rows"
+}
+
+validate_realm_listener_ports_available() {
+  local port
+  have_cmd ss || {
+    printf '缺少 ss 命令，无法在放行防火墙前检查 Realm 端口冲突。\n'
+    return 1
+  }
+
+  while IFS= read -r port; do
+    [[ -n "$port" ]] || continue
+    if port_is_listening tcp "$port"; then
+      printf 'Realm 计划使用的 tcp/%s 已被其他进程占用。\n' "$port"
+      return 1
+    fi
+  done < <(realm_managed_ports)
 }
 
 save_desired_firewall_state() {
@@ -2986,17 +3219,17 @@ open_active_managed_ports() {
     remove_firewall_restriction "$protocol" "$port"
   done < <(awk -F '\t' '{print $2 "\t" $3}' "$active_rules" | sort -u)
 
-  if [[ "$backend" == "iptables" ]]; then
-    while IFS=$'\t' read -r protocol port; do
-      add_firewall_restriction "$backend" "$protocol" "$port" || failed=true
-    done < <(awk -F '\t' '$4 != "*" {print $2 "\t" $3}' "$active_rules" | sort -u)
-  fi
-
   while IFS=$'\t' read -r owner protocol port source; do
     if ! add_firewall_rule "$backend" "$protocol" "$port" "${source:-*}"; then
       failed=true
     fi
   done <"$active_rules"
+
+  if [[ "$backend" == "iptables" ]]; then
+    while IFS=$'\t' read -r protocol port; do
+      add_firewall_restriction "$backend" "$protocol" "$port" || failed=true
+    done < <(awk -F '\t' '$4 != "*" {print $2 "\t" $3}' "$active_rules" | sort -u)
+  fi
 
   if [[ "$backend" == "ufw" || "$backend" == "firewalld" ]]; then
     while IFS=$'\t' read -r protocol port; do
@@ -3099,7 +3332,7 @@ write_realm_config_file() {
   local tmp_config
   tmp_config="$(mktemp "$TMP_DIR/realm-config.XXXXXX")" || return 1
   render_realm_config >"$tmp_config"
-  cp "$tmp_config" "$REALM_CONFIG_FILE"
+  install -o root -g "$RUNTIME_GROUP" -m 0640 "$tmp_config" "$REALM_CONFIG_FILE"
   rm -f "$tmp_config"
 }
 
@@ -3147,6 +3380,7 @@ migrate_realm_tcp_only() {
     return 0
   fi
 
+  ensure_runtime_account
   ensure_realm_dirs
   realm_state_jq --arg version "$SCRIPT_VERSION" --arg ts "$(utc_now)" '
     .global = (.global // {}) |
@@ -3188,7 +3422,7 @@ realm_apply_firewall_rules() {
 }
 
 apply_realm_config() {
-  local rule_count message
+  local rule_count message port_error realm_was_active=false
 
   ensure_realm_dirs
   init_realm_state_file
@@ -3200,7 +3434,16 @@ apply_realm_config() {
   fi
 
   if realm_service_exists && [[ "$(realm_service_active)" == "active" ]]; then
+    realm_was_active=true
     stop_realm_service_raw >/dev/null 2>&1 || true
+  fi
+
+  if ! port_error="$(validate_realm_listener_ports_available)"; then
+    if [[ "$realm_was_active" == "true" ]]; then
+      start_realm_service_raw >/dev/null 2>&1 || true
+    fi
+    ui_msg "Realm 配置未应用，防火墙未修改。${port_error}"
+    return 1
   fi
 
   write_realm_config_file
@@ -3334,10 +3577,17 @@ EOF
     done < <(jq -r '.protocols.hysteria2.users[]? | [.name, .password] | @tsv' "$STATE_FILE")
   fi
 
+  chmod 0600 "$all_file" "$links_file"
+  find "$CLIENT_DIR/shadowsocks" "$CLIENT_DIR/vless-reality" "$CLIENT_DIR/hysteria2" \
+    -maxdepth 1 -type f -name '*.txt' -exec chmod 0600 {} +
+
 }
 
 apply_config() {
-  local enabled_count tmp_config check_output success_text links_file check_bin
+  local enabled_count tmp_config check_output success_text links_file check_bin port_error
+  local service_was_active=false
+  ensure_runtime_account
+  ensure_sing_box_service
   enabled_count="$(enabled_protocol_count)"
 
   if ! prepare_managed_firewall; then
@@ -3364,17 +3614,30 @@ apply_config() {
     return 1
   }
   render_config >"$tmp_config"
+  chown root:"$RUNTIME_GROUP" "$tmp_config"
+  chmod 0640 "$tmp_config"
 
   check_bin="$(sing_box_check_bin 2>/dev/null || true)"
   if [[ -n "$check_bin" ]]; then
-    if ! check_output="$("$check_bin" check -c "$tmp_config" 2>&1)"; then
+    if ! check_output="$(run_as_runtime "$check_bin" check -c "$tmp_config" 2>&1)"; then
       rm -f "$tmp_config"
       ui_show_text "sing-box 配置检查失败" "$check_output"
       return 1
     fi
   fi
 
+  if service_exists && [[ "$(sing_box_service_active 2>/dev/null || true)" == "active" ]]; then
+    service_was_active=true
+  fi
   stop_sing_box
+  if ! port_error="$(validate_sing_box_listener_ports_available)"; then
+    rm -f "$tmp_config"
+    if [[ "$service_was_active" == "true" ]]; then
+      restart_sing_box >/dev/null 2>&1 || true
+    fi
+    ui_msg "配置未应用，防火墙未修改。${port_error}"
+    return 1
+  fi
   if ! apply_firewall_rules; then
     rm -f "$tmp_config"
     ui_msg "防火墙规则同步失败；原配置未替换，服务已保持停止，请先修复防火墙。"
@@ -3382,7 +3645,7 @@ apply_config() {
   fi
 
   backup_config_if_exists
-  cp "$tmp_config" "$CONFIG_FILE"
+  install -o root -g "$RUNTIME_GROUP" -m 0640 "$tmp_config" "$CONFIG_FILE"
   rm -f "$tmp_config"
 
   write_client_exports
@@ -3424,17 +3687,19 @@ repair_install() {
   install_dependencies
 
   manager_target="$MANAGER_SCRIPT_PATH"
-  if [[ "${SBOX_REPAIR_RESUMED:-0}" != "1" ]]; then
-    if install_manager_project_from_repo; then
+  if [[ "${SBOX_REPAIR_RESUMED:-0}" != "1" && -n "${SBOX_UPDATE_INDEX_SHA256:-}" ]]; then
+    if install_manager_project_from_repo "$SBOX_UPDATE_INDEX_SHA256"; then
       log "已从 GitHub 仓库拉取最新项目并更新到 ${manager_target}。"
       log "将使用新安装的脚本继续修复，以应用最新逻辑。"
       export SBOX_REPAIR_RESUMED=1
       exec "$manager_target" repair-install
     else
-      warn "从 GitHub 仓库更新项目失败，将继续使用当前脚本修复 sing-box 核心与配置。"
+      warn "远程脚本更新校验失败，将继续使用当前已安装脚本修复 sing-box 核心与配置。"
     fi
-  else
+  elif [[ "${SBOX_REPAIR_RESUMED:-0}" == "1" ]]; then
     log "已切换到 GitHub 最新脚本，继续修复 sing-box 核心与配置。"
+  else
+    log "未提供可信更新哈希，repair-install 将只修复核心、权限、服务和配置，不执行远程脚本。"
   fi
 
   install_sing_box
@@ -3459,7 +3724,7 @@ configure_shadowsocks() {
   port="$(prompt_number "Shadowsocks 端口" "请输入 Shadowsocks 监听端口" "$(generate_random_service_port_excluding "$vless_port")" 1 65535)" || return 1
   method="$(select_shadowsocks_method "$(state_get '.protocols.shadowsocks.method // "2022-blake3-aes-128-gcm"')")" || return 1
   current_sources="$(state_get '(.protocols.shadowsocks.allowed_sources // []) | join(",")')"
-  sources_input="$(prompt_nonempty "Shadowsocks 来源白名单" "请输入允许连接此 SS 端口的中转 IP/CIDR，多个用逗号分隔；公网直连需明确填写 0.0.0.0/0 和/或 ::/0" "$current_sources")" || return 1
+  sources_input="$(prompt_nonempty "Shadowsocks 来源白名单" "请输入允许连接此 SS 节点的来源公网 IP。中转场景请填写中转 VPS 的出口 IP，不要填写端口。多个 IP 使用英文逗号分隔。单个 IPv4 地址与 /32 写法效果相同。公网直连需明确填写 0.0.0.0/0 和/或 ::/0。" "$current_sources")" || return 1
   sources_json="$(build_allowed_sources_json "$sources_input")" || {
     ui_msg "来源白名单格式无效，请填写 IP 或 CIDR。"
     return 1
@@ -3497,7 +3762,7 @@ configure_shadowsocks_allowed_sources() {
   fi
 
   current_sources="$(state_get '(.protocols.shadowsocks.allowed_sources // []) | join(",")')"
-  sources_input="$(prompt_nonempty "Shadowsocks 来源白名单" "请输入允许连接 SS 端口的中转 IP/CIDR，多个用逗号分隔；公网直连需明确填写 0.0.0.0/0 和/或 ::/0" "$current_sources")" || return 1
+  sources_input="$(prompt_nonempty "Shadowsocks 来源白名单" "请输入允许连接此 SS 节点的来源公网 IP。中转场景请填写中转 VPS 的出口 IP，不要填写端口。多个 IP 使用英文逗号分隔。单个 IPv4 地址与 /32 写法效果相同。公网直连需明确填写 0.0.0.0/0 和/或 ::/0。" "$current_sources")" || return 1
   sources_json="$(build_allowed_sources_json "$sources_input")" || {
     ui_msg "来源白名单格式无效，请填写 IP 或 CIDR。"
     return 1
@@ -4358,7 +4623,7 @@ realm_install_or_reset() {
   install_realm_binary
   realm_state_jq --arg ts "$(utc_now)" '.rules = [] | .meta.updated_at = $ts'
   ensure_realm_service
-  render_realm_config >"$REALM_CONFIG_FILE"
+  write_realm_config_file
   sync_managed_firewall_rules
 
   if realm_service_exists; then
@@ -4633,54 +4898,52 @@ restart_realm_service() {
 }
 
 fetch_latest_project_from_repo() {
-  local tmp_dir repo_dir archive_path extracted_dir
-  local repo_url="https://github.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}.git"
-  local archive_url="https://github.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/archive/refs/heads/${SCRIPT_REPO_BRANCH}.tar.gz"
+  local expected_sha256=${1:-} tmp_dir project_dir index_url actual_sha256
+  [[ "$expected_sha256" =~ ^[A-Fa-f0-9]{64}$ ]] || {
+    warn "安全更新需要可信的 index.sh SHA-256，已拒绝下载并执行可变分支代码。"
+    return 1
+  }
+  expected_sha256="${expected_sha256,,}"
 
-  tmp_dir="$(mktemp -d "$TMP_DIR/sbox-repo.XXXXXX")"
-  repo_dir="$tmp_dir/repo"
-
-  if have_cmd git && git clone --depth 1 --branch "$SCRIPT_REPO_BRANCH" "$repo_url" "$repo_dir" >/dev/null 2>&1; then
-    printf '%s\n' "$repo_dir"
-    return 0
-  fi
-
-  archive_path="$tmp_dir/project.tar.gz"
-  if ! download_to_file "$archive_path" "$archive_url"; then
+  tmp_dir="$(mktemp -d "$TMP_DIR/sbox-repo.XXXXXX")" || return 1
+  project_dir="$tmp_dir/repo"
+  mkdir -p "$project_dir"
+  index_url="https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/${SCRIPT_REPO_BRANCH}/index.sh"
+  if ! download_to_file "$project_dir/index.sh" "$index_url"; then
     rm -rf "$tmp_dir"
     return 1
   fi
 
-  if ! tar -xzf "$archive_path" -C "$tmp_dir"; then
+  actual_sha256="$(sha256_file "$project_dir/index.sh")" || {
+    rm -rf "$tmp_dir"
+    return 1
+  }
+  if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+    warn "远程 index.sh 完整性校验失败：期望 ${expected_sha256}，实际 ${actual_sha256}。"
     rm -rf "$tmp_dir"
     return 1
   fi
-
-  extracted_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d -name "${SCRIPT_REPO_NAME}-*" | head -n 1)"
-  if [[ -z "$extracted_dir" || ! -f "$extracted_dir/index.sh" ]]; then
+  bash -n "$project_dir/index.sh" || {
     rm -rf "$tmp_dir"
     return 1
-  fi
+  }
 
-  printf '%s\n' "$extracted_dir"
+  printf '%s\n' "$project_dir"
 }
 
 install_manager_project_from_repo() {
-  local target_path project_dir
+  local target_path project_dir expected_sha256=${1:-${SBOX_UPDATE_INDEX_SHA256:-}}
 
   target_path="$MANAGER_SCRIPT_PATH"
-  project_dir="$(fetch_latest_project_from_repo)" || return 1
+  project_dir="$(fetch_latest_project_from_repo "$expected_sha256")" || return 1
 
   if ! bash -n "$project_dir/index.sh"; then
     rm -rf "$(dirname "$project_dir")"
     return 1
   fi
 
-  mkdir -p "$(dirname "$target_path")" "$PROJECT_INSTALL_DIR"
+  install -d -m 0755 "$(dirname "$target_path")" "$PROJECT_INSTALL_DIR"
   install -m 755 "$project_dir/index.sh" "$target_path"
-  [[ -f "$project_dir/install.sh" ]] && install -m 755 "$project_dir/install.sh" "$PROJECT_INSTALL_DIR/install.sh"
-  [[ -f "$project_dir/README.md" ]] && install -m 644 "$project_dir/README.md" "$PROJECT_INSTALL_DIR/README.md"
-  [[ -f "$project_dir/LICENSE" ]] && install -m 644 "$project_dir/LICENSE" "$PROJECT_INSTALL_DIR/LICENSE"
 
   if [[ "$target_path" == "/usr/local/bin/sbox" ]]; then
     rm -f /usr/local/bin/singbox-manager 2>/dev/null || true
@@ -4689,26 +4952,17 @@ install_manager_project_from_repo() {
 }
 
 update_manager_script() {
-  if ! have_cmd curl; then
-    ui_msg "未检测到 curl，无法更新脚本。"
+  local expected_sha256
+  expected_sha256="$(prompt_nonempty "安全更新校验" "请输入可信发布说明中 index.sh 的 SHA-256（64 位十六进制）" "")" || return 1
+  if [[ ! "$expected_sha256" =~ ^[A-Fa-f0-9]{64}$ ]]; then
+    ui_msg "SHA-256 格式无效，已拒绝更新；现有脚本未修改。"
     return 1
   fi
+  install_manager_project_from_repo "$expected_sha256" || {
+    ui_msg "更新下载、语法检查或完整性校验失败；现有脚本未修改。"
+    return 1
+  }
 
-  if have_cmd sudo; then
-    curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | sudo env SBOX_INSTALL_NO_PANEL=1 bash || {
-      ui_msg "更新脚本失败，请稍后重试。"
-      return 1
-    }
-  else
-    curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | env SBOX_INSTALL_NO_PANEL=1 bash || {
-      ui_msg "更新脚本失败，请稍后重试。"
-      return 1
-    }
-  fi
-
-  if have_cmd sudo; then
-    exec sudo "$MANAGER_SCRIPT_PATH"
-  fi
   exec "$MANAGER_SCRIPT_PATH"
 }
 
@@ -4952,7 +5206,7 @@ show_service_status() {
   service_manager="$(sing_box_service_manager)"
 
   if have_cmd sing-box; then
-    text+="sing-box version: $(sing-box version 2>/dev/null | head -n 1)\n"
+    text+="sing-box version: $(run_as_runtime sing-box version 2>/dev/null | head -n 1)\n"
   else
     text+="sing-box version: 未安装\n"
   fi
@@ -5025,8 +5279,24 @@ uninstall_sbox() {
   rm -f "$SING_BOX_OPENRC_SERVICE_FILE" "$SING_BOX_OPENRC_LOG_FILE" 2>/dev/null || true
   rm -f "$REALM_SERVICE_FILE" /lib/systemd/system/realm.service /usr/lib/systemd/system/realm.service /etc/systemd/system/multi-user.target.wants/realm.service 2>/dev/null || true
   rm -f "$REALM_OPENRC_SERVICE_FILE" "$REALM_OPENRC_LOG_FILE" 2>/dev/null || true
+  rm -f "$SING_BOX_HARDENING_DROPIN_FILE" "$REALM_HARDENING_DROPIN_FILE" 2>/dev/null || true
+  rmdir "$SING_BOX_FIREWALL_DROPIN_DIR" "$REALM_FIREWALL_DROPIN_DIR" 2>/dev/null || true
   rm -rf /etc/sing-box "$REALM_DIR" "$STATE_DIR" 2>/dev/null || true
+  rm -rf "$PROJECT_INSTALL_DIR" 2>/dev/null || true
   rm -f /usr/local/bin/sbox /usr/local/bin/singbox-manager "$REALM_BIN" 2>/dev/null || true
+
+  if id -u "$RUNTIME_USER" >/dev/null 2>&1 && have_cmd userdel; then
+    userdel "$RUNTIME_USER" >/dev/null 2>&1 || true
+  elif id -u "$RUNTIME_USER" >/dev/null 2>&1 && have_cmd deluser; then
+    deluser "$RUNTIME_USER" >/dev/null 2>&1 || true
+  fi
+  if { getent group "$RUNTIME_GROUP" >/dev/null 2>&1 || grep -q "^${RUNTIME_GROUP}:" /etc/group 2>/dev/null; }; then
+    if have_cmd groupdel; then
+      groupdel "$RUNTIME_GROUP" >/dev/null 2>&1 || true
+    elif have_cmd delgroup; then
+      delgroup "$RUNTIME_GROUP" >/dev/null 2>&1 || true
+    fi
+  fi
 
   if have_cmd systemctl; then
     systemctl daemon-reload >/dev/null 2>&1 || true

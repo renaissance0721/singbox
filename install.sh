@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -Eeuo pipefail
+umask 077
 
 REPO_OWNER="${REPO_OWNER:-renaissance0721}"
 REPO_NAME="${REPO_NAME:-singbox}"
@@ -8,7 +9,11 @@ REPO_BRANCH="${REPO_BRANCH:-main}"
 TARGET_PATH="${TARGET_PATH:-/usr/local/bin/sbox}"
 LEGACY_PATH="/usr/local/bin/singbox-manager"
 INDEX_URL="${INDEX_URL:-https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/index.sh}"
+EXPECTED_INDEX_SHA256="fd458ac908a1c0b2ae189023ffe78b041b33feca3e3c5c6235142c15d8a94403"
 INSTALL_COMMAND=""
+SCRIPT_DIR=""
+DOWNLOAD_TMP=""
+INSTALL_TMP=""
 
 log() {
   printf '[*] %s\n' "$*" >&2
@@ -32,13 +37,30 @@ require_root() {
 }
 
 download_script() {
+  local destination=$1
   if have_cmd curl; then
-    curl -fsSL "$INDEX_URL"
+    curl -fsSL "$INDEX_URL" -o "$destination"
   elif have_cmd wget; then
-    wget -qO- "$INDEX_URL"
+    wget -qO "$destination" "$INDEX_URL"
   else
     die "未检测到 curl 或 wget，无法下载 index.sh。"
   fi
+}
+
+sha256_file() {
+  local file=$1
+  if have_cmd sha256sum; then
+    sha256sum "$file" | awk '{print tolower($1)}'
+  elif have_cmd openssl; then
+    openssl dgst -sha256 "$file" | awk '{print tolower($NF)}'
+  else
+    die "缺少 sha256sum 或 openssl，无法验证管理脚本完整性。"
+  fi
+}
+
+cleanup() {
+  [[ -n "$DOWNLOAD_TMP" ]] && rm -f -- "$DOWNLOAD_TMP" 2>/dev/null || true
+  [[ -n "$INSTALL_TMP" ]] && rm -f -- "$INSTALL_TMP" 2>/dev/null || true
 }
 
 attach_tty() {
@@ -56,14 +78,15 @@ usage() {
   bash install.sh
 
 示例:
-  bash install.sh
-  bash install.sh --repair
-  curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | sudo bash
-  curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | sudo bash -s -- --repair
+  sudo bash install.sh
+  sudo bash install.sh --repair
+  git clone https://github.com/${REPO_OWNER}/${REPO_NAME}.git
+  cd ${REPO_NAME} && sudo bash install.sh
 
 Alpine Linux:
-  apk add --no-cache bash curl
-  curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/install.sh | bash
+  apk add --no-cache bash curl git
+  git clone https://github.com/${REPO_OWNER}/${REPO_NAME}.git
+  cd ${REPO_NAME} && bash install.sh
 
 参数:
   --repair          重新安装 / 修复环境并保留现有规则
@@ -87,13 +110,34 @@ while (( $# > 0 )); do
   esac
 done
 
+trap cleanup EXIT
 require_linux
 require_root
 
-mkdir -p "$(dirname "$TARGET_PATH")"
+if [[ "${BASH_SOURCE[0]}" == */* && -f "${BASH_SOURCE[0]}" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+
+DOWNLOAD_TMP="$(mktemp "${TMPDIR:-/tmp}/sbox-index.XXXXXX")"
+if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/index.sh" && "${SBOX_INSTALL_FORCE_REMOTE:-0}" != "1" ]]; then
+  cp "$SCRIPT_DIR/index.sh" "$DOWNLOAD_TMP"
+else
+  download_script "$DOWNLOAD_TMP"
+fi
+
+actual_sha256="$(sha256_file "$DOWNLOAD_TMP")"
+[[ "$EXPECTED_INDEX_SHA256" =~ ^[A-Fa-f0-9]{64}$ ]] || die "安装器内置的 index.sh 哈希无效。"
+[[ "$actual_sha256" == "${EXPECTED_INDEX_SHA256,,}" ]] ||
+  die "index.sh 完整性校验失败；期望 ${EXPECTED_INDEX_SHA256,,}，实际 ${actual_sha256}。"
+bash -n "$DOWNLOAD_TMP" || die "index.sh Bash 语法检查失败，已拒绝安装。"
+
+install -d -m 0755 "$(dirname "$TARGET_PATH")"
 rm -f "$LEGACY_PATH" 2>/dev/null || true
-download_script >"$TARGET_PATH"
-chmod 755 "$TARGET_PATH"
+INSTALL_TMP="$(mktemp "$(dirname "$TARGET_PATH")/.sbox-install.XXXXXX")"
+install -o root -g root -m 0755 "$DOWNLOAD_TMP" "$INSTALL_TMP"
+mv -f "$INSTALL_TMP" "$TARGET_PATH"
+INSTALL_TMP=""
+cleanup
 
 log "管理脚本已安装到 $TARGET_PATH"
 

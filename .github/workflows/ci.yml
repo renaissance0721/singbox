@@ -23,10 +23,14 @@ jobs:
         run: |
           bash -n index.sh
           bash -n install.sh
+          bash -n tests/security.sh
 
       - name: ShellCheck
         # jq filters intentionally use jq variables such as $ts inside single-quoted strings.
-        run: shellcheck -e SC2016 index.sh install.sh
+        run: shellcheck -e SC2016 index.sh install.sh tests/security.sh
+
+      - name: Security regression checks
+        run: bash tests/security.sh
 
   alpine:
     runs-on: ubuntu-latest
@@ -38,7 +42,7 @@ jobs:
       - name: Alpine compatibility check
         run: |
           docker run --rm -v "$PWD:/workspace" -w /workspace alpine:3.21 sh -c '
-            apk add --no-cache bash openrc
+            apk add --no-cache bash openrc jq openssl coreutils findutils
             bash -n index.sh
             bash -n install.sh
             bash -c '"'"'
@@ -56,4 +60,11 @@ jobs:
               bash -n "$REALM_OPENRC_SERVICE_FILE"
               grep -q "^command_background=\"yes\"$" "$REALM_OPENRC_SERVICE_FILE"
             '"'"'
+          '
+
+      - name: Alpine security regression checks
+        run: |
+          docker run --rm -v "$PWD:/workspace" -w /workspace alpine:3.21 sh -c '
+            apk add --no-cache bash jq openssl coreutils findutils iproute2
+            bash tests/security.sh
           '

@@ -12,16 +12,17 @@
 - 在面板选择“安装 / 初始化 sing-box”后安装依赖与官方原生 `sing-box`
 - 退出后可直接输入 `sbox` 重新打开面板
 - 支持输入 `sbox uninstall` 一键卸载
-- 支持重新安装 / 修复时从 GitHub 拉取最新项目并保留现有规则
+- 支持重新安装 / 修复并保留现有规则；远程脚本更新必须提供可信 SHA-256
 - 新建节点时询问节点名称和出口地址，并支持在节点管理中随时更改地址
 - 支持 `Shadowsocks`、`VLESS + Reality`、`Hysteria2`
 - 支持客户端新增、删除、导出
 - 自动生成 Reality 密钥、随机密码和 Hysteria2 自签名证书
 - 新建 Shadowsocks 主节点与分流仅提供 SS2022；主节点支持来源 IP/CIDR 白名单
-- 经 Shadowsocks 入站转发的流量会拒绝访问私网、链路本地地址和常见云元数据地址
+- 经 Shadowsocks、VLESS 或 Hysteria2 入站转发的流量都会拒绝访问本机、私网、链路本地地址和常见云元数据地址
 - Realm 仅启用 TCP 转发；升级时会迁移旧配置并清理脚本管理的 Realm UDP 放行规则
 - 支持查看监听端口和占用进程，并管理本脚本托管的防火墙端口
 - 支持 UFW、firewalld、iptables/ip6tables，并为托管规则提供 systemd/OpenRC 重启恢复
+- iptables/ip6tables 托管规则保留既有拒绝、限速和 Fail2ban 的优先级，并兼容链末端默认拒绝规则
 - 支持零预置的自定义分流规则集，可随时新增、查看和删除
 - 支持添加多个 SOCKS5 / Shadowsocks 分流落地
 
@@ -35,24 +36,31 @@
 
 ## 快速开始
 
-在 VPS 上执行：
+在 VPS 上下载到本地后执行，避免把可变分支直接通过管道交给 root：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | sudo bash
+git clone https://github.com/renaissance0721/singbox.git
+cd singbox
+sudo bash install.sh
 ```
 
 Alpine Linux 请先安装 Bash 和 curl，并使用 root 执行：
 
 ```sh
-apk add --no-cache bash curl
-curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | bash
+apk add --no-cache bash curl git
+git clone https://github.com/renaissance0721/singbox.git
+cd singbox
+bash install.sh
 ```
 
 安装脚本会：
 
 - 安装管理命令到 `/usr/local/bin/sbox`
+- 在安装前校验 `index.sh` 的内置 SHA-256，并使用临时文件原子替换
 - 自动打开管理面板
 - 由用户选择“安装 / 初始化 sing-box”后执行初始化安装
+- 自动创建无登录权限的 `sbox-runtime` 用户，代理服务不以 root 运行
+- systemd/OpenRC 均保留低端口监听能力，不需要手动设置权限或 capabilities
 
 以后重新进入面板，只需要执行：
 
@@ -74,7 +82,7 @@ sbox change-address
 sbox node             # 节点管理
 sbox realm            # Realm TCP 中转管理
 sbox ports            # 端口与本机防火墙管理
-sbox repair-install   # 更新/修复并保留现有配置
+sbox repair-install   # 修复核心、权限、服务和配置，不执行未校验的远程脚本
 sbox status           # 查看 sing-box 服务状态
 ```
 
@@ -183,7 +191,7 @@ sbox uninstall
 - 默认使用 `2022-blake3-aes-128-gcm`
 - 默认端口在 `10000-60000` 范围内随机生成
 - 新建节点可选择三种 SS2022 加密方式，并分别生成服务端主密码和用户密码
-- 创建节点时必须填写来源 IP/CIDR 白名单；中转场景应填写中转 VPS 的出口 IP
+- 创建节点时必须填写来源 IP/CIDR 白名单；中转场景应填写中转 VPS 的出口 IP，不要填写端口；多个 IP 使用英文逗号分隔
 - 公网直连需要明确填写 `0.0.0.0/0` 和/或 `::/0`，这等同于相应地址族全网可访问
 - 旧状态文件没有来源白名单时保持全网放行，升级后应在“节点管理”中手动设置
 - SS 入站会在域名解析前后拒绝私网、链路本地地址和常见云元数据地址
@@ -194,6 +202,7 @@ sbox uninstall
 - 默认流控为 `xtls-rprx-vision`
 - 会自动生成 Reality 密钥对和 `short_id`
 - 首次配置建议确认伪装域名和端口是否可访问
+- VLESS 入站会在域名解析前后拒绝本机、私网、链路本地地址和常见云元数据地址
 
 ### Hysteria2
 
@@ -219,7 +228,9 @@ sbox uninstall
 
 注意事项：
 
-- 自动开关按脚本状态文件处理托管端口，不会主动选择其他系统端口；但相同端口/协议的同形人工防火墙规则也可能受到同步影响
+- 应用配置前会停止旧服务并检查目标端口；端口被其他进程占用时不会修改防火墙
+- iptables/ip6tables 规则带有 `sbox-managed` 标记并追加到现有策略之后，不会插到 Fail2ban、限速或人工拒绝规则之前
+- UFW/firewalld 自动开关按脚本状态文件处理托管端口；相同端口/协议的同形人工规则仍可能受到同步影响
 - 不要把节点或 Realm 监听端口设置成 SSH、Web 服务或其他程序已经占用的端口
 - UFW 或 firewalld 已启用时优先使用对应后端，否则使用 iptables/ip6tables
 - systemd 使用 `sbox-firewall.service` 在 sing-box/Realm 启动前恢复规则；Alpine/OpenRC 在对应 iptables/ip6tables 服务存在时保存规则
@@ -273,7 +284,9 @@ apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc core
 - 请在你拥有管理权限的服务器上使用本脚本
 - 对外分享客户端配置前，请确认端口、域名、证书和密码都已按预期生成
 - 来源白名单只限制 Shadowsocks 入站来源；VLESS 和 Hysteria2 仍依赖各自的认证信息
-- 私网和元数据访问阻断目前仅应用于 Shadowsocks 入站
+- 私网、链路本地地址和元数据阻断应用于 Shadowsocks、VLESS 与 Hysteria2 全部代理入站
+- 客户端订阅、状态、备份和私钥使用最小文件权限；sing-box/Realm 使用 `sbox-runtime` 低权限用户运行
+- “更新脚本”要求输入从可信发布渠道取得的 `index.sh` SHA-256；校验失败不会覆盖当前脚本
 - 本机防火墙放行不能代替云厂商安全组配置，也不能创建或删除 NAT 端口映射
 - 公开仓库时不要提交任何真实节点配置、证书或导出的客户端信息
 - 安全问题请优先查看 [SECURITY.md](SECURITY.md)

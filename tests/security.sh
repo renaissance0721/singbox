@@ -172,6 +172,36 @@ grep -Fq -- '--comment "$IPTABLES_RULE_COMMENT"' "$repo_dir/index.sh" || fail "i
 grep -Fq 'User=${RUNTIME_USER}' "$repo_dir/index.sh" || fail "systemd sing-box 服务未设置低权限用户"
 grep -Fq 'NoNewPrivileges=true' "$repo_dir/index.sh" || fail "systemd 服务缺少 NoNewPrivileges"
 grep -Fq "setcap 'cap_net_bind_service=+ep'" "$repo_dir/index.sh" || fail "OpenRC 低权限服务无法兼容低端口监听"
+grep -Fq 'SCRIPT_REPO_ID="1210354428"' "$repo_dir/index.sh" || fail "自动更新未固定 GitHub 仓库数字 ID"
+grep -Fq 'SCRIPT_REPO_OWNER_ID="197479185"' "$repo_dir/index.sh" || fail "自动更新未固定 GitHub 所有者数字 ID"
+grep -Fq 'git_blob_sha1_file "$project_dir/index.sh"' "$repo_dir/index.sh" || fail "自动更新未校验不可变 commit 的 Git blob 哈希"
+grep -Fq '"$actual_sha256" != "$api_sha256"' "$repo_dir/index.sh" || fail "自动更新未交叉校验 API 与原始文件的 SHA-256"
+grep -Fq 'mktemp "$(dirname "$target_path")/.sbox-update.XXXXXX"' "$repo_dir/index.sh" || fail "自动更新未使用同目录临时文件原子替换"
+if grep -q 'SBOX_UPDATE_INDEX_SHA256\|请输入可信发布说明中 index.sh' "$repo_dir/index.sh"; then
+  fail "自动更新仍要求手动输入 SHA-256"
+fi
+
+blob_fixture="$test_root/git-blob-fixture.txt"
+printf 'hello\n' >"$blob_fixture"
+[[ "$(git_blob_sha1_file "$blob_fixture")" == "ce013625030ba8dba906f756967f9e9ca394464a" ]] ||
+  fail "Git blob 哈希计算不正确"
+
+(
+  # shellcheck disable=SC2329
+  download_to_file() {
+    local destination=$1
+    printf '{"id":0,"owner":{"id":0},"full_name":"attacker/singbox","default_branch":"main"}\n' >"$destination"
+  }
+  if fetch_latest_project_from_repo >/dev/null 2>&1; then
+    fail "仓库或所有者数字 ID 不匹配时仍允许自动更新"
+  fi
+)
+
+if [[ "${SBOX_TEST_REMOTE_UPDATE:-0}" == "1" ]]; then
+  remote_project="$(fetch_latest_project_from_repo)" || fail "线上自动更新来源校验失败"
+  bash -n "$remote_project/index.sh" || fail "线上自动更新脚本语法无效"
+  rm -rf -- "$(dirname "$remote_project")"
+fi
 
 expected_hash="$(sed -n 's/^EXPECTED_INDEX_SHA256="\([A-Fa-f0-9]\{64\}\)"$/\1/p' "$repo_dir/install.sh")"
 actual_hash="$(sha256sum "$repo_dir/index.sh" | awk '{print tolower($1)}')"

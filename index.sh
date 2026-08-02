@@ -52,9 +52,11 @@ RUNTIME_GROUP="${RUNTIME_GROUP:-sbox-runtime}"
 SAGERNET_GPG_FINGERPRINT="2C317FBD5D886B4E89BAE8DA6D9152172A2B2F0C"
 MANAGER_SCRIPT_PATH="${MANAGER_SCRIPT_PATH:-/usr/local/bin/sbox}"
 PROJECT_INSTALL_DIR="${PROJECT_INSTALL_DIR:-/usr/local/share/sbox}"
-SCRIPT_REPO_OWNER="${SCRIPT_REPO_OWNER:-renaissance0721}"
-SCRIPT_REPO_NAME="${SCRIPT_REPO_NAME:-singbox}"
-SCRIPT_REPO_BRANCH="${SCRIPT_REPO_BRANCH:-main}"
+SCRIPT_REPO_OWNER="renaissance0721"
+SCRIPT_REPO_NAME="singbox"
+SCRIPT_REPO_BRANCH="main"
+SCRIPT_REPO_ID="1210354428"
+SCRIPT_REPO_OWNER_ID="197479185"
 TMP_DIR="${TMP_DIR:-/tmp}"
 
 PKG_MANAGER=""
@@ -125,13 +127,14 @@ download_to_file() {
 
   if have_cmd curl; then
     for url in "$@"; do
-      if curl -fsSL "$url" -o "$destination"; then
+      if curl -fsSL --connect-timeout 10 --retry 2 --retry-delay 1 --speed-limit 1024 --speed-time 30 \
+        "$url" -o "$destination"; then
         return 0
       fi
     done
   elif have_cmd wget; then
     for url in "$@"; do
-      if wget -qO "$destination" "$url"; then
+      if wget --timeout=30 --tries=2 -qO "$destination" "$url"; then
         return 0
       fi
     done
@@ -148,6 +151,22 @@ sha256_file() {
     sha256sum "$file" | awk '{print tolower($1)}'
   elif have_cmd openssl; then
     openssl dgst -sha256 "$file" | awk '{print tolower($NF)}'
+  else
+    return 1
+  fi
+}
+
+git_blob_sha1_file() {
+  local file=$1 file_size
+  file_size="$(wc -c <"$file" | tr -d '[:space:]')" || return 1
+  [[ "$file_size" =~ ^[0-9]+$ ]] || return 1
+
+  if have_cmd sha1sum; then
+    { printf 'blob %s\0' "$file_size"; command cat "$file"; } |
+      sha1sum | awk '{print tolower($1)}'
+  elif have_cmd openssl; then
+    { printf 'blob %s\0' "$file_size"; command cat "$file"; } |
+      openssl dgst -sha1 | awk '{print tolower($NF)}'
   else
     return 1
   fi
@@ -3687,20 +3706,7 @@ repair_install() {
   install_dependencies
 
   manager_target="$MANAGER_SCRIPT_PATH"
-  if [[ "${SBOX_REPAIR_RESUMED:-0}" != "1" && -n "${SBOX_UPDATE_INDEX_SHA256:-}" ]]; then
-    if install_manager_project_from_repo "$SBOX_UPDATE_INDEX_SHA256"; then
-      log "已从 GitHub 仓库拉取最新项目并更新到 ${manager_target}。"
-      log "将使用新安装的脚本继续修复，以应用最新逻辑。"
-      export SBOX_REPAIR_RESUMED=1
-      exec "$manager_target" repair-install
-    else
-      warn "远程脚本更新校验失败，将继续使用当前已安装脚本修复 sing-box 核心与配置。"
-    fi
-  elif [[ "${SBOX_REPAIR_RESUMED:-0}" == "1" ]]; then
-    log "已切换到 GitHub 最新脚本，继续修复 sing-box 核心与配置。"
-  else
-    log "未提供可信更新哈希，repair-install 将只修复核心、权限、服务和配置，不执行远程脚本。"
-  fi
+  log "repair-install 将使用当前已安装脚本修复核心、权限、服务和配置；如需更新脚本，请在面板选择 [更新脚本]。"
 
   install_sing_box
   ensure_firewall_restore_service || {
@@ -4898,18 +4904,97 @@ restart_realm_service() {
 }
 
 fetch_latest_project_from_repo() {
-  local expected_sha256=${1:-} tmp_dir project_dir index_url actual_sha256
-  [[ "$expected_sha256" =~ ^[A-Fa-f0-9]{64}$ ]] || {
-    warn "安全更新需要可信的 index.sh SHA-256，已拒绝下载并执行可变分支代码。"
-    return 1
-  }
-  expected_sha256="${expected_sha256,,}"
-
+  local tmp_dir project_dir api_root repo_json branch_json commit_json content_json
+  local repo_id owner_id full_name default_branch commit_sha commit_author_id commit_committer_id
+  local content_type content_path content_encoding content_sha download_url api_copy actual_blob_sha actual_sha256 api_sha256
   tmp_dir="$(mktemp -d "$TMP_DIR/sbox-repo.XXXXXX")" || return 1
   project_dir="$tmp_dir/repo"
   mkdir -p "$project_dir"
-  index_url="https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/${SCRIPT_REPO_BRANCH}/index.sh"
-  if ! download_to_file "$project_dir/index.sh" "$index_url"; then
+
+  api_root="https://api.github.com/repos/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}"
+  repo_json="$tmp_dir/repository.json"
+  branch_json="$tmp_dir/branch.json"
+  commit_json="$tmp_dir/commit.json"
+  content_json="$tmp_dir/content.json"
+
+  download_to_file "$repo_json" "$api_root" || {
+    rm -rf "$tmp_dir"
+    return 1
+  }
+  repo_id="$(jq -r '.id // empty | tostring' "$repo_json")"
+  owner_id="$(jq -r '.owner.id // empty | tostring' "$repo_json")"
+  full_name="$(jq -r '.full_name // empty' "$repo_json")"
+  default_branch="$(jq -r '.default_branch // empty' "$repo_json")"
+  if [[ "$repo_id" != "$SCRIPT_REPO_ID" || "$owner_id" != "$SCRIPT_REPO_OWNER_ID" ||
+        "$full_name" != "${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}" || "$default_branch" != "$SCRIPT_REPO_BRANCH" ]]; then
+    warn "GitHub 仓库身份校验失败，已拒绝更新。"
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+
+  download_to_file "$branch_json" "$api_root/branches/$SCRIPT_REPO_BRANCH" || {
+    rm -rf "$tmp_dir"
+    return 1
+  }
+  commit_sha="$(jq -r '.commit.sha // empty' "$branch_json")"
+  [[ "$commit_sha" =~ ^[A-Fa-f0-9]{40}$ ]] || {
+    warn "GitHub 返回的更新提交标识无效，已拒绝更新。"
+    rm -rf "$tmp_dir"
+    return 1
+  }
+  commit_sha="${commit_sha,,}"
+
+  download_to_file "$commit_json" "$api_root/commits/$commit_sha" || {
+    rm -rf "$tmp_dir"
+    return 1
+  }
+  [[ "$(jq -r '.sha // empty' "$commit_json")" == "$commit_sha" ]] || {
+    warn "GitHub 提交元数据与分支头不一致，已拒绝更新。"
+    rm -rf "$tmp_dir"
+    return 1
+  }
+  commit_author_id="$(jq -r '.author.id // empty | tostring' "$commit_json")"
+  commit_committer_id="$(jq -r '.committer.id // empty | tostring' "$commit_json")"
+  if [[ "$commit_author_id" != "$SCRIPT_REPO_OWNER_ID" && "$commit_committer_id" != "$SCRIPT_REPO_OWNER_ID" ]]; then
+    warn "最新提交无法关联到固定仓库所有者，已拒绝更新。"
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+
+  download_to_file "$content_json" "$api_root/contents/index.sh?ref=$commit_sha" || {
+    rm -rf "$tmp_dir"
+    return 1
+  }
+  content_type="$(jq -r '.type // empty' "$content_json")"
+  content_path="$(jq -r '.path // empty' "$content_json")"
+  content_encoding="$(jq -r '.encoding // empty' "$content_json")"
+  content_sha="$(jq -r '.sha // empty' "$content_json")"
+  download_url="$(jq -r '.download_url // empty' "$content_json")"
+  if [[ "$content_type" != "file" || "$content_path" != "index.sh" || "$content_encoding" != "base64" || ! "$content_sha" =~ ^[A-Fa-f0-9]{40}$ ||
+        "$download_url" != "https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/${commit_sha}/index.sh" ]]; then
+    warn "GitHub 文件元数据校验失败，已拒绝更新。"
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+
+  api_copy="$tmp_dir/index.api"
+  if ! jq -r '.content // empty' "$content_json" | tr -d '\r\n' | base64 -d >"$api_copy"; then
+    warn "GitHub API 文件内容解码失败，已拒绝更新。"
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+
+  download_to_file "$project_dir/index.sh" "$download_url" || {
+    rm -rf "$tmp_dir"
+    return 1
+  }
+
+  actual_blob_sha="$(git_blob_sha1_file "$project_dir/index.sh")" || {
+    rm -rf "$tmp_dir"
+    return 1
+  }
+  if [[ "$actual_blob_sha" != "${content_sha,,}" ]]; then
+    warn "下载脚本的 Git 内容哈希与不可变提交不匹配，已拒绝更新。"
     rm -rf "$tmp_dir"
     return 1
   fi
@@ -4918,8 +5003,12 @@ fetch_latest_project_from_repo() {
     rm -rf "$tmp_dir"
     return 1
   }
-  if [[ "$actual_sha256" != "$expected_sha256" ]]; then
-    warn "远程 index.sh 完整性校验失败：期望 ${expected_sha256}，实际 ${actual_sha256}。"
+  api_sha256="$(sha256_file "$api_copy")" || {
+    rm -rf "$tmp_dir"
+    return 1
+  }
+  if [[ "$actual_sha256" != "$api_sha256" ]]; then
+    warn "GitHub API 与不可变 commit 原始文件的 SHA-256 不一致，已拒绝更新。"
     rm -rf "$tmp_dir"
     return 1
   fi
@@ -4928,14 +5017,15 @@ fetch_latest_project_from_repo() {
     return 1
   }
 
+  log "更新来源校验通过：commit ${commit_sha}，SHA-256 ${actual_sha256}。"
   printf '%s\n' "$project_dir"
 }
 
 install_manager_project_from_repo() {
-  local target_path project_dir expected_sha256=${1:-${SBOX_UPDATE_INDEX_SHA256:-}}
+  local target_path project_dir install_tmp=""
 
   target_path="$MANAGER_SCRIPT_PATH"
-  project_dir="$(fetch_latest_project_from_repo "$expected_sha256")" || return 1
+  project_dir="$(fetch_latest_project_from_repo)" || return 1
 
   if ! bash -n "$project_dir/index.sh"; then
     rm -rf "$(dirname "$project_dir")"
@@ -4943,7 +5033,20 @@ install_manager_project_from_repo() {
   fi
 
   install -d -m 0755 "$(dirname "$target_path")" "$PROJECT_INSTALL_DIR"
-  install -m 755 "$project_dir/index.sh" "$target_path"
+  install_tmp="$(mktemp "$(dirname "$target_path")/.sbox-update.XXXXXX")" || {
+    rm -rf "$(dirname "$project_dir")"
+    return 1
+  }
+  if ! install -o root -g root -m 0755 "$project_dir/index.sh" "$install_tmp"; then
+    rm -f "$install_tmp"
+    rm -rf "$(dirname "$project_dir")"
+    return 1
+  fi
+  if ! mv -f "$install_tmp" "$target_path"; then
+    rm -f "$install_tmp"
+    rm -rf "$(dirname "$project_dir")"
+    return 1
+  fi
 
   if [[ "$target_path" == "/usr/local/bin/sbox" ]]; then
     rm -f /usr/local/bin/singbox-manager 2>/dev/null || true
@@ -4952,17 +5055,13 @@ install_manager_project_from_repo() {
 }
 
 update_manager_script() {
-  local expected_sha256
-  expected_sha256="$(prompt_nonempty "安全更新校验" "请输入可信发布说明中 index.sh 的 SHA-256（64 位十六进制）" "")" || return 1
-  if [[ ! "$expected_sha256" =~ ^[A-Fa-f0-9]{64}$ ]]; then
-    ui_msg "SHA-256 格式无效，已拒绝更新；现有脚本未修改。"
-    return 1
-  fi
-  install_manager_project_from_repo "$expected_sha256" || {
-    ui_msg "更新下载、语法检查或完整性校验失败；现有脚本未修改。"
+  log "正在从固定 GitHub 仓库检查并安全更新管理脚本..."
+  install_manager_project_from_repo || {
+    ui_msg "更新来源、提交身份、内容哈希或语法校验失败；现有脚本未修改。"
     return 1
   }
 
+  log "管理脚本更新完成，正在重新打开面板。"
   exec "$MANAGER_SCRIPT_PATH"
 }
 
@@ -5415,7 +5514,7 @@ usage() {
   3. 一键安装使用官方原生 sing-box 软件包。
   4. 支持添加多个 SOCKS5 / Shadowsocks 分流落地，每个落地独立绑定规则集。
   5. 新建 Shadowsocks 节点与分流仅提供 SS2022，并支持来源 IP/CIDR 白名单。
-  6. repair-install 会重装 / 更新脚本和 sing-box 核心，但不会删除状态文件、客户端或分流规则。
+  6. repair-install 会修复 sing-box 核心、权限和服务，但不会删除状态文件、客户端或分流规则。
   7. 一键安装只安装环境；节点名称和出口地址在新建节点时填写。
 EOF
 }

@@ -12,7 +12,7 @@
 - 在面板选择“安装 / 初始化 sing-box”后安装依赖与官方原生 `sing-box`
 - 退出后可直接输入 `sbox` 重新打开面板
 - 支持输入 `sbox uninstall` 一键卸载
-- 支持重新安装 / 修复并保留现有规则；远程脚本更新必须提供可信 SHA-256
+- 支持重新安装 / 修复并保留现有规则；面板可一键安全更新管理脚本
 - 新建节点时询问节点名称和出口地址，并支持在节点管理中随时更改地址
 - 支持 `Shadowsocks`、`VLESS + Reality`、`Hysteria2`
 - 支持客户端新增、删除、导出
@@ -286,7 +286,8 @@ apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc core
 - 来源白名单只限制 Shadowsocks 入站来源；VLESS 和 Hysteria2 仍依赖各自的认证信息
 - 私网、链路本地地址和元数据阻断应用于 Shadowsocks、VLESS 与 Hysteria2 全部代理入站
 - 客户端订阅、状态、备份和私钥使用最小文件权限；sing-box/Realm 使用 `sbox-runtime` 低权限用户运行
-- “更新脚本”要求输入从可信发布渠道取得的 `index.sh` SHA-256；校验失败不会覆盖当前脚本
+- “更新脚本”无需手动输入哈希：脚本会固定校验 GitHub 仓库数字 ID，将 `main` 解析为不可变 commit，并核对提交身份、Git blob 哈希、SHA-256 与 Bash 语法；任一失败都不会覆盖当前脚本
+- 自动校验无法抵御 GitHub 所有者账号本身被完全接管；请为仓库所有者账号启用双重验证或 Passkey，并妥善保管访问令牌
 - 本机防火墙放行不能代替云厂商安全组配置，也不能创建或删除 NAT 端口映射
 - 公开仓库时不要提交任何真实节点配置、证书或导出的客户端信息
 - 安全问题请优先查看 [SECURITY.md](SECURITY.md)

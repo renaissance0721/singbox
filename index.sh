@@ -681,6 +681,7 @@ service_exists() {
 
 sing_box_service_exec_path() {
   local exec_line exec_path arg
+  local -a exec_parts=()
 
   if has_openrc && ! has_systemd; then
     command -v sing-box
@@ -691,7 +692,8 @@ sing_box_service_exec_path() {
   exec_line="$(systemctl cat sing-box 2>/dev/null | awk -F= '/^[[:space:]]*ExecStart=/ {print $2; exit}')"
   [[ -n "$exec_line" ]] || return 1
 
-  set -- $exec_line
+  read -r -a exec_parts <<<"$exec_line"
+  set -- "${exec_parts[@]}"
   exec_path=${1:-}
   exec_path="${exec_path#-}"
   exec_path="${exec_path#\"}"
@@ -1713,22 +1715,30 @@ is_valid_ipv4_or_cidr() {
 
   address="${value%%/*}"
   prefix=""
-  [[ "$value" == */* ]] && prefix="${value##*/}"
+  if [[ "$value" == */* ]]; then
+    prefix="${value#*/}"
+    [[ -n "$prefix" && "$prefix" =~ ^[0-9]+$ && ${#prefix} -le 3 ]] || return 1
+    (( 10#$prefix <= 32 )) || return 1
+  fi
   [[ "$address" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
   IFS='.' read -r -a octets <<<"$address"
   for octet in "${octets[@]}"; do
     (( 10#$octet <= 255 )) || return 1
   done
-  [[ -z "$prefix" || ( "$prefix" =~ ^[0-9]+$ && 10#$prefix -le 32 ) ]]
+  return 0
 }
 
 is_valid_ipv6_or_cidr() {
   local value=$1 address prefix
   address="${value%%/*}"
   prefix=""
-  [[ "$value" == */* ]] && prefix="${value##*/}"
+  if [[ "$value" == */* ]]; then
+    prefix="${value#*/}"
+    [[ -n "$prefix" && "$prefix" =~ ^[0-9]+$ && ${#prefix} -le 3 ]] || return 1
+    (( 10#$prefix <= 128 )) || return 1
+  fi
   [[ "$address" == *:* && "$address" =~ ^[0-9A-Fa-f:.]+$ ]] || return 1
-  [[ -z "$prefix" || ( "$prefix" =~ ^[0-9]+$ && 10#$prefix -le 128 ) ]]
+  return 0
 }
 
 is_valid_ip_or_cidr() {

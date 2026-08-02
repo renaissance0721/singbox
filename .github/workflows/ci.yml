@@ -25,7 +25,8 @@ jobs:
           bash -n install.sh
 
       - name: ShellCheck
-        run: shellcheck index.sh install.sh
+        # jq filters intentionally use jq variables such as $ts inside single-quoted strings.
+        run: shellcheck -e SC2016 index.sh install.sh
 
   alpine:
     runs-on: ubuntu-latest

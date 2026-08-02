@@ -5,7 +5,7 @@
 # 支持 Shadowsocks、VLESS + Reality 和 Hysteria2
 #
 # 作者: renaissance0721
-# 版本: 0.1.0
+# 版本: 0.4.1
 # 许可证: MIT
 #
 # 使用方法:
@@ -20,7 +20,7 @@ set -Eeuo pipefail
 
 ORIGINAL_ARGS=("$@")
 SELF_PATH="${BASH_SOURCE[0]}"
-SCRIPT_VERSION="0.3.1"
+SCRIPT_VERSION="0.4.1"
 SCRIPT_NAME="${0##*/}"
 APP_TITLE="Sing-box 管理面板 | 输入 sbox 快捷打开脚本"
 STATE_DIR="${STATE_DIR:-/etc/sing-box-manager}"
@@ -38,6 +38,10 @@ REALM_BIN="${REALM_BIN:-/usr/local/bin/realm}"
 REALM_SERVICE_FILE="${REALM_SERVICE_FILE:-/etc/systemd/system/realm.service}"
 REALM_OPENRC_SERVICE_FILE="${REALM_OPENRC_SERVICE_FILE:-/etc/init.d/realm}"
 REALM_OPENRC_LOG_FILE="${REALM_OPENRC_LOG_FILE:-/var/log/realm.log}"
+FIREWALL_STATE_FILE="${FIREWALL_STATE_FILE:-$STATE_DIR/firewall-managed.tsv}"
+FIREWALL_SYSTEMD_SERVICE_FILE="${FIREWALL_SYSTEMD_SERVICE_FILE:-/etc/systemd/system/sbox-firewall.service}"
+SING_BOX_FIREWALL_DROPIN_DIR="${SING_BOX_FIREWALL_DROPIN_DIR:-/etc/systemd/system/sing-box.service.d}"
+REALM_FIREWALL_DROPIN_DIR="${REALM_FIREWALL_DROPIN_DIR:-/etc/systemd/system/realm.service.d}"
 MANAGER_SCRIPT_PATH="${MANAGER_SCRIPT_PATH:-/usr/local/bin/sbox}"
 PROJECT_INSTALL_DIR="${PROJECT_INSTALL_DIR:-/usr/local/share/sbox}"
 SCRIPT_REPO_OWNER="${SCRIPT_REPO_OWNER:-renaissance0721}"
@@ -446,20 +450,20 @@ install_dependencies() {
 
   case "$PKG_MANAGER" in
     apk)
-      apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc coreutils findutils iptables
+      apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc coreutils findutils iptables iproute2
       ;;
     apt)
       export DEBIAN_FRONTEND=noninteractive
       normalize_debian_apt_sources || warn "Debian apt 源自动修复失败，将继续尝试 apt-get update。"
       apt-get update -y
-      apt-get install -y curl jq openssl ca-certificates git tar gzip
+      apt-get install -y curl jq openssl ca-certificates git tar gzip iproute2 iptables
       ;;
     dnf)
-      dnf install -y curl jq openssl ca-certificates git tar gzip
+      dnf install -y curl jq openssl ca-certificates git tar gzip iproute iptables
       ;;
     yum)
       yum install -y epel-release || true
-      yum install -y curl jq openssl ca-certificates git tar gzip
+      yum install -y curl jq openssl ca-certificates git tar gzip iproute iptables
       ;;
     *)
       die "暂不支持自动安装依赖，请手动安装 bash、curl、jq、openssl、ca-certificates、git、tar、gzip 后再运行。"
@@ -1216,11 +1220,12 @@ init_state_file() {
       "enabled": false,
       "listen": "0.0.0.0",
       "port": $ss_default_port,
-      "network": "tcp",
-      "method": "2022-blake3-aes-128-gcm",
-      "server_password": "",
-      "multiplex": true,
-      "users": []
+    "network": "tcp",
+    "method": "2022-blake3-aes-128-gcm",
+    "server_password": "",
+    "multiplex": true,
+    "allowed_sources": [],
+    "users": []
     },
     "vless_reality": {
       "enabled": false,
@@ -1272,13 +1277,15 @@ state_jq() {
 }
 
 cleanup_removed_traffic_state() {
-  state_jq --arg ts "$(utc_now)" '
+  state_jq --arg version "$SCRIPT_VERSION" --arg ts "$(utc_now)" '
     def cleanup_users:
       map(del(.traffic_limit_gb, .traffic_used_bytes, .traffic_last_api_bytes, .expires_at));
     del(.traffic_stats) |
     .protocols.shadowsocks.users = ((.protocols.shadowsocks.users // []) | cleanup_users) |
+    .protocols.shadowsocks.allowed_sources = ((.protocols.shadowsocks.allowed_sources // []) | map(select(type == "string")) | unique) |
     .protocols.vless_reality.users = ((.protocols.vless_reality.users // []) | cleanup_users) |
     .protocols.hysteria2.users = ((.protocols.hysteria2.users // []) | cleanup_users) |
+    .meta.version = $version |
     .meta.updated_at = $ts
   '
 }
@@ -1508,17 +1515,9 @@ select_shadowsocks_method() {
 
   method_choice="$(ui_split_shadowsocks_method_menu "$current_method")" || return 1
   case "$method_choice" in
-    1) method="aes-256-gcm" ;;
-    2) method="aes-128-gcm" ;;
-    3) method="chacha20-poly1305" ;;
-    4) method="chacha20-ietf-poly1305" ;;
-    5) method="xchacha20-poly1305" ;;
-    6) method="xchacha20-ietf-poly1305" ;;
-    7) method="none" ;;
-    8) method="plain" ;;
-    9) method="2022-blake3-aes-128-gcm" ;;
-    10) method="2022-blake3-aes-256-gcm" ;;
-    11) method="2022-blake3-chacha20-poly1305" ;;
+    1) method="2022-blake3-aes-128-gcm" ;;
+    2) method="2022-blake3-aes-256-gcm" ;;
+    3) method="2022-blake3-chacha20-poly1305" ;;
     0) return 1 ;;
     *) ui_msg "Invalid Shadowsocks method."; return 1 ;;
   esac
@@ -1528,18 +1527,10 @@ select_shadowsocks_method() {
 
 ui_split_shadowsocks_method_menu() {
   local current_method=${1:-2022-blake3-aes-128-gcm}
-  ui_menu "Shadowsocks 加密方式" "请选择加密方式。当前：${current_method}" \
-    "1" "aes-256-gcm" \
-    "2" "aes-128-gcm" \
-    "3" "chacha20-poly1305" \
-    "4" "chacha20-ietf-poly1305" \
-    "5" "xchacha20-poly1305" \
-    "6" "xchacha20-ietf-poly1305" \
-    "7" "none" \
-    "8" "plain" \
-    "9" "2022-blake3-aes-128-gcm" \
-    "10" "2022-blake3-aes-256-gcm" \
-    "11" "2022-blake3-chacha20-poly1305" \
+  ui_menu "Shadowsocks 加密方式" "公网节点仅允许 SS2022。当前：${current_method}" \
+    "1" "2022-blake3-aes-128-gcm" \
+    "2" "2022-blake3-aes-256-gcm" \
+    "3" "2022-blake3-chacha20-poly1305" \
     "0" "返回"
 }
 
@@ -1714,6 +1705,52 @@ prompt_number() {
     fi
     printf '请输入 %s-%s 范围内的数字，再次输错将退回菜单界面。\n' "$min_value" "$max_value" >&2
   done
+}
+
+is_valid_ipv4_or_cidr() {
+  local value=$1 address prefix octet
+  local -a octets=()
+
+  address="${value%%/*}"
+  prefix=""
+  [[ "$value" == */* ]] && prefix="${value##*/}"
+  [[ "$address" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS='.' read -r -a octets <<<"$address"
+  for octet in "${octets[@]}"; do
+    (( 10#$octet <= 255 )) || return 1
+  done
+  [[ -z "$prefix" || ( "$prefix" =~ ^[0-9]+$ && 10#$prefix -le 32 ) ]]
+}
+
+is_valid_ipv6_or_cidr() {
+  local value=$1 address prefix
+  address="${value%%/*}"
+  prefix=""
+  [[ "$value" == */* ]] && prefix="${value##*/}"
+  [[ "$address" == *:* && "$address" =~ ^[0-9A-Fa-f:.]+$ ]] || return 1
+  [[ -z "$prefix" || ( "$prefix" =~ ^[0-9]+$ && 10#$prefix -le 128 ) ]]
+}
+
+is_valid_ip_or_cidr() {
+  is_valid_ipv4_or_cidr "$1" || is_valid_ipv6_or_cidr "$1"
+}
+
+build_allowed_sources_json() {
+  local input=$1 source sources_json='[]'
+
+  while IFS= read -r source; do
+    [[ -n "$source" ]] || continue
+    if ! is_valid_ip_or_cidr "$source"; then
+      printf '无效的来源 IP/CIDR：%s\n' "$source" >&2
+      return 1
+    fi
+    sources_json="$(jq -c --arg source "$source" '. + [$source] | unique' <<<"$sources_json")"
+  done < <(jq -rn --arg input "$input" '
+    $input | gsub("[,;[:space:]]+"; "\n") | split("\n")[] | select(length > 0)
+  ')
+
+  [[ "$(jq -r 'length' <<<"$sources_json")" -gt 0 ]] || return 1
+  printf '%s\n' "$sources_json"
 }
 
 realm_prompt_nonempty_limited() {
@@ -1911,7 +1948,7 @@ validate_state() {
   local errors=""
   local ss_enabled vless_enabled hy2_enabled
   local server_address vless_server_name handshake_server
-  local split_name split_enabled split_type split_server split_port split_username split_password split_method split_rule_count
+  local split_name split_enabled split_type split_server split_port split_username split_password split_method split_rule_count ss_source
 
   ss_enabled="$(state_get '.protocols.shadowsocks.enabled')"
   vless_enabled="$(state_get '.protocols.vless_reality.enabled')"
@@ -1923,6 +1960,10 @@ validate_state() {
   if [[ "$ss_enabled" == "true" ]]; then
     [[ "$(state_get '.protocols.shadowsocks.users | length')" -gt 0 ]] || errors+=$'Shadowsocks 至少需要一个客户端。\n'
     [[ -n "$(state_get '.protocols.shadowsocks.server_password')" ]] || errors+=$'Shadowsocks 服务端密码不能为空。\n'
+    while IFS= read -r ss_source; do
+      [[ -n "$ss_source" ]] || continue
+      is_valid_ip_or_cidr "$ss_source" || errors+="Shadowsocks 来源白名单无效：${ss_source}"$'\n'
+    done < <(state_get '.protocols.shadowsocks.allowed_sources[]?')
   fi
 
   if [[ "$vless_enabled" == "true" ]]; then
@@ -2007,6 +2048,14 @@ render_config() {
       disabled: false,
       level: .meta.log_level,
       timestamp: true
+    },
+    dns: {
+      servers: [
+        {
+          type: "local",
+          tag: "local"
+        }
+      ]
     },
     inbounds: [
       (
@@ -2144,6 +2193,27 @@ render_config() {
       ],
       rules: [
         (
+          if .protocols.shadowsocks.enabled then
+            [
+              {
+                inbound: ["ss-in"],
+                ip_cidr: [
+                  "169.254.169.254/32",
+                  "100.100.100.200/32",
+                  "fd00:ec2::254/128"
+                ],
+                action: "reject"
+              },
+              {
+                inbound: ["ss-in"],
+                ip_is_private: true,
+                action: "reject"
+              }
+            ][]
+          else empty
+          end
+        ),
+        (
           if ([.routing.split.outbounds[]? | select((.enabled // false) and ((.rule_sets // []) | length > 0))] | length) > 0 then
             {
               action: "sniff",
@@ -2162,6 +2232,32 @@ render_config() {
               action: "route",
               outbound: ($outbound.id | split_outbound_tag)
             }
+        ),
+        (
+          if .protocols.shadowsocks.enabled then
+            [
+              {
+                inbound: ["ss-in"],
+                action: "resolve",
+                server: "local"
+              },
+              {
+                inbound: ["ss-in"],
+                ip_cidr: [
+                  "169.254.169.254/32",
+                  "100.100.100.200/32",
+                  "fd00:ec2::254/128"
+                ],
+                action: "reject"
+              },
+              {
+                inbound: ["ss-in"],
+                ip_is_private: true,
+                action: "reject"
+              }
+            ][]
+          else empty
+          end
         )
       ],
       final: "direct"
@@ -2176,33 +2272,59 @@ enabled_protocol_count() {
 allow_iptables_port() {
   local port=$1
   local protocol=$2
+  local source=${3:-*}
+  local applied=false
 
-  if have_cmd iptables; then
-    iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 ||
-      iptables -I INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 ||
-      true
+  if [[ "$source" == "*" ]]; then
+    if have_cmd iptables; then
+      applied=true
+      iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 ||
+        iptables -I INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 || return 1
+    fi
+    if have_cmd ip6tables; then
+      applied=true
+      ip6tables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 ||
+        ip6tables -I INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 || return 1
+    fi
+  elif [[ "$source" == *:* ]]; then
+    if have_cmd ip6tables; then
+      applied=true
+      ip6tables -C INPUT -p "$protocol" -s "$source" --dport "$port" -j ACCEPT >/dev/null 2>&1 ||
+        ip6tables -I INPUT -p "$protocol" -s "$source" --dport "$port" -j ACCEPT >/dev/null 2>&1 || return 1
+    fi
+  elif have_cmd iptables; then
+    applied=true
+    iptables -C INPUT -p "$protocol" -s "$source" --dport "$port" -j ACCEPT >/dev/null 2>&1 ||
+      iptables -I INPUT -p "$protocol" -s "$source" --dport "$port" -j ACCEPT >/dev/null 2>&1 || return 1
   fi
-
-  if have_cmd ip6tables; then
-    ip6tables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 ||
-      ip6tables -I INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 ||
-      true
-  fi
+  [[ "$applied" == "true" ]]
 }
 
 remove_iptables_port() {
   local port=$1
   local protocol=$2
+  local source=${3:-*}
 
-  if have_cmd iptables; then
-    while iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1; do
-      iptables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 || break
-    done
-  fi
-
-  if have_cmd ip6tables; then
-    while ip6tables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1; do
-      ip6tables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 || break
+  if [[ "$source" == "*" ]]; then
+    if have_cmd iptables; then
+      while iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1; do
+        iptables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 || break
+      done
+    fi
+    if have_cmd ip6tables; then
+      while ip6tables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1; do
+        ip6tables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 || break
+      done
+    fi
+  elif [[ "$source" == *:* ]]; then
+    if have_cmd ip6tables; then
+      while ip6tables -C INPUT -p "$protocol" -s "$source" --dport "$port" -j ACCEPT >/dev/null 2>&1; do
+        ip6tables -D INPUT -p "$protocol" -s "$source" --dport "$port" -j ACCEPT >/dev/null 2>&1 || break
+      done
+    fi
+  elif have_cmd iptables; then
+    while iptables -C INPUT -p "$protocol" -s "$source" --dport "$port" -j ACCEPT >/dev/null 2>&1; do
+      iptables -D INPUT -p "$protocol" -s "$source" --dport "$port" -j ACCEPT >/dev/null 2>&1 || break
     done
   fi
 }
@@ -2220,29 +2342,703 @@ persist_openrc_firewall_rules() {
   fi
 }
 
-apply_firewall_rules() {
-  local ss_enabled vless_enabled hy2_enabled
-  ss_enabled="$(state_get '.protocols.shadowsocks.enabled')"
-  vless_enabled="$(state_get '.protocols.vless_reality.enabled')"
-  hy2_enabled="$(state_get '.protocols.hysteria2.enabled')"
-
+active_firewall_backend() {
   if have_cmd ufw && ufw status 2>/dev/null | grep -q 'Status: active'; then
-    [[ "$ss_enabled" == "true" ]] && ufw allow "$(state_get '.protocols.shadowsocks.port')/tcp" >/dev/null 2>&1 || true
-    [[ "$vless_enabled" == "true" ]] && ufw allow "$(state_get '.protocols.vless_reality.port')/tcp" >/dev/null 2>&1 || true
-    [[ "$hy2_enabled" == "true" ]] && ufw allow "$(state_get '.protocols.hysteria2.port')/udp" >/dev/null 2>&1 || true
+    printf 'ufw\n'
+  elif have_cmd firewall-cmd && has_systemd && systemctl is-active firewalld >/dev/null 2>&1; then
+    printf 'firewalld\n'
+  elif have_cmd iptables || have_cmd ip6tables; then
+    printf 'iptables\n'
+  else
+    printf 'none\n'
+  fi
+}
+
+managed_firewall_rules_present() {
+  [[ -s "$FIREWALL_STATE_FILE" ]] && return 0
+  [[ -n "$(desired_managed_firewall_rules 2>/dev/null | head -n 1)" ]]
+}
+
+ensure_firewall_restore_service() {
+  has_systemd || return 0
+
+  mkdir -p "$(dirname "$FIREWALL_SYSTEMD_SERVICE_FILE")" \
+    "$SING_BOX_FIREWALL_DROPIN_DIR" "$REALM_FIREWALL_DROPIN_DIR"
+  cat >"$FIREWALL_SYSTEMD_SERVICE_FILE" <<EOF
+[Unit]
+Description=Restore sbox managed firewall rules
+After=network-pre.target ufw.service firewalld.service
+Before=sing-box.service realm.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=${MANAGER_SCRIPT_PATH} firewall-sync
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat >"$SING_BOX_FIREWALL_DROPIN_DIR/10-sbox-firewall.conf" <<'EOF'
+[Unit]
+Requires=sbox-firewall.service
+After=sbox-firewall.service
+EOF
+
+  cat >"$REALM_FIREWALL_DROPIN_DIR/10-sbox-firewall.conf" <<'EOF'
+[Unit]
+Requires=sbox-firewall.service
+After=sbox-firewall.service
+EOF
+
+  systemctl daemon-reload >/dev/null 2>&1 || return 1
+  systemctl enable sbox-firewall.service >/dev/null 2>&1 || return 1
+}
+
+prepare_managed_firewall() {
+  local backend
+  if [[ -s "$STATE_FILE" ]] && ! jq -e . "$STATE_FILE" >/dev/null 2>&1; then
+    warn "节点状态文件无效，已拒绝修改防火墙。"
+    return 1
+  fi
+  if [[ -s "$REALM_STATE_FILE" ]] && ! jq -e . "$REALM_STATE_FILE" >/dev/null 2>&1; then
+    warn "Realm 状态文件无效，已拒绝修改防火墙。"
+    return 1
+  fi
+  managed_firewall_rules_present || return 0
+  backend="$(active_firewall_backend)"
+  if [[ "$backend" == "none" ]]; then
+    warn "未检测到可用的 UFW、firewalld 或 iptables。请先执行 sbox repair-install 安装依赖。"
+    return 1
+  fi
+  ensure_firewall_restore_service || {
+    warn "无法安装防火墙开机恢复服务。"
+    return 1
+  }
+}
+
+remove_firewall_restore_service() {
+  has_systemd || return 0
+  systemctl disable --now sbox-firewall.service >/dev/null 2>&1 || true
+  rm -f "$FIREWALL_SYSTEMD_SERVICE_FILE" \
+    "$SING_BOX_FIREWALL_DROPIN_DIR/10-sbox-firewall.conf" \
+    "$REALM_FIREWALL_DROPIN_DIR/10-sbox-firewall.conf" 2>/dev/null || true
+  rmdir "$SING_BOX_FIREWALL_DROPIN_DIR" "$REALM_FIREWALL_DROPIN_DIR" 2>/dev/null || true
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+firewalld_rich_rule() {
+  local protocol=$1 port=$2 source=$3 family=ipv4
+  [[ "$source" == *:* ]] && family=ipv6
+  printf 'rule family="%s" source address="%s" port port="%s" protocol="%s" accept\n' \
+    "$family" "$source" "$port" "$protocol"
+}
+
+firewalld_reject_rule() {
+  local protocol=$1 port=$2
+  printf 'rule priority="100" port port="%s" protocol="%s" reject\n' "$port" "$protocol"
+}
+
+remove_firewall_restriction() {
+  local protocol=$1 port=$2 rich_rule
+
+  if have_cmd ufw; then
+    ufw --force delete deny "${port}/${protocol}" >/dev/null 2>&1 || true
+  fi
+  if have_cmd firewall-cmd && has_systemd && systemctl is-active firewalld >/dev/null 2>&1; then
+    rich_rule="$(firewalld_reject_rule "$protocol" "$port")"
+    firewall-cmd --permanent --remove-rich-rule="$rich_rule" >/dev/null 2>&1 || true
+  fi
+  if have_cmd iptables; then
+    while iptables -C INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1; do
+      iptables -D INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 || break
+    done
+  fi
+  if have_cmd ip6tables; then
+    while ip6tables -C INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1; do
+      ip6tables -D INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 || break
+    done
+  fi
+}
+
+add_firewall_restriction() {
+  local backend=$1 protocol=$2 port=$3 rich_rule
+  case "$backend" in
+    ufw)
+      ufw deny "${port}/${protocol}" >/dev/null 2>&1
+      ;;
+    firewalld)
+      rich_rule="$(firewalld_reject_rule "$protocol" "$port")"
+      firewall-cmd --permanent --add-rich-rule="$rich_rule" >/dev/null 2>&1
+      ;;
+    iptables)
+      if have_cmd iptables; then
+        iptables -C INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 ||
+          iptables -I INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 || return 1
+      fi
+      if have_cmd ip6tables; then
+        ip6tables -C INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 ||
+          ip6tables -I INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 || return 1
+      fi
+      ;;
+  esac
+}
+
+remove_firewall_rule() {
+  local protocol=$1 port=$2 source=${3:-*} rich_rule
+
+  if have_cmd ufw; then
+    if [[ "$source" == "*" ]]; then
+      ufw --force delete allow "${port}/${protocol}" >/dev/null 2>&1 || true
+    else
+      ufw --force delete allow proto "$protocol" from "$source" to any port "$port" >/dev/null 2>&1 || true
+    fi
   fi
 
   if have_cmd firewall-cmd && has_systemd && systemctl is-active firewalld >/dev/null 2>&1; then
-    [[ "$ss_enabled" == "true" ]] && firewall-cmd --permanent --add-port="$(state_get '.protocols.shadowsocks.port')/tcp" >/dev/null 2>&1 || true
-    [[ "$vless_enabled" == "true" ]] && firewall-cmd --permanent --add-port="$(state_get '.protocols.vless_reality.port')/tcp" >/dev/null 2>&1 || true
-    [[ "$hy2_enabled" == "true" ]] && firewall-cmd --permanent --add-port="$(state_get '.protocols.hysteria2.port')/udp" >/dev/null 2>&1 || true
-    firewall-cmd --reload >/dev/null 2>&1 || true
+    if [[ "$source" == "*" ]]; then
+      firewall-cmd --permanent --remove-port="${port}/${protocol}" >/dev/null 2>&1 || true
+    else
+      rich_rule="$(firewalld_rich_rule "$protocol" "$port" "$source")"
+      firewall-cmd --permanent --remove-rich-rule="$rich_rule" >/dev/null 2>&1 || true
+    fi
   fi
 
-  [[ "$ss_enabled" == "true" ]] && allow_iptables_port "$(state_get '.protocols.shadowsocks.port')" tcp
-  [[ "$vless_enabled" == "true" ]] && allow_iptables_port "$(state_get '.protocols.vless_reality.port')" tcp
-  [[ "$hy2_enabled" == "true" ]] && allow_iptables_port "$(state_get '.protocols.hysteria2.port')" udp
+  remove_iptables_port "$port" "$protocol" "$source"
+}
+
+add_firewall_rule() {
+  local backend=$1 protocol=$2 port=$3 source=${4:-*} rich_rule
+
+  case "$backend" in
+    ufw)
+      if [[ "$source" == "*" ]]; then
+        ufw allow "${port}/${protocol}" >/dev/null 2>&1
+      else
+        ufw allow proto "$protocol" from "$source" to any port "$port" >/dev/null 2>&1
+      fi
+      ;;
+    firewalld)
+      if [[ "$source" == "*" ]]; then
+        firewall-cmd --permanent --add-port="${port}/${protocol}" >/dev/null 2>&1
+      else
+        rich_rule="$(firewalld_rich_rule "$protocol" "$port" "$source")"
+        firewall-cmd --permanent --add-rich-rule="$rich_rule" >/dev/null 2>&1
+      fi
+      ;;
+    iptables)
+      allow_iptables_port "$port" "$protocol" "$source"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+ufw_rule_is_added() {
+  local expected=$1
+  ufw show added 2>/dev/null | tr -d '\r' | grep -Fqx "$expected"
+}
+
+firewall_allow_rule_exists() {
+  local backend=$1 protocol=$2 port=$3 source=${4:-*} rich_rule
+  case "$backend" in
+    ufw)
+      if [[ "$source" == "*" ]]; then
+        ufw_rule_is_added "ufw allow ${port}/${protocol}"
+      else
+        ufw_rule_is_added "ufw allow proto ${protocol} from ${source} to any port ${port}"
+      fi
+      ;;
+    firewalld)
+      if [[ "$source" == "*" ]]; then
+        firewall-cmd --permanent --query-port="${port}/${protocol}" >/dev/null 2>&1 &&
+          firewall-cmd --query-port="${port}/${protocol}" >/dev/null 2>&1
+      else
+        rich_rule="$(firewalld_rich_rule "$protocol" "$port" "$source")"
+        firewall-cmd --permanent --query-rich-rule="$rich_rule" >/dev/null 2>&1 &&
+          firewall-cmd --query-rich-rule="$rich_rule" >/dev/null 2>&1
+      fi
+      ;;
+    iptables)
+      if [[ "$source" == "*" ]]; then
+        if have_cmd iptables; then
+          iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 || return 1
+        fi
+        if have_cmd ip6tables; then
+          ip6tables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1 || return 1
+        fi
+      elif [[ "$source" == *:* ]]; then
+        have_cmd ip6tables && ip6tables -C INPUT -p "$protocol" -s "$source" --dport "$port" -j ACCEPT >/dev/null 2>&1
+      else
+        have_cmd iptables && iptables -C INPUT -p "$protocol" -s "$source" --dport "$port" -j ACCEPT >/dev/null 2>&1
+      fi
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+firewall_restriction_exists() {
+  local backend=$1 protocol=$2 port=$3 rich_rule
+  case "$backend" in
+    ufw)
+      ufw_rule_is_added "ufw deny ${port}/${protocol}"
+      ;;
+    firewalld)
+      rich_rule="$(firewalld_reject_rule "$protocol" "$port")"
+      firewall-cmd --permanent --query-rich-rule="$rich_rule" >/dev/null 2>&1 &&
+        firewall-cmd --query-rich-rule="$rich_rule" >/dev/null 2>&1
+      ;;
+    iptables)
+      if have_cmd iptables; then
+        iptables -C INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 || return 1
+      fi
+      if have_cmd ip6tables; then
+        ip6tables -C INPUT -p "$protocol" --dport "$port" -j DROP >/dev/null 2>&1 || return 1
+      fi
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+desired_managed_firewall_rules() {
+  if [[ -s "$STATE_FILE" ]]; then
+    jq -e . "$STATE_FILE" >/dev/null 2>&1 || return 1
+    jq -r '
+      def row($owner; $protocol; $port; $source):
+        [$owner, $protocol, ($port | tostring), $source] | @tsv;
+      . as $root |
+      (if $root.protocols.shadowsocks.enabled then
+        ($root.protocols.shadowsocks.allowed_sources // []) as $sources |
+        if ($sources | length) == 0 then
+          row("shadowsocks"; "tcp"; $root.protocols.shadowsocks.port; "*")
+        else
+          $sources[] as $source |
+          row("shadowsocks"; "tcp"; $root.protocols.shadowsocks.port; $source)
+        end
+      else empty end),
+      (if $root.protocols.vless_reality.enabled then
+        row("vless_reality"; "tcp"; $root.protocols.vless_reality.port; "*")
+      else empty end),
+      (if $root.protocols.hysteria2.enabled then
+        row("hysteria2"; "udp"; $root.protocols.hysteria2.port; "*")
+      else empty end)
+    ' "$STATE_FILE" 2>/dev/null || return 1
+  fi
+
+  if [[ -s "$REALM_STATE_FILE" ]]; then
+    jq -e . "$REALM_STATE_FILE" >/dev/null 2>&1 || return 1
+    jq -r '
+      .rules[]?.entries[]?.listen
+      | try capture(":(?<port>[0-9]+)$").port catch empty
+      | ["realm", "tcp", ., "*"] | @tsv
+    ' "$REALM_STATE_FILE" 2>/dev/null || return 1
+  fi
+}
+
+sync_managed_firewall_rules() {
+  local strict=${1:-true}
+  local old_rules desired_rules backend owner protocol port source failed=false
+  old_rules="$(mktemp "$TMP_DIR/firewall-old.XXXXXX")" || return 1
+  desired_rules="$(mktemp "$TMP_DIR/firewall-desired.XXXXXX")" || {
+    rm -f "$old_rules"
+    return 1
+  }
+
+  [[ -s "$FIREWALL_STATE_FILE" ]] && cp "$FIREWALL_STATE_FILE" "$old_rules" || : >"$old_rules"
+  if ! desired_managed_firewall_rules | sort -u >"$desired_rules"; then
+    warn "节点或 Realm 状态文件无效，已拒绝修改防火墙规则。"
+    rm -f "$old_rules" "$desired_rules"
+    return 1
+  fi
+
+  while IFS=$'\t' read -r owner protocol port source; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    remove_firewall_rule "$protocol" "$port" "${source:-*}"
+    remove_firewall_restriction "$protocol" "$port"
+  done <"$old_rules"
+
+  while IFS=$'\t' read -r protocol port; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    remove_firewall_rule "$protocol" "$port" "*"
+    remove_firewall_restriction "$protocol" "$port"
+  done < <(awk -F '\t' '{print $2 "\t" $3}' "$desired_rules" | sort -u)
+
+  backend="$(active_firewall_backend)"
+  if [[ "$backend" == "none" && -s "$desired_rules" ]]; then
+    warn "未检测到可用的 UFW、firewalld 或 iptables，无法应用脚本托管端口规则。"
+    install -m 600 "$desired_rules" "$FIREWALL_STATE_FILE"
+    rm -f "$old_rules" "$desired_rules"
+    [[ "$strict" == "false" ]] && return 0
+    return 1
+  fi
+  if [[ "$backend" == "iptables" ]]; then
+    while IFS=$'\t' read -r protocol port; do
+      [[ -n "$protocol" && -n "$port" ]] || continue
+      add_firewall_restriction "$backend" "$protocol" "$port" || failed=true
+    done < <(awk -F '\t' '$4 != "*" {print $2 "\t" $3}' "$desired_rules" | sort -u)
+  fi
+
+  while IFS=$'\t' read -r owner protocol port source; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    add_firewall_rule "$backend" "$protocol" "$port" "${source:-*}" || failed=true
+  done <"$desired_rules"
+
+  if [[ "$backend" == "ufw" || "$backend" == "firewalld" ]]; then
+    while IFS=$'\t' read -r protocol port; do
+      [[ -n "$protocol" && -n "$port" ]] || continue
+      add_firewall_restriction "$backend" "$protocol" "$port" || failed=true
+    done < <(awk -F '\t' '$4 != "*" {print $2 "\t" $3}' "$desired_rules" | sort -u)
+  fi
+
+  if [[ "$backend" == "firewalld" ]]; then
+    firewall-cmd --reload >/dev/null 2>&1 || failed=true
+  fi
   persist_openrc_firewall_rules
+
+  while IFS=$'\t' read -r owner protocol port source; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    firewall_allow_rule_exists "$backend" "$protocol" "$port" "${source:-*}" || failed=true
+  done <"$desired_rules"
+  while IFS=$'\t' read -r protocol port; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    firewall_restriction_exists "$backend" "$protocol" "$port" || failed=true
+  done < <(awk -F '\t' '$4 != "*" {print $2 "\t" $3}' "$desired_rules" | sort -u)
+
+  if [[ "$failed" == "true" ]]; then
+    warn "部分防火墙规则应用失败，未更新托管状态；请修复防火墙后重试。"
+    rm -f "$old_rules" "$desired_rules"
+    return 1
+  fi
+  install -m 600 "$desired_rules" "$FIREWALL_STATE_FILE"
+  rm -f "$old_rules" "$desired_rules"
+}
+
+initialize_managed_firewall_state() {
+  if [[ ! -e "$FIREWALL_STATE_FILE" ]]; then
+    sync_managed_firewall_rules false || return 1
+  fi
+  if managed_firewall_rules_present && [[ "$(active_firewall_backend)" != "none" ]]; then
+    ensure_firewall_restore_service || warn "防火墙规则已应用，但开机恢复服务安装失败，请执行 sbox repair-install。"
+  fi
+}
+
+remove_all_managed_firewall_rules() {
+  local owner protocol port source backend firewalld_changed=false failed=false rules_file
+  [[ -s "$FIREWALL_STATE_FILE" ]] || return 0
+
+  backend="$(active_firewall_backend)"
+  if [[ "$backend" == "none" ]]; then
+    warn "未检测到可用的本地防火墙，无法验证托管规则是否已清理。"
+    return 1
+  fi
+  rules_file="$(mktemp "$TMP_DIR/firewall-remove-all.XXXXXX")" || return 1
+  cp "$FIREWALL_STATE_FILE" "$rules_file"
+
+  while IFS=$'\t' read -r owner protocol port source; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    remove_firewall_rule "$protocol" "$port" "${source:-*}"
+    remove_firewall_restriction "$protocol" "$port"
+    firewalld_changed=true
+  done <"$rules_file"
+  if [[ "$firewalld_changed" == "true" && "$backend" == "firewalld" ]]; then
+    firewall-cmd --reload >/dev/null 2>&1 || failed=true
+  fi
+  persist_openrc_firewall_rules
+
+  while IFS=$'\t' read -r owner protocol port source; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    firewall_allow_rule_exists "$backend" "$protocol" "$port" "${source:-*}" && failed=true
+    firewall_restriction_exists "$backend" "$protocol" "$port" && failed=true
+  done <"$rules_file"
+  rm -f "$rules_file"
+  if [[ "$failed" == "true" ]]; then
+    warn "部分托管防火墙规则清理失败，已保留托管状态以便重试。"
+    return 1
+  fi
+  rm -f "$FIREWALL_STATE_FILE"
+}
+
+apply_firewall_rules() {
+  sync_managed_firewall_rules
+}
+
+port_is_listening() {
+  local protocol=$1 port=$2
+  have_cmd ss || return 1
+  case "$protocol" in
+    tcp)
+      ss -H -lnt 2>/dev/null | awk -v suffix=":${port}" '$4 ~ (suffix "$" ) {found=1} END {exit !found}'
+      ;;
+    udp)
+      ss -H -lnu 2>/dev/null | awk -v suffix=":${port}" '$4 ~ (suffix "$" ) {found=1} END {exit !found}'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+save_desired_firewall_state() {
+  local tmp_file
+  tmp_file="$(mktemp "$TMP_DIR/firewall-state.XXXXXX")" || return 1
+  if ! desired_managed_firewall_rules | sort -u >"$tmp_file"; then
+    rm -f "$tmp_file"
+    return 1
+  fi
+  install -m 600 "$tmp_file" "$FIREWALL_STATE_FILE"
+  rm -f "$tmp_file"
+}
+
+show_all_listening_ports() {
+  local output
+  if ! have_cmd ss; then
+    ui_msg "未检测到 ss 命令，无法查看端口占用。"
+    return 1
+  fi
+  output="$(ss -lntup 2>&1)"
+  ui_show_text "全部监听端口与占用进程" "$output"
+}
+
+show_managed_port_status() {
+  local owner protocol port source listen_status firewall_status output="" backend rules_file
+  local sources_display restricted complete wildcard_present
+  rules_file="$(mktemp "$TMP_DIR/firewall-status.XXXXXX")" || return 1
+  if ! desired_managed_firewall_rules | sort -u >"$rules_file"; then
+    rm -f "$rules_file"
+    ui_msg "节点或 Realm 状态文件无效，无法读取托管端口。"
+    return 1
+  fi
+  backend="$(active_firewall_backend)"
+
+  while IFS=$'\t' read -r owner protocol port; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    if port_is_listening "$protocol" "$port"; then
+      listen_status="监听中"
+    else
+      listen_status="未监听"
+    fi
+
+    sources_display=""
+    restricted=false
+    complete=true
+    wildcard_present=false
+    while IFS= read -r source; do
+      [[ -n "$source" ]] || continue
+      if [[ "$source" == "*" ]]; then
+        sources_display="全网（高风险）"
+      else
+        restricted=true
+        sources_display+="${sources_display:+, }${source}"
+      fi
+      if [[ "$backend" == "none" ]] || ! firewall_allow_rule_exists "$backend" "$protocol" "$port" "$source"; then
+        complete=false
+      fi
+    done < <(awk -F '\t' -v owner="$owner" -v protocol="$protocol" -v port="$port" \
+      '$1 == owner && $2 == protocol && $3 == port {print $4}' "$rules_file")
+
+    if [[ "$backend" == "none" ]]; then
+      firewall_status="不可用（未检测到本地防火墙）"
+    elif [[ "$restricted" == "true" ]]; then
+      firewall_allow_rule_exists "$backend" "$protocol" "$port" "*" && wildcard_present=true
+      firewall_restriction_exists "$backend" "$protocol" "$port" || complete=false
+      if [[ "$wildcard_present" == "true" ]]; then
+        firewall_status="危险：仍存在全网放行规则"
+      elif [[ "$complete" == "true" ]]; then
+        firewall_status="已限制来源"
+      else
+        firewall_status="规则不完整"
+      fi
+    elif [[ "$complete" == "true" ]]; then
+      firewall_status="已放行"
+    else
+      firewall_status="未放行或规则缺失"
+    fi
+
+    output+="${owner}  ${protocol}/${port}  ${listen_status}  防火墙=${firewall_status}  来源=${sources_display:-未知}"$'\n'
+  done < <(awk -F '\t' '{print $1 "\t" $2 "\t" $3}' "$rules_file" | sort -u)
+
+  rm -f "$rules_file"
+  [[ -n "$output" ]] || output="当前没有脚本托管端口。"$'\n'
+  output+="\n当前本地防火墙后端：${backend}"
+  output+=$'\n说明：云厂商安全组不在本页检测范围内。'
+  ui_show_text "脚本托管端口状态" "$output"
+}
+
+close_inactive_managed_ports() {
+  local owner protocol port source backend rules_file inactive_file closed=0 failed=0 operation_failed=false reload_failed=false
+  prepare_managed_firewall || {
+    ui_msg "防火墙环境不可用，未执行清理。请执行 sbox repair-install 后重试。"
+    return 1
+  }
+  backend="$(active_firewall_backend)"
+  rules_file="$(mktemp "$TMP_DIR/firewall-close-rules.XXXXXX")" || return 1
+  inactive_file="$(mktemp "$TMP_DIR/firewall-close-ports.XXXXXX")" || {
+    rm -f "$rules_file"
+    return 1
+  }
+  if ! desired_managed_firewall_rules | sort -u >"$rules_file"; then
+    rm -f "$rules_file" "$inactive_file"
+    ui_msg "节点或 Realm 状态文件无效，未修改防火墙。"
+    return 1
+  fi
+
+  while IFS=$'\t' read -r owner protocol port; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    if ! port_is_listening "$protocol" "$port"; then
+      printf '%s\t%s\t%s\n' "$owner" "$protocol" "$port" >>"$inactive_file"
+      remove_firewall_rule "$protocol" "$port" "*"
+      while IFS= read -r source; do
+        [[ -n "$source" && "$source" != "*" ]] || continue
+        remove_firewall_rule "$protocol" "$port" "$source"
+      done < <(awk -F '\t' -v owner="$owner" -v protocol="$protocol" -v port="$port" \
+        '$1 == owner && $2 == protocol && $3 == port {print $4}' "$rules_file")
+      remove_firewall_restriction "$protocol" "$port"
+    fi
+  done < <(awk -F '\t' '{print $1 "\t" $2 "\t" $3}' "$rules_file" | sort -u)
+
+  if [[ -s "$inactive_file" && "$backend" == "firewalld" ]] && ! firewall-cmd --reload >/dev/null 2>&1; then
+    reload_failed=true
+  fi
+  persist_openrc_firewall_rules
+
+  while IFS=$'\t' read -r owner protocol port; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    operation_failed="$reload_failed"
+    firewall_allow_rule_exists "$backend" "$protocol" "$port" "*" && operation_failed=true
+    while IFS= read -r source; do
+      [[ -n "$source" && "$source" != "*" ]] || continue
+      firewall_allow_rule_exists "$backend" "$protocol" "$port" "$source" && operation_failed=true
+    done < <(awk -F '\t' -v owner="$owner" -v protocol="$protocol" -v port="$port" \
+      '$1 == owner && $2 == protocol && $3 == port {print $4}' "$rules_file")
+    firewall_restriction_exists "$backend" "$protocol" "$port" && operation_failed=true
+    if [[ "$operation_failed" == "true" ]]; then
+      failed=$((failed + 1))
+    else
+      closed=$((closed + 1))
+    fi
+  done <"$inactive_file"
+
+  if ! save_desired_firewall_state; then
+    failed=$((failed + 1))
+  fi
+  rm -f "$rules_file" "$inactive_file"
+  if (( failed > 0 )); then
+    ui_msg "已清理 ${closed} 个未监听端口，但有 ${failed} 个端口清理或验证失败。"
+    return 1
+  fi
+  ui_msg "已清理 ${closed} 个当前未监听端口的脚本放行规则。"
+}
+
+open_active_managed_ports() {
+  local backend owner protocol port source opened=0 active_rules desired_rules failed=false restricted
+  prepare_managed_firewall || {
+    ui_msg "防火墙环境不可用，未开启托管端口。请执行 sbox repair-install 后重试。"
+    return 1
+  }
+  active_rules="$(mktemp "$TMP_DIR/firewall-active.XXXXXX")" || return 1
+  desired_rules="$(mktemp "$TMP_DIR/firewall-open-desired.XXXXXX")" || {
+    rm -f "$active_rules"
+    return 1
+  }
+  if ! desired_managed_firewall_rules | sort -u >"$desired_rules"; then
+    rm -f "$active_rules" "$desired_rules"
+    ui_msg "节点或 Realm 状态文件无效，未修改防火墙。"
+    return 1
+  fi
+  backend="$(active_firewall_backend)"
+
+  while IFS=$'\t' read -r owner protocol port source; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    if port_is_listening "$protocol" "$port"; then
+      printf '%s\t%s\t%s\t%s\n' "$owner" "$protocol" "$port" "${source:-*}" >>"$active_rules"
+    fi
+  done <"$desired_rules"
+
+  if [[ "$backend" == "none" && -s "$active_rules" ]]; then
+    rm -f "$active_rules" "$desired_rules"
+    ui_msg "未检测到可用的 UFW、firewalld 或 iptables，无法开启托管端口。"
+    return 1
+  fi
+
+  while IFS=$'\t' read -r protocol port; do
+    remove_firewall_rule "$protocol" "$port" "*"
+    remove_firewall_restriction "$protocol" "$port"
+  done < <(awk -F '\t' '{print $2 "\t" $3}' "$active_rules" | sort -u)
+
+  if [[ "$backend" == "iptables" ]]; then
+    while IFS=$'\t' read -r protocol port; do
+      add_firewall_restriction "$backend" "$protocol" "$port" || failed=true
+    done < <(awk -F '\t' '$4 != "*" {print $2 "\t" $3}' "$active_rules" | sort -u)
+  fi
+
+  while IFS=$'\t' read -r owner protocol port source; do
+    if ! add_firewall_rule "$backend" "$protocol" "$port" "${source:-*}"; then
+      failed=true
+    fi
+  done <"$active_rules"
+
+  if [[ "$backend" == "ufw" || "$backend" == "firewalld" ]]; then
+    while IFS=$'\t' read -r protocol port; do
+      add_firewall_restriction "$backend" "$protocol" "$port" || failed=true
+    done < <(awk -F '\t' '$4 != "*" {print $2 "\t" $3}' "$active_rules" | sort -u)
+  fi
+
+  if [[ "$backend" == "firewalld" ]] && ! firewall-cmd --reload >/dev/null 2>&1; then
+    failed=true
+  fi
+  persist_openrc_firewall_rules
+
+  while IFS=$'\t' read -r owner protocol port source; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    firewall_allow_rule_exists "$backend" "$protocol" "$port" "${source:-*}" || failed=true
+  done <"$active_rules"
+  while IFS=$'\t' read -r protocol port; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    restricted=false
+    awk -F '\t' -v protocol="$protocol" -v port="$port" \
+      '$2 == protocol && $3 == port && $4 != "*" {found=1} END {exit !found}' "$active_rules" && restricted=true
+    if [[ "$restricted" == "true" ]]; then
+      firewall_restriction_exists "$backend" "$protocol" "$port" || failed=true
+      firewall_allow_rule_exists "$backend" "$protocol" "$port" "*" && failed=true
+    fi
+  done < <(awk -F '\t' '{print $2 "\t" $3}' "$active_rules" | sort -u)
+
+  if [[ "$failed" == "true" ]] || ! save_desired_firewall_state; then
+    rm -f "$active_rules" "$desired_rules"
+    ui_msg "部分托管端口开启失败，请检查防火墙状态后重试。"
+    return 1
+  fi
+  opened="$(awk -F '\t' '{print $2 "\t" $3}' "$active_rules" | sort -u | awk 'NF {count++} END {print count+0}')"
+  rm -f "$active_rules" "$desired_rules"
+  ui_msg "已开启并验证 ${opened} 个当前正在监听的脚本托管端口。"
+}
+
+port_management_menu() {
+  local choice
+  while true; do
+    choice="$(ui_menu "端口管理" "查看全部监听端口；自动开关仅作用于本脚本托管端口。" \
+      "1" "查看全部监听端口及占用进程" \
+      "2" "查看脚本托管端口状态" \
+      "3" "一键关闭未监听的托管端口" \
+      "4" "一键开启正在监听的托管端口" \
+      "0" "返回上一级菜单" \
+      "00" "退出脚本")" || continue
+    case "$choice" in
+      1) show_all_listening_ports ;;
+      2) show_managed_port_status ;;
+      3) close_inactive_managed_ports ;;
+      4) open_active_managed_ports ;;
+      0) return 0 ;;
+      00) exit 0 ;;
+      *) ui_msg "无效选项，请重新选择。" ;;
+    esac
+  done
 }
 
 realm_rule_group_count() {
@@ -2318,7 +3114,10 @@ realm_remove_udp_firewall_rules() {
 }
 
 migrate_realm_tcp_only() {
-  [[ -s "$REALM_STATE_FILE" ]] || return 0
+  if [[ ! -s "$REALM_STATE_FILE" ]]; then
+    initialize_managed_firewall_state
+    return 0
+  fi
 
   if ! jq -e . "$REALM_STATE_FILE" >/dev/null 2>&1; then
     warn "Realm 状态文件无效，已跳过 TCP-only 迁移：$REALM_STATE_FILE"
@@ -2329,6 +3128,7 @@ migrate_realm_tcp_only() {
     (.global.use_udp? == false)
     and (.meta.realm_tcp_only_migrated? == true)
   ' "$REALM_STATE_FILE" >/dev/null 2>&1; then
+    initialize_managed_firewall_state
     return 0
   fi
 
@@ -2364,33 +3164,12 @@ migrate_realm_tcp_only() {
 
   log "Realm TCP-only 迁移完成：已关闭 UDP 转发并清理脚本管理的 UDP 防火墙规则。"
   warn "如果 VPS 商家另有云防火墙或安全组，请同时删除其中的 Realm UDP 端口。"
+  initialize_managed_firewall_state
 }
 
 realm_apply_firewall_rules() {
-  local port
-
   realm_remove_udp_firewall_rules
-
-  if have_cmd ufw && ufw status 2>/dev/null | grep -q 'Status: active'; then
-    while IFS= read -r port; do
-      [[ -n "$port" ]] || continue
-      ufw allow "${port}/tcp" >/dev/null 2>&1 || true
-    done < <(realm_managed_ports)
-  fi
-
-  if have_cmd firewall-cmd && has_systemd && systemctl is-active firewalld >/dev/null 2>&1; then
-    while IFS= read -r port; do
-      [[ -n "$port" ]] || continue
-      firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1 || true
-    done < <(realm_managed_ports)
-    firewall-cmd --reload >/dev/null 2>&1 || true
-  fi
-
-  while IFS= read -r port; do
-    [[ -n "$port" ]] || continue
-    allow_iptables_port "$port" tcp
-  done < <(realm_managed_ports)
-  persist_openrc_firewall_rules
+  sync_managed_firewall_rules
 }
 
 apply_realm_config() {
@@ -2400,6 +3179,15 @@ apply_realm_config() {
   init_realm_state_file
   ensure_realm_service
 
+  if ! prepare_managed_firewall; then
+    ui_msg "防火墙环境不可用，Realm 配置未应用、现有服务未停止。请执行 sbox repair-install 后重试。"
+    return 1
+  fi
+
+  if realm_service_exists && [[ "$(realm_service_active)" == "active" ]]; then
+    stop_realm_service_raw >/dev/null 2>&1 || true
+  fi
+
   write_realm_config_file
 
   rule_count="$(realm_rule_group_count)"
@@ -2407,11 +3195,18 @@ apply_realm_config() {
     if realm_service_exists; then
       stop_realm_service_raw >/dev/null 2>&1 || true
     fi
+    if ! sync_managed_firewall_rules; then
+      ui_msg "Realm 已停止，但清理防火墙规则失败，请进入端口管理重试。"
+      return 1
+    fi
     ui_msg "Realm 当前没有任何转发规则，配置已保存，服务已停止。"
     return 0
   fi
 
-  realm_apply_firewall_rules
+  if ! realm_apply_firewall_rules; then
+    ui_msg "Realm 配置已保存，但防火墙同步失败；服务已保持停止，请先修复防火墙。"
+    return 1
+  fi
 
   enable_realm_service
   if realm_service_exists && [[ "$(realm_service_active)" == "active" ]]; then
@@ -2530,9 +3325,18 @@ apply_config() {
   local enabled_count tmp_config check_output success_text links_file check_bin
   enabled_count="$(enabled_protocol_count)"
 
+  if ! prepare_managed_firewall; then
+    ui_msg "防火墙环境不可用，配置未应用、现有服务未停止。请执行 sbox repair-install 后重试。"
+    return 1
+  fi
+
   if [[ "$enabled_count" -eq 0 ]]; then
     stop_sing_box
     write_client_exports
+    if ! sync_managed_firewall_rules; then
+      ui_msg "节点已停止，但清理防火墙规则失败，请进入端口管理重试。"
+      return 1
+    fi
     ui_msg "当前没有启用任何协议，sing-box 服务已停止。"
     return 0
   fi
@@ -2555,12 +3359,18 @@ apply_config() {
     fi
   fi
 
+  stop_sing_box
+  if ! apply_firewall_rules; then
+    rm -f "$tmp_config"
+    ui_msg "防火墙规则同步失败；原配置未替换，服务已保持停止，请先修复防火墙。"
+    return 1
+  fi
+
   backup_config_if_exists
   cp "$tmp_config" "$CONFIG_FILE"
   rm -f "$tmp_config"
 
   write_client_exports
-  apply_firewall_rules
   restart_sing_box || return 1
 
   success_text="配置已写入 $CONFIG_FILE，服务已重载。客户端信息已导出到 $CLIENT_DIR。"
@@ -2580,6 +3390,10 @@ quick_install() {
   init_state_file
   migrate_legacy_auto_init_state
   normalize_protocol_listen_addresses
+  ensure_firewall_restore_service || {
+    ui_msg "防火墙开机恢复服务安装失败，请修复 systemd 后重试。"
+    return 1
+  }
   ui_msg "基础环境安装完成，请继续在面板中按需启用并配置协议。"
 }
 
@@ -2609,6 +3423,10 @@ repair_install() {
   fi
 
   install_sing_box
+  ensure_firewall_restore_service || {
+    ui_msg "防火墙开机恢复服务安装失败，请修复 systemd 后重试。"
+    return 1
+  }
   apply_config || return 1
   ui_msg "重新安装 / 修复完成。原有节点、客户端和分流规则已保留。"
 
@@ -2618,17 +3436,23 @@ repair_install() {
 }
 
 configure_shadowsocks() {
-  local vless_port port server_password listen_addr method
+  local vless_port port server_password listen_addr method sources_input sources_json current_sources
 
   prompt_node_name_for_protocol || return 1
 
   vless_port="$(state_get '.protocols.vless_reality.port')"
   port="$(prompt_number "Shadowsocks 端口" "请输入 Shadowsocks 监听端口" "$(generate_random_service_port_excluding "$vless_port")" 1 65535)" || return 1
   method="$(select_shadowsocks_method "$(state_get '.protocols.shadowsocks.method // "2022-blake3-aes-128-gcm"')")" || return 1
+  current_sources="$(state_get '(.protocols.shadowsocks.allowed_sources // []) | join(",")')"
+  sources_input="$(prompt_nonempty "Shadowsocks 来源白名单" "请输入允许连接此 SS 端口的中转 IP/CIDR，多个用逗号分隔；公网直连需明确填写 0.0.0.0/0 和/或 ::/0" "$current_sources")" || return 1
+  sources_json="$(build_allowed_sources_json "$sources_input")" || {
+    ui_msg "来源白名单格式无效，请填写 IP 或 CIDR。"
+    return 1
+  }
   server_password="$(generate_shadowsocks_password "$method")"
   listen_addr="$(default_listen_address)"
 
-  state_jq --argjson port "$port" --arg method "$method" --arg server_password "$server_password" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
+  state_jq --argjson port "$port" --arg method "$method" --arg server_password "$server_password" --arg listen_addr "$listen_addr" --argjson allowed_sources "$sources_json" --arg ts "$(utc_now)" '
     .protocols.shadowsocks.enabled = true |
     .protocols.shadowsocks.listen = $listen_addr |
     .protocols.shadowsocks.port = $port |
@@ -2636,6 +3460,7 @@ configure_shadowsocks() {
     .protocols.shadowsocks.method = $method |
     .protocols.shadowsocks.server_password = $server_password |
     .protocols.shadowsocks.multiplex = true |
+    .protocols.shadowsocks.allowed_sources = $allowed_sources |
     .meta.updated_at = $ts
   '
 
@@ -2646,6 +3471,38 @@ configure_shadowsocks() {
   fi
 
   apply_config
+}
+
+configure_shadowsocks_allowed_sources() {
+  local current_sources sources_input sources_json
+
+  if [[ "$(state_get '.protocols.shadowsocks.enabled')" != "true" ]]; then
+    ui_msg "Shadowsocks 当前未启用。"
+    return 0
+  fi
+
+  current_sources="$(state_get '(.protocols.shadowsocks.allowed_sources // []) | join(",")')"
+  sources_input="$(prompt_nonempty "Shadowsocks 来源白名单" "请输入允许连接 SS 端口的中转 IP/CIDR，多个用逗号分隔；公网直连需明确填写 0.0.0.0/0 和/或 ::/0" "$current_sources")" || return 1
+  sources_json="$(build_allowed_sources_json "$sources_input")" || {
+    ui_msg "来源白名单格式无效，请填写 IP 或 CIDR。"
+    return 1
+  }
+
+  state_jq --argjson allowed_sources "$sources_json" --arg ts "$(utc_now)" '
+    .protocols.shadowsocks.allowed_sources = $allowed_sources |
+    .meta.updated_at = $ts
+  '
+  if ! prepare_managed_firewall; then
+    ui_msg "防火墙环境不可用，来源白名单已保存但尚未应用；现有服务未停止。请执行 sbox repair-install 后重试。"
+    return 1
+  fi
+  stop_sing_box
+  if ! sync_managed_firewall_rules; then
+    ui_msg "来源白名单已保存，但防火墙同步失败；sing-box 已保持停止，请修复防火墙后重试。"
+    return 1
+  fi
+  restart_sing_box || return 1
+  ui_msg "Shadowsocks 来源白名单已更新并同步到防火墙。"
 }
 
 configure_vless_reality() {
@@ -2809,6 +3666,7 @@ node_submenu() {
       "4" "查看订阅链接" \
       "5" "重新生成配置并重载服务" \
       "6" "更改节点地址" \
+      "7" "设置 Shadowsocks 来源白名单" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || continue
 
@@ -2830,6 +3688,9 @@ node_submenu() {
         ;;
       6)
         change_node_address || true
+        ;;
+      7)
+        configure_shadowsocks_allowed_sources || true
         ;;
       0)
         return 0
@@ -3057,17 +3918,9 @@ configure_split_routing() {
   else
     method_choice="$(ui_split_shadowsocks_method_menu "$current_method")" || return 1
     case "$method_choice" in
-      1) method="aes-256-gcm" ;;
-      2) method="aes-128-gcm" ;;
-      3) method="chacha20-poly1305" ;;
-      4) method="chacha20-ietf-poly1305" ;;
-      5) method="xchacha20-poly1305" ;;
-      6) method="xchacha20-ietf-poly1305" ;;
-      7) method="none" ;;
-      8) method="plain" ;;
-      9) method="2022-blake3-aes-128-gcm" ;;
-      10) method="2022-blake3-aes-256-gcm" ;;
-      11) method="2022-blake3-chacha20-poly1305" ;;
+      1) method="2022-blake3-aes-128-gcm" ;;
+      2) method="2022-blake3-aes-256-gcm" ;;
+      3) method="2022-blake3-chacha20-poly1305" ;;
       0) return 0 ;;
       *) ui_msg "无效加密方式，请重新选择。"; return 1 ;;
     esac
@@ -3491,6 +4344,7 @@ realm_install_or_reset() {
   realm_state_jq --arg ts "$(utc_now)" '.rules = [] | .meta.updated_at = $ts'
   ensure_realm_service
   render_realm_config >"$REALM_CONFIG_FILE"
+  sync_managed_firewall_rules
 
   if realm_service_exists; then
     stop_realm_service_raw >/dev/null 2>&1 || true
@@ -3511,6 +4365,7 @@ realm_uninstall() {
   rm -f "$REALM_BIN" "$REALM_SERVICE_FILE" "$REALM_OPENRC_SERVICE_FILE" \
     "$REALM_OPENRC_LOG_FILE" "$REALM_CONFIG_FILE" "$REALM_STATE_FILE" 2>/dev/null || true
   rm -rf "$REALM_DIR" 2>/dev/null || true
+  sync_managed_firewall_rules
 
   if has_systemd; then
     systemctl daemon-reload >/dev/null 2>&1 || true
@@ -4049,6 +4904,7 @@ sing-box 状态: $service_status
 [Shadowsocks]
 enabled = $(state_get '.protocols.shadowsocks.enabled')
 port = $(state_get '.protocols.shadowsocks.port')
+allowed_sources = $(state_get 'if ((.protocols.shadowsocks.allowed_sources // []) | length) == 0 then "*（旧配置：全网）" else (.protocols.shadowsocks.allowed_sources | join(", ")) end')
 users = $ss_users
 
 [VLESS + Reality]
@@ -4124,6 +4980,12 @@ uninstall_sbox() {
     rc-update del realm default >/dev/null 2>&1 || true
   fi
 
+  remove_firewall_restore_service
+  if ! remove_all_managed_firewall_rules; then
+    ui_msg "托管防火墙规则未能完全清理。相关服务已停止，卸载已中止；请修复防火墙后重新执行卸载。"
+    return 1
+  fi
+
   detect_pkg_manager
   case "$PKG_MANAGER" in
     apk)
@@ -4179,8 +5041,9 @@ main_menu() {
       "4" "Realm 中转" \
       "5" "查看当前概览" \
       "6" "查看服务状态" \
-      "7" "更新脚本" \
-      "8" "卸载" \
+      "7" "端口管理" \
+      "8" "更新脚本" \
+      "9" "卸载" \
       "0" "退出")" || continue
 
     if ! have_cmd jq && [[ "$choice" != "1" && "$choice" != "0" ]]; then
@@ -4208,9 +5071,12 @@ main_menu() {
         show_service_status
         ;;
       7)
-        update_manager_script
+        port_management_menu
         ;;
       8)
+        update_manager_script
+        ;;
+      9)
         uninstall_sbox
         ;;
       0)
@@ -4233,6 +5099,7 @@ usage() {
   $SCRIPT_NAME                打开管理面板
   $SCRIPT_NAME quick-install  一键安装并初始化
   $SCRIPT_NAME node           打开代理节点管理菜单
+  $SCRIPT_NAME ports          打开端口管理菜单
   $SCRIPT_NAME change-address 更改节点出口 IP 或域名
   $SCRIPT_NAME delete-node    删除已启用的协议节点
   $SCRIPT_NAME add-client     打开新增客户端流程
@@ -4262,7 +5129,7 @@ usage() {
   2. Hysteria2 默认使用自签名证书。
   3. 一键安装使用官方原生 sing-box 软件包。
   4. 支持添加多个 SOCKS5 / Shadowsocks 分流落地，每个落地独立绑定规则集。
-  5. Shadowsocks 可选择多种 AEAD / 2022 加密方式；不预置任何规则集。
+  5. 新建 Shadowsocks 节点与分流仅提供 SS2022，并支持来源 IP/CIDR 白名单。
   6. repair-install 会重装 / 更新脚本和 sing-box 核心，但不会删除状态文件、客户端或分流规则。
   7. 一键安装只安装环境；节点名称和出口地址在新建节点时填写。
 EOF
@@ -4379,6 +5246,20 @@ main() {
     realm)
       ensure_dirs
       prepare_realm_menu && realm_submenu
+      ;;
+    ports|port|port-menu)
+      require_linux
+      require_root
+      ensure_dirs
+      init_state_file
+      port_management_menu
+      ;;
+    firewall-sync)
+      require_linux
+      require_root
+      ensure_dirs
+      have_cmd jq || die "缺少 jq，无法恢复托管防火墙规则。"
+      sync_managed_firewall_rules
       ;;
     migrate-realm-tcp-only)
       require_linux

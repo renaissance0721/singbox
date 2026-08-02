@@ -4,10 +4,31 @@
 
 ## [Unreleased]
 
+暂无。
+
+## [0.4.1] - 2026-08-02
+
 ### 新增
 
-- Shadowsocks 主节点新建时支持选择常用 AEAD / AEAD 2022 加密方式，并按 Nekobox / v2rayNG 导入格式导出链接。
-- 节点管理新增更改节点地址功能，修改后自动更新客户端配置与订阅链接。
+- 新增 Realm TCP 中转管理；旧 Realm 配置会迁移为 TCP-only，并清理脚本管理的 UDP 放行规则
+- 新增 Shadowsocks 来源 IP/CIDR 白名单，可限制为中转 VPS 出口地址
+- 新增 Shadowsocks 私网、链路本地地址和常见云元数据地址访问阻断
+- 新增端口管理菜单，可查看监听端口/占用进程及脚本托管端口状态
+- 新增 UFW、firewalld、iptables/ip6tables 托管规则同步和 systemd/OpenRC 重启恢复
+- 节点管理新增更改节点地址功能，修改后自动更新客户端配置与订阅链接
+
+### 变更
+
+- 新建 Shadowsocks 主节点与分流落地仅提供三种 SS2022 加密方式
+- 保留已有传统 AEAD、`none` 和 `plain` 状态兼容，但不再允许从菜单新建
+- Realm 转发仅开放 TCP
+- Debian/Ubuntu、RHEL 和 Alpine 依赖增加 `iproute`/`iproute2` 与 `iptables`
+
+### 修复
+
+- 修复托管防火墙规则在服务重启和系统重启后的生命周期问题
+- 防火墙同步、清理或验证失败时停止继续启动相关服务，避免配置处于不确定状态
+- 修复 ShellCheck 0.9、0.10 与 0.11 的兼容性问题
 
 ## [0.3.0] - 2026-06-07
 

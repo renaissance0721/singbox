@@ -171,6 +171,7 @@ fi
 grep -Fq -- '--comment "$IPTABLES_RULE_COMMENT"' "$repo_dir/index.sh" || fail "iptables 托管规则缺少标记"
 grep -Fq 'User=${RUNTIME_USER}' "$repo_dir/index.sh" || fail "systemd sing-box 服务未设置低权限用户"
 grep -Fq 'NoNewPrivileges=true' "$repo_dir/index.sh" || fail "systemd 服务缺少 NoNewPrivileges"
+grep -Fq 'Restart=always' "$repo_dir/index.sh" || fail "Realm systemd service does not restart after every unexpected exit"
 grep -Fq "setcap 'cap_net_bind_service=+ep'" "$repo_dir/index.sh" || fail "OpenRC 低权限服务无法兼容低端口监听"
 grep -Fq 'SCRIPT_REPO_ID="1210354428"' "$repo_dir/index.sh" || fail "自动更新未固定 GitHub 仓库数字 ID"
 grep -Fq 'SCRIPT_REPO_OWNER_ID="197479185"' "$repo_dir/index.sh" || fail "自动更新未固定 GitHub 所有者数字 ID"
@@ -198,6 +199,168 @@ if grep -Fq 'base64_urlsafe "${ss_method}:${ss_share_password}"' "$repo_dir/inde
 fi
 grep -Fq 'link="ss://$(uri_encode "$ss_method"):$(uri_encode "$ss_share_password")@${host}:${ss_port}#$(uri_encode "$display_name")"' "$repo_dir/index.sh" ||
   fail "SS2022 分享链接未使用 SIP002 百分号编码 userinfo"
+
+(
+  validation_root="$test_root/realm-port-validation"
+  mkdir -p "$validation_root"
+  REALM_STATE_FILE="$validation_root/state.json"
+  cat >"$REALM_STATE_FILE" <<'EOF'
+{"rules":[{"id":"old","entries":[{"listen":"0.0.0.0:30001","remote":"192.0.2.1:30001"}]}]}
+EOF
+  previous_state_file="$(snapshot_realm_state_file)"
+  realm_state_jq '.rules += [{"id":"new","entries":[{"listen":"0.0.0.0:30002","remote":"192.0.2.2:30002"}]}]'
+  checked_ports=""
+  have_cmd() { [[ "$1" == "ss" ]]; }
+  port_is_listening() {
+    local checked_port=${2%$'\r'}
+    checked_ports="${checked_ports}${checked_ports:+,}${checked_port}"
+    [[ "$checked_port" == "30001" ]]
+  }
+  validate_realm_listener_ports_available "$previous_state_file" true ||
+    fail "Running Realm's existing listener was treated as a port conflict"
+  [[ "$checked_ports" == "30002" ]] ||
+    fail "Realm port validation did not limit checks to newly added listeners"
+  rm -f "$previous_state_file"
+)
+
+(
+  readiness_root="$test_root/realm-readiness"
+  mkdir -p "$readiness_root"
+  REALM_STATE_FILE="$readiness_root/state.json"
+  cat >"$REALM_STATE_FILE" <<'EOF'
+{"rules":[{"id":"ready","entries":[{"listen":"0.0.0.0:30501","remote":"192.0.2.1:30501"},{"listen":"0.0.0.0:30502","remote":"192.0.2.2:30502"}]}]}
+EOF
+  realm_service_exists() { return 0; }
+  realm_service_active() { printf 'active\n'; }
+  port_is_listening() { return 0; }
+  sleep() { fail "Ready Realm service unnecessarily waited"; }
+  verify_realm_service_ready || fail "Ready Realm service failed readiness verification"
+)
+
+(
+  transaction_root="$test_root/realm-firewall-failure"
+  mkdir -p "$transaction_root"
+  REALM_STATE_FILE="$transaction_root/state.json"
+  REALM_CONFIG_FILE="$transaction_root/config.toml"
+  cat >"$REALM_STATE_FILE" <<'EOF'
+{"global":{"log_level":"warn","log_output":"stdout","use_udp":false,"no_tcp":false},"rules":[{"id":"old","entries":[{"listen":"0.0.0.0:31001","remote":"192.0.2.1:31001"}]}],"meta":{}}
+EOF
+  printf 'old-config\n' >"$REALM_CONFIG_FILE"
+  previous_state_file="$(snapshot_realm_state_file)"
+  realm_state_jq '.rules += [{"id":"new","entries":[{"listen":"0.0.0.0:31002","remote":"192.0.2.2:31002"}]}]'
+
+  rollback_sync_calls=0
+  ensure_realm_dirs() { :; }
+  init_realm_state_file() { :; }
+  ensure_realm_service() { :; }
+  prepare_managed_firewall() { :; }
+  realm_service_exists() { return 0; }
+  realm_service_active() { printf 'active\n'; }
+  validate_realm_listener_ports_available() { :; }
+  preflight_realm_config() { :; }
+  realm_apply_firewall_rules() { return 1; }
+  sync_managed_firewall_rules() { rollback_sync_calls=$((rollback_sync_calls + 1)); }
+  write_realm_config_file() { fail "Realm config was written after firewall failure"; }
+  stop_realm_service_raw() { fail "Realm was stopped after firewall failure"; }
+  restart_realm_service_raw() { fail "Realm was restarted after firewall failure"; }
+  ui_msg() { :; }
+
+  if apply_realm_config "$previous_state_file"; then
+    fail "Realm firewall failure was reported as success"
+  fi
+  jq -e '.rules | length == 1 and .[0].id == "old"' "$REALM_STATE_FILE" >/dev/null ||
+    fail "Realm state was not restored after firewall failure"
+  [[ "$(cat "$REALM_CONFIG_FILE")" == "old-config" ]] ||
+    fail "Realm config changed after firewall failure"
+  [[ "$rollback_sync_calls" -eq 1 ]] ||
+    fail "Realm firewall rollback did not run exactly once"
+)
+
+(
+  transaction_root="$test_root/realm-readiness-failure"
+  mkdir -p "$transaction_root"
+  REALM_STATE_FILE="$transaction_root/state.json"
+  REALM_CONFIG_FILE="$transaction_root/config.toml"
+  cat >"$REALM_STATE_FILE" <<'EOF'
+{"global":{"log_level":"warn","log_output":"stdout","use_udp":false,"no_tcp":false},"rules":[{"id":"old","entries":[{"listen":"0.0.0.0:32001","remote":"192.0.2.1:32001"}]}],"meta":{}}
+EOF
+  printf 'old-config\n' >"$REALM_CONFIG_FILE"
+  previous_state_file="$(snapshot_realm_state_file)"
+  realm_state_jq '.rules += [{"id":"new","entries":[{"listen":"0.0.0.0:32002","remote":"192.0.2.2:32002"}]}]'
+
+  restart_calls=0
+  readiness_calls=0
+  ensure_realm_dirs() { :; }
+  init_realm_state_file() { :; }
+  ensure_realm_service() { :; }
+  prepare_managed_firewall() { :; }
+  realm_service_exists() { return 0; }
+  realm_service_active() { printf 'active\n'; }
+  validate_realm_listener_ports_available() { :; }
+  preflight_realm_config() { :; }
+  realm_apply_firewall_rules() { :; }
+  sync_managed_firewall_rules() { :; }
+  write_realm_config_file() { printf 'new-config\n' >"$REALM_CONFIG_FILE"; }
+  enable_realm_service() { :; }
+  restart_realm_service_raw() { restart_calls=$((restart_calls + 1)); }
+  start_realm_service_raw() { fail "Rollback unexpectedly used start instead of restart"; }
+  stop_realm_service_raw() { fail "Rollback unexpectedly stopped Realm"; }
+  verify_realm_service_ready() {
+    readiness_calls=$((readiness_calls + 1))
+    (( readiness_calls >= 2 ))
+  }
+  realm_recent_logs() { :; }
+  ui_show_text() { :; }
+
+  if apply_realm_config "$previous_state_file"; then
+    fail "Realm readiness failure was reported as success"
+  fi
+  jq -e '.rules | length == 1 and .[0].id == "old"' "$REALM_STATE_FILE" >/dev/null ||
+    fail "Realm state was not restored after readiness failure"
+  [[ "$(cat "$REALM_CONFIG_FILE")" == "old-config" ]] ||
+    fail "Realm config was not restored after readiness failure"
+  [[ "$restart_calls" -eq 2 ]] ||
+    fail "Realm old service was not restarted during rollback"
+  [[ "$readiness_calls" -eq 2 ]] ||
+    fail "Realm old service was not verified after rollback"
+)
+
+(
+  transaction_root="$test_root/realm-success"
+  mkdir -p "$transaction_root"
+  REALM_STATE_FILE="$transaction_root/state.json"
+  REALM_CONFIG_FILE="$transaction_root/config.toml"
+  cat >"$REALM_STATE_FILE" <<'EOF'
+{"global":{"log_level":"warn","log_output":"stdout","use_udp":false,"no_tcp":false},"rules":[{"id":"old","entries":[{"listen":"0.0.0.0:33001","remote":"192.0.2.1:33001"}]}],"meta":{}}
+EOF
+  printf 'old-config\n' >"$REALM_CONFIG_FILE"
+  previous_state_file="$(snapshot_realm_state_file)"
+  realm_state_jq '.rules += [{"id":"new","entries":[{"listen":"0.0.0.0:33002","remote":"192.0.2.2:33002"}]}]'
+
+  restart_calls=0
+  ensure_realm_dirs() { :; }
+  init_realm_state_file() { :; }
+  ensure_realm_service() { :; }
+  prepare_managed_firewall() { :; }
+  realm_service_exists() { return 0; }
+  realm_service_active() { printf 'active\n'; }
+  validate_realm_listener_ports_available() { :; }
+  preflight_realm_config() { :; }
+  realm_apply_firewall_rules() { :; }
+  write_realm_config_file() { printf 'new-config\n' >"$REALM_CONFIG_FILE"; }
+  enable_realm_service() { :; }
+  restart_realm_service_raw() { restart_calls=$((restart_calls + 1)); }
+  verify_realm_service_ready() { :; }
+  ui_msg() { :; }
+
+  apply_realm_config "$previous_state_file" || fail "Valid Realm transaction failed"
+  jq -e '.rules | length == 2 and .[1].id == "new"' "$REALM_STATE_FILE" >/dev/null ||
+    fail "Successful Realm transaction did not keep the new state"
+  [[ "$(cat "$REALM_CONFIG_FILE")" == "new-config" ]] ||
+    fail "Successful Realm transaction did not keep the new config"
+  [[ "$restart_calls" -eq 1 ]] ||
+    fail "Successful Realm transaction did not perform exactly one restart"
+)
 
 (
   # shellcheck disable=SC2329

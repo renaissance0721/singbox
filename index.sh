@@ -982,7 +982,7 @@ User=${RUNTIME_USER}
 Group=${RUNTIME_GROUP}
 UMask=0077
 ExecStart=${REALM_BIN} -c ${REALM_CONFIG_FILE}
-Restart=on-failure
+Restart=always
 RestartSec=5s
 LimitNOFILE=1048576
 NoNewPrivileges=true
@@ -1664,10 +1664,23 @@ realm_state_get() {
 
 realm_state_jq() {
   local tmp_file
-  tmp_file="$(mktemp "$TMP_DIR/realm-state.XXXXXX")"
-  jq "$@" "$REALM_STATE_FILE" >"$tmp_file"
-  install -m 0600 "$tmp_file" "$REALM_STATE_FILE"
+  tmp_file="$(mktemp "$TMP_DIR/realm-state.XXXXXX")" || return 1
+  if ! jq "$@" "$REALM_STATE_FILE" >"$tmp_file" ||
+    ! install -m 0600 "$tmp_file" "$REALM_STATE_FILE"; then
+    rm -f "$tmp_file"
+    return 1
+  fi
   rm -f "$tmp_file"
+}
+
+snapshot_realm_state_file() {
+  local snapshot_file
+  snapshot_file="$(mktemp "$TMP_DIR/realm-state-backup.XXXXXX")" || return 1
+  if ! install -m 0600 "$REALM_STATE_FILE" "$snapshot_file"; then
+    rm -f "$snapshot_file"
+    return 1
+  fi
+  printf '%s\n' "$snapshot_file"
 }
 
 uri_encode() {
@@ -3035,14 +3048,34 @@ validate_sing_box_listener_ports_available() {
 }
 
 validate_realm_listener_ports_available() {
-  local port
+  local previous_state_file=${1:-}
+  local realm_was_active=${2:-false}
+  local port duplicate_ports
   have_cmd ss || {
     printf '缺少 ss 命令，无法在放行防火墙前检查 Realm 端口冲突。\n'
     return 1
   }
 
+  duplicate_ports="$(jq -r '
+    [.rules[]?.entries[]?.listen | try capture(":(?<port>[0-9]+)$").port catch empty]
+    | group_by(.)[]
+    | select(length > 1)
+    | .[0]
+  ' "$REALM_STATE_FILE")" || return 1
+  if [[ -n "$duplicate_ports" ]]; then
+    printf 'Realm 配置中存在重复监听端口：%s\n' "$(paste -sd, <<<"$duplicate_ports")"
+    return 1
+  fi
+
   while IFS= read -r port; do
     [[ -n "$port" ]] || continue
+    if [[ "$realm_was_active" == "true" && -s "$previous_state_file" ]] &&
+      realm_managed_ports "$previous_state_file" | awk -v expected="$port" '
+        $0 == expected {found=1}
+        END {exit !found}
+      '; then
+      continue
+    fi
     if port_is_listening tcp "$port"; then
       printf 'Realm 计划使用的 tcp/%s 已被其他进程占用。\n' "$port"
       return 1
@@ -3312,10 +3345,11 @@ realm_rule_group_count() {
 }
 
 realm_managed_ports() {
+  local state_file=${1:-$REALM_STATE_FILE}
   jq -r '
     .rules[]?.entries[]?.listen
     | try capture(":(?<port>[0-9]+)$").port catch empty
-  ' "$REALM_STATE_FILE" | sort -un
+  ' "$state_file" | sort -un
 }
 
 render_realm_config() {
@@ -3349,8 +3383,11 @@ EOF
 write_realm_config_file() {
   local tmp_config
   tmp_config="$(mktemp "$TMP_DIR/realm-config.XXXXXX")" || return 1
-  render_realm_config >"$tmp_config"
-  install -o root -g "$RUNTIME_GROUP" -m 0640 "$tmp_config" "$REALM_CONFIG_FILE"
+  if ! render_realm_config >"$tmp_config" ||
+    ! install -o root -g "$RUNTIME_GROUP" -m 0640 "$tmp_config" "$REALM_CONFIG_FILE"; then
+    rm -f "$tmp_config"
+    return 1
+  fi
   rm -f "$tmp_config"
 }
 
@@ -3438,67 +3475,211 @@ realm_apply_firewall_rules() {
   sync_managed_firewall_rules
 }
 
-apply_realm_config() {
-  local rule_count message port_error realm_was_active=false
+preflight_realm_config() {
+  local rendered_config preflight_config output status
+  [[ "$(realm_rule_group_count)" -gt 0 ]] || return 0
+  have_cmd timeout || {
+    warn "缺少 timeout 命令，无法在切换前预检 Realm 配置。"
+    return 1
+  }
 
-  ensure_realm_dirs
-  init_realm_state_file
-  ensure_realm_service
-
-  if ! prepare_managed_firewall; then
-    ui_msg "防火墙环境不可用，Realm 配置未应用、现有服务未停止。请执行 sbox repair-install 后重试。"
+  rendered_config="$(mktemp "$TMP_DIR/realm-rendered.XXXXXX")" || return 1
+  preflight_config="$(mktemp "$TMP_DIR/realm-preflight.XXXXXX")" || {
+    rm -f "$rendered_config"
+    return 1
+  }
+  if ! render_realm_config >"$rendered_config" ||
+    ! sed -E 's/^listen = ".*"$/listen = "127.0.0.1:0"/' "$rendered_config" >"$preflight_config" ||
+    ! chown root:"$RUNTIME_GROUP" "$preflight_config" ||
+    ! chmod 0640 "$preflight_config"; then
+    rm -f "$rendered_config" "$preflight_config"
     return 1
   fi
 
-  if realm_service_exists && [[ "$(realm_service_active)" == "active" ]]; then
-    realm_was_active=true
-    stop_realm_service_raw >/dev/null 2>&1 || true
+  if output="$(run_as_runtime timeout 2 "$REALM_BIN" -c "$preflight_config" 2>&1)"; then
+    status=0
+  else
+    status=$?
   fi
+  rm -f "$rendered_config" "$preflight_config"
 
-  if ! port_error="$(validate_realm_listener_ports_available)"; then
+  if [[ "$status" -eq 124 ]]; then
+    return 0
+  fi
+  warn "Realm 新配置预检失败：${output:-未知错误}"
+  return 1
+}
+
+verify_realm_service_ready() {
+  local attempt port ready
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    ready=true
+    if ! realm_service_exists || [[ "$(realm_service_active)" != "active" ]]; then
+      ready=false
+    fi
+    while IFS= read -r port; do
+      [[ -n "$port" ]] || continue
+      port_is_listening tcp "$port" || ready=false
+    done < <(realm_managed_ports)
+    if [[ "$ready" == "true" ]]; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+restore_realm_transaction() {
+  local previous_state_file=$1 previous_config_file=$2 previous_config_existed=$3
+  local realm_was_active=$4 config_was_switched=$5 restored=true
+
+  install -m 0600 "$previous_state_file" "$REALM_STATE_FILE" || restored=false
+  if [[ "$config_was_switched" == "true" ]]; then
+    if [[ "$previous_config_existed" == "true" ]]; then
+      install -o root -g "$RUNTIME_GROUP" -m 0640 "$previous_config_file" "$REALM_CONFIG_FILE" || restored=false
+    else
+      rm -f "$REALM_CONFIG_FILE" || restored=false
+    fi
+  fi
+  sync_managed_firewall_rules || restored=false
+
+  if [[ "$config_was_switched" == "true" ]]; then
     if [[ "$realm_was_active" == "true" ]]; then
-      start_realm_service_raw >/dev/null 2>&1 || true
+      if realm_service_exists && [[ "$(realm_service_active)" == "active" ]]; then
+        restart_realm_service_raw >/dev/null 2>&1 || restored=false
+      else
+        start_realm_service_raw >/dev/null 2>&1 || restored=false
+      fi
+      verify_realm_service_ready || restored=false
+    elif realm_service_exists && [[ "$(realm_service_active)" == "active" ]]; then
+      stop_realm_service_raw >/dev/null 2>&1 || restored=false
     fi
-    ui_msg "Realm 配置未应用，防火墙未修改。${port_error}"
-    return 1
   fi
 
-  write_realm_config_file
+  [[ "$restored" == "true" ]]
+}
 
-  rule_count="$(realm_rule_group_count)"
-  if [[ "$rule_count" -eq 0 ]]; then
-    if realm_service_exists; then
-      stop_realm_service_raw >/dev/null 2>&1 || true
-    fi
-    if ! sync_managed_firewall_rules; then
-      ui_msg "Realm 已停止，但清理防火墙规则失败，请进入端口管理重试。"
+apply_realm_config() {
+  local previous_state_file=${1:-}
+  local rule_count message port_error realm_was_active=false
+  local previous_config_file previous_config_existed=false config_was_switched=false rollback_ok=true
+
+  if [[ -z "$previous_state_file" || ! -s "$previous_state_file" ]]; then
+    ui_msg "缺少 Realm 变更前状态，已拒绝执行不可回滚的配置切换。"
+    return 1
+  fi
+  if ! ensure_realm_dirs || ! init_realm_state_file || ! ensure_realm_service; then
+    install -m 0600 "$previous_state_file" "$REALM_STATE_FILE" || true
+    rm -f "$previous_state_file"
+    ui_msg "准备 Realm 服务环境失败，变更已撤销。"
+    return 1
+  fi
+  previous_config_file="$(mktemp "$TMP_DIR/realm-config-backup.XXXXXX")" || {
+    install -m 0600 "$previous_state_file" "$REALM_STATE_FILE" || true
+    rm -f "$previous_state_file"
+    ui_msg "无法创建 Realm 配置备份，变更已撤销。"
+    return 1
+  }
+  if [[ -f "$REALM_CONFIG_FILE" ]]; then
+    if ! cp "$REALM_CONFIG_FILE" "$previous_config_file"; then
+      install -m 0600 "$previous_state_file" "$REALM_STATE_FILE" || true
+      rm -f "$previous_state_file" "$previous_config_file"
+      ui_msg "无法备份 Realm 现有配置，变更已撤销。"
       return 1
     fi
+    previous_config_existed=true
+  fi
+  if realm_service_exists && [[ "$(realm_service_active)" == "active" ]]; then
+    realm_was_active=true
+  fi
+
+  if ! prepare_managed_firewall; then
+    install -m 0600 "$previous_state_file" "$REALM_STATE_FILE" || true
+    rm -f "$previous_state_file" "$previous_config_file"
+    ui_msg "防火墙环境不可用，Realm 变更已撤销、现有服务未停止。请执行 sbox repair-install 后重试。"
+    return 1
+  fi
+
+  if ! port_error="$(validate_realm_listener_ports_available "$previous_state_file" "$realm_was_active")"; then
+    install -m 0600 "$previous_state_file" "$REALM_STATE_FILE" || true
+    rm -f "$previous_state_file" "$previous_config_file"
+    ui_msg "Realm 变更已撤销，现有服务和防火墙未修改。${port_error}"
+    return 1
+  fi
+
+  rule_count="$(realm_rule_group_count)"
+  if [[ "$rule_count" -gt 0 ]] && ! preflight_realm_config; then
+    install -m 0600 "$previous_state_file" "$REALM_STATE_FILE" || true
+    rm -f "$previous_state_file" "$previous_config_file"
+    ui_msg "Realm 新配置预检失败，变更已撤销，原服务保持运行。"
+    return 1
+  fi
+
+  if ! realm_apply_firewall_rules; then
+    restore_realm_transaction "$previous_state_file" "$previous_config_file" "$previous_config_existed" "$realm_was_active" false || rollback_ok=false
+    rm -f "$previous_state_file" "$previous_config_file"
+    if [[ "$rollback_ok" == "true" ]]; then
+      ui_msg "Realm 防火墙同步失败，变更已自动撤销，原服务仍在运行。"
+    else
+      ui_msg "Realm 防火墙同步失败，且自动恢复未完全成功；请立即查看 sbox-firewall 状态。"
+    fi
+    return 1
+  fi
+
+  if ! write_realm_config_file; then
+    restore_realm_transaction "$previous_state_file" "$previous_config_file" "$previous_config_existed" "$realm_was_active" false || rollback_ok=false
+    rm -f "$previous_state_file" "$previous_config_file"
+    if [[ "$rollback_ok" == "true" ]]; then
+      ui_msg "Realm 配置写入失败，变更已自动撤销，原服务未停止。"
+    else
+      ui_msg "Realm 配置写入失败，且防火墙自动恢复未完全成功。"
+    fi
+    return 1
+  fi
+  config_was_switched=true
+
+  if [[ "$rule_count" -eq 0 ]]; then
+    if realm_service_exists && ! stop_realm_service_raw >/dev/null 2>&1; then
+      restore_realm_transaction "$previous_state_file" "$previous_config_file" "$previous_config_existed" "$realm_was_active" "$config_was_switched" || rollback_ok=false
+      rm -f "$previous_state_file" "$previous_config_file"
+      ui_msg "Realm 停止失败，删除操作已回滚。"
+      return 1
+    fi
+    rm -f "$previous_state_file" "$previous_config_file"
     ui_msg "Realm 当前没有任何转发规则，配置已保存，服务已停止。"
     return 0
   fi
 
-  if ! realm_apply_firewall_rules; then
-    ui_msg "Realm 配置已保存，但防火墙同步失败；服务已保持停止，请先修复防火墙。"
+  enable_realm_service
+  if [[ "$realm_was_active" == "true" ]]; then
+    if restart_realm_service_raw >/dev/null 2>&1 && verify_realm_service_ready; then
+      message="Realm 配置已保存到 ${REALM_CONFIG_FILE}，服务已重启。"
+    else
+      restore_realm_transaction "$previous_state_file" "$previous_config_file" "$previous_config_existed" "$realm_was_active" "$config_was_switched" || rollback_ok=false
+      rm -f "$previous_state_file" "$previous_config_file"
+      ui_show_text "Realm 新配置启动失败，已自动恢复旧配置" "$(realm_recent_logs)"
+      return 1
+    fi
+  elif start_realm_service_raw >/dev/null 2>&1 && verify_realm_service_ready; then
+    message="Realm 配置已保存到 ${REALM_CONFIG_FILE}，服务已自动启动。"
+  else
+    restore_realm_transaction "$previous_state_file" "$previous_config_file" "$previous_config_existed" "$realm_was_active" "$config_was_switched" || rollback_ok=false
+    rm -f "$previous_state_file" "$previous_config_file"
+    ui_show_text "Realm 新配置启动失败，已自动恢复旧配置" "$(realm_recent_logs)"
     return 1
   fi
 
-  enable_realm_service
-  if realm_service_exists && [[ "$(realm_service_active)" == "active" ]]; then
-    restart_realm_service_raw >/dev/null 2>&1 || {
-      ui_show_text "Realm 启动失败" "$(realm_recent_logs)"
-      return 1
-    }
-    message="Realm 配置已保存到 ${REALM_CONFIG_FILE}，服务已重启。"
-  else
-    start_realm_service_raw >/dev/null 2>&1 || {
-      ui_show_text "Realm 启动失败" "$(realm_recent_logs)"
-      return 1
-    }
-    message="Realm 配置已保存到 ${REALM_CONFIG_FILE}，服务已自动启动。"
-  fi
-
+  rm -f "$previous_state_file" "$previous_config_file"
   ui_msg "$message"
+}
+
+apply_current_realm_state() {
+  local previous_state_file
+  previous_state_file="$(snapshot_realm_state_file)" || {
+    ui_msg "无法创建 Realm 状态快照，未执行配置切换。"
+    return 1
+  }
+  apply_realm_config "$previous_state_file"
 }
 
 write_client_exports() {
@@ -4659,7 +4840,7 @@ realm_uninstall() {
 }
 
 add_realm_forward_rule() {
-  local listen_port remote_host remote_port rule_id description entries_json error_count=0
+  local listen_port remote_host remote_port rule_id description entries_json previous_state_file error_count=0
 
   ensure_realm_dirs
   init_realm_state_file
@@ -4677,16 +4858,25 @@ add_realm_forward_rule() {
   description="0.0.0.0:${listen_port} -> ${remote_host}:${remote_port}"
   entries_json="$(jq -nc --arg listen "0.0.0.0:${listen_port}" --arg remote "${remote_host}:${remote_port}" '[{listen: $listen, remote: $remote}]')"
 
-  realm_state_jq --arg id "$rule_id" --arg description "$description" --argjson entries "$entries_json" --arg ts "$(utc_now)" '
+  previous_state_file="$(snapshot_realm_state_file)" || {
+    ui_msg "无法创建 Realm 状态快照，未执行变更。"
+    return 1
+  }
+
+  if ! realm_state_jq --arg id "$rule_id" --arg description "$description" --argjson entries "$entries_json" --arg ts "$(utc_now)" '
     .rules += [{id: $id, type: "single", description: $description, entries: $entries}] |
     .meta.updated_at = $ts
-  '
+  '; then
+    rm -f "$previous_state_file"
+    ui_msg "写入 Realm 规则失败，未执行变更。"
+    return 1
+  fi
 
-  apply_realm_config
+  apply_realm_config "$previous_state_file"
 }
 
 add_realm_range_rule() {
-  local listen_start listen_end remote_host remote_start remote_end count rule_id description entries_json error_count=0
+  local listen_start listen_end remote_host remote_start remote_end count rule_id description entries_json previous_state_file error_count=0
 
   ensure_realm_dirs
   init_realm_state_file
@@ -4749,16 +4939,25 @@ add_realm_range_rule() {
     }]
   ')"
 
-  realm_state_jq --arg id "$rule_id" --arg description "$description" --argjson entries "$entries_json" --arg ts "$(utc_now)" '
+  previous_state_file="$(snapshot_realm_state_file)" || {
+    ui_msg "无法创建 Realm 状态快照，未执行变更。"
+    return 1
+  }
+
+  if ! realm_state_jq --arg id "$rule_id" --arg description "$description" --argjson entries "$entries_json" --arg ts "$(utc_now)" '
     .rules += [{id: $id, type: "range", description: $description, entries: $entries}] |
     .meta.updated_at = $ts
-  '
+  '; then
+    rm -f "$previous_state_file"
+    ui_msg "写入 Realm 规则失败，未执行变更。"
+    return 1
+  fi
 
-  apply_realm_config
+  apply_realm_config "$previous_state_file"
 }
 
 delete_realm_rule() {
-  local choice selected_index rule_id
+  local choice selected_index rule_id previous_state_file
   local -a rule_ids=()
   local -a options=()
 
@@ -4801,12 +5000,21 @@ delete_realm_rule() {
   }
 
   rule_id="${rule_ids[$selected_index]}"
-  realm_state_jq --arg id "$rule_id" --arg ts "$(utc_now)" '
+  previous_state_file="$(snapshot_realm_state_file)" || {
+    ui_msg "无法创建 Realm 状态快照，未执行变更。"
+    return 1
+  }
+
+  if ! realm_state_jq --arg id "$rule_id" --arg ts "$(utc_now)" '
     .rules |= map(select(.id != $id)) |
     .meta.updated_at = $ts
-  '
+  '; then
+    rm -f "$previous_state_file"
+    ui_msg "写入 Realm 规则失败，未执行变更。"
+    return 1
+  fi
 
-  apply_realm_config
+  apply_realm_config "$previous_state_file"
 }
 
 show_realm_config() {
@@ -4845,16 +5053,11 @@ start_realm_service() {
     return 1
   }
 
-  write_realm_config_file
-  realm_apply_firewall_rules
-  ensure_realm_service
-  enable_realm_service
-  if ! start_realm_service_raw; then
-    ui_show_text "Realm 启动失败" "$(realm_recent_logs)"
-    return 1
+  if realm_service_exists && [[ "$(realm_service_active)" == "active" ]]; then
+    ui_msg "Realm 服务已经在运行。"
+    return 0
   fi
-
-  ui_msg "Realm 服务已启动。"
+  apply_current_realm_state
 }
 
 stop_realm_service() {
@@ -4888,16 +5091,7 @@ restart_realm_service() {
     return 1
   }
 
-  write_realm_config_file
-  realm_apply_firewall_rules
-  ensure_realm_service
-  enable_realm_service
-  if ! restart_realm_service_raw; then
-    ui_show_text "Realm 重启失败" "$(realm_recent_logs)"
-    return 1
-  fi
-
-  ui_msg "Realm 服务已重启。"
+  apply_current_realm_state
 }
 
 fetch_latest_project_from_repo() {
@@ -5200,7 +5394,6 @@ prepare_realm_menu() {
   fi
 
   ensure_realm_service
-  write_realm_config_file
 }
 
 show_client_info() {

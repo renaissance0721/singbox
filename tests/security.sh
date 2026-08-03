@@ -186,6 +186,17 @@ printf 'hello\n' >"$blob_fixture"
 [[ "$(git_blob_sha1_file "$blob_fixture")" == "ce013625030ba8dba906f756967f9e9ca394464a" ]] ||
   fail "Git blob 哈希计算不正确"
 
+ss2022_method="2022-blake3-aes-128-gcm"
+ss2022_password="AQIDBAUGBwgJCgsMDQ4PEA==:ERITFBUWFxgZGhscHR4fIA=="
+ss2022_userinfo="$(uri_encode "$ss2022_method"):$(uri_encode "$ss2022_password")"
+[[ "$ss2022_userinfo" == '2022-blake3-aes-128-gcm:AQIDBAUGBwgJCgsMDQ4PEA%3D%3D%3AERITFBUWFxgZGhscHR4fIA%3D%3D' ]] ||
+  fail "SS2022 SIP002 userinfo 未使用百分号编码"
+if grep -Fq 'base64_urlsafe "${ss_method}:${ss_share_password}"' "$repo_dir/index.sh"; then
+  fail "SS2022 分享链接仍使用 SIP002 禁止的 Base64URL userinfo"
+fi
+grep -Fq 'link="ss://$(uri_encode "$ss_method"):$(uri_encode "$ss_share_password")@${host}:${ss_port}#$(uri_encode "$display_name")"' "$repo_dir/index.sh" ||
+  fail "SS2022 分享链接未使用 SIP002 百分号编码 userinfo"
+
 (
   # shellcheck disable=SC2329
   download_to_file() {

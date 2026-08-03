@@ -180,6 +180,8 @@ grep -Fq 'mktemp "$(dirname "$target_path")/.sbox-update.XXXXXX"' "$repo_dir/ind
 if grep -q 'SBOX_UPDATE_INDEX_SHA256\|请输入可信发布说明中 index.sh' "$repo_dir/index.sh"; then
   fail "自动更新仍要求手动输入 SHA-256"
 fi
+grep -Fq 'if [[ -v BASH_SOURCE ]]; then' "$repo_dir/install.sh" ||
+  fail "install.sh 通过标准输入执行时仍可能因 BASH_SOURCE[0] 未定义而退出"
 
 blob_fixture="$test_root/git-blob-fixture.txt"
 printf 'hello\n' >"$blob_fixture"

@@ -12,6 +12,7 @@ INDEX_URL="${INDEX_URL:-https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_N
 EXPECTED_INDEX_SHA256="eefa8ca9fb505b7f44e9e5e8a068e94dfd5506ba2486ee01b18b97802e9e9ab5"
 INSTALL_COMMAND=""
 SCRIPT_DIR=""
+INSTALLER_SOURCE=""
 DOWNLOAD_TMP=""
 INSTALL_TMP=""
 
@@ -114,8 +115,11 @@ trap cleanup EXIT
 require_linux
 require_root
 
-if [[ "${BASH_SOURCE[0]}" == */* && -f "${BASH_SOURCE[0]}" ]]; then
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -v BASH_SOURCE ]]; then
+  INSTALLER_SOURCE="${BASH_SOURCE[0]}"
+fi
+if [[ "$INSTALLER_SOURCE" == */* && -f "$INSTALLER_SOURCE" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "$INSTALLER_SOURCE")" && pwd)"
 fi
 
 DOWNLOAD_TMP="$(mktemp "${TMPDIR:-/tmp}/sbox-index.XXXXXX")"

@@ -46,7 +46,6 @@ FIREWALL_SYSTEMD_SERVICE_FILE="${FIREWALL_SYSTEMD_SERVICE_FILE:-/etc/systemd/sys
 SING_BOX_FIREWALL_DROPIN_DIR="${SING_BOX_FIREWALL_DROPIN_DIR:-/etc/systemd/system/sing-box.service.d}"
 REALM_FIREWALL_DROPIN_DIR="${REALM_FIREWALL_DROPIN_DIR:-/etc/systemd/system/realm.service.d}"
 SING_BOX_HARDENING_DROPIN_FILE="${SING_BOX_HARDENING_DROPIN_FILE:-$SING_BOX_FIREWALL_DROPIN_DIR/20-sbox-hardening.conf}"
-REALM_HARDENING_DROPIN_FILE="${REALM_HARDENING_DROPIN_FILE:-$REALM_FIREWALL_DROPIN_DIR/20-sbox-hardening.conf}"
 RUNTIME_USER="${RUNTIME_USER:-sbox-runtime}"
 RUNTIME_GROUP="${RUNTIME_GROUP:-sbox-runtime}"
 SAGERNET_GPG_FINGERPRINT="2C317FBD5D886B4E89BAE8DA6D9152172A2B2F0C"
@@ -552,23 +551,23 @@ install_dependencies() {
 
     case "$PKG_MANAGER" in
       apk)
-      apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc coreutils findutils iptables iproute2 su-exec libcap-setcap
+      apk add --no-cache bash curl jq openssl ca-certificates tar gzip openrc coreutils findutils iptables iproute2 su-exec libcap-setcap
       ;;
     apt)
       export DEBIAN_FRONTEND=noninteractive
       normalize_debian_apt_sources || warn "Debian apt 源自动修复失败，将继续尝试 apt-get update。"
       apt-get update -y
-      apt-get install -y curl jq openssl ca-certificates git tar gzip iproute2 iptables gnupg
+      apt-get install -y curl jq openssl ca-certificates tar gzip iproute2 iptables gnupg
       ;;
     dnf)
-      dnf install -y curl jq openssl ca-certificates git tar gzip iproute iptables gnupg2
+      dnf install -y curl jq openssl ca-certificates tar gzip iproute iptables gnupg2
       ;;
     yum)
       yum install -y epel-release || true
-      yum install -y curl jq openssl ca-certificates git tar gzip iproute iptables gnupg2
+      yum install -y curl jq openssl ca-certificates tar gzip iproute iptables gnupg2
       ;;
     *)
-      die "暂不支持自动安装依赖，请手动安装 bash、curl、jq、openssl、ca-certificates、git、tar、gzip 后再运行。"
+      die "暂不支持自动安装依赖，请手动安装 bash、curl、jq、openssl、ca-certificates、tar、gzip 后再运行。"
       ;;
   esac
 }
@@ -3400,7 +3399,6 @@ migrate_realm_tcp_only() {
   fi
 
   ensure_runtime_account
-  ensure_realm_dirs
   realm_state_jq --arg version "$SCRIPT_VERSION" --arg ts "$(utc_now)" '
     .global = (.global // {}) |
     .global.use_udp = false |
@@ -3605,7 +3603,6 @@ EOF
 apply_config() {
   local enabled_count tmp_config check_output success_text links_file check_bin port_error
   local service_was_active=false
-  ensure_runtime_account
   ensure_sing_box_service
   enabled_count="$(enabled_protocol_count)"
 
@@ -5027,12 +5024,7 @@ install_manager_project_from_repo() {
   target_path="$MANAGER_SCRIPT_PATH"
   project_dir="$(fetch_latest_project_from_repo)" || return 1
 
-  if ! bash -n "$project_dir/index.sh"; then
-    rm -rf "$(dirname "$project_dir")"
-    return 1
-  fi
-
-  install -d -m 0755 "$(dirname "$target_path")" "$PROJECT_INSTALL_DIR"
+  install -d -m 0755 "$(dirname "$target_path")"
   install_tmp="$(mktemp "$(dirname "$target_path")/.sbox-update.XXXXXX")" || {
     rm -rf "$(dirname "$project_dir")"
     return 1
@@ -5378,7 +5370,7 @@ uninstall_sbox() {
   rm -f "$SING_BOX_OPENRC_SERVICE_FILE" "$SING_BOX_OPENRC_LOG_FILE" 2>/dev/null || true
   rm -f "$REALM_SERVICE_FILE" /lib/systemd/system/realm.service /usr/lib/systemd/system/realm.service /etc/systemd/system/multi-user.target.wants/realm.service 2>/dev/null || true
   rm -f "$REALM_OPENRC_SERVICE_FILE" "$REALM_OPENRC_LOG_FILE" 2>/dev/null || true
-  rm -f "$SING_BOX_HARDENING_DROPIN_FILE" "$REALM_HARDENING_DROPIN_FILE" 2>/dev/null || true
+  rm -f "$SING_BOX_HARDENING_DROPIN_FILE" 2>/dev/null || true
   rmdir "$SING_BOX_FIREWALL_DROPIN_DIR" "$REALM_FIREWALL_DROPIN_DIR" 2>/dev/null || true
   rm -rf /etc/sing-box "$REALM_DIR" "$STATE_DIR" 2>/dev/null || true
   rm -rf "$PROJECT_INSTALL_DIR" 2>/dev/null || true

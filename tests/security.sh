@@ -195,14 +195,14 @@ printf 'hello\n' >"$blob_fixture"
 
 ss2022_method="2022-blake3-aes-128-gcm"
 ss2022_password="AQIDBAUGBwgJCgsMDQ4PEA==:ERITFBUWFxgZGhscHR4fIA=="
-ss2022_userinfo="$(uri_encode "$ss2022_method"):$(uri_encode "$ss2022_password")"
-[[ "$ss2022_userinfo" == '2022-blake3-aes-128-gcm:AQIDBAUGBwgJCgsMDQ4PEA%3D%3D%3AERITFBUWFxgZGhscHR4fIA%3D%3D' ]] ||
-  fail "SS2022 SIP002 userinfo 未使用百分号编码"
-if grep -Fq 'base64_urlsafe "${ss_method}:${ss_share_password}"' "$repo_dir/index.sh"; then
-  fail "SS2022 分享链接仍使用 SIP002 禁止的 Base64URL userinfo"
+ss2022_userinfo="$(base64_urlsafe "${ss2022_method}:${ss2022_password}")"
+[[ "$ss2022_userinfo" == 'MjAyMi1ibGFrZTMtYWVzLTEyOC1nY206QVFJREJBVUdCd2dKQ2dzTURRNFBFQT09OkVSSVRGQlVXRnhnWkdoc2NIUjRmSUE9PQ' ]] ||
+  fail "SS2022 Shadowrocket 兼容 userinfo 的 Base64URL 编码不正确"
+grep -Fq 'link="ss://$(base64_urlsafe "${ss_method}:${ss_share_password}")@${host}:${ss_port}#$(uri_encode "$display_name")"' "$repo_dir/index.sh" ||
+  fail "SS2022 分享链接未使用 Shadowrocket 兼容的 Base64URL userinfo"
+if grep -Fq 'link="ss://$(uri_encode "$ss_method"):$(uri_encode "$ss_share_password")@' "$repo_dir/index.sh"; then
+  fail "SS2022 分享链接仍直接在 ss:// 后输出加密方式"
 fi
-grep -Fq 'link="ss://$(uri_encode "$ss_method"):$(uri_encode "$ss_share_password")@${host}:${ss_port}#$(uri_encode "$display_name")"' "$repo_dir/index.sh" ||
-  fail "SS2022 分享链接未使用 SIP002 百分号编码 userinfo"
 
 (
   repair_root="$test_root/sing-box-netlink-repair"

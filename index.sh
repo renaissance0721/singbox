@@ -807,7 +807,7 @@ ProtectHostname=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
 LockPersonality=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 EOF
@@ -841,6 +841,28 @@ start_pre() {
 }
 EOF
   chmod 755 "$SING_BOX_OPENRC_SERVICE_FILE"
+}
+
+repair_sing_box_netlink_hardening() {
+  local active_state sub_state
+  [[ "$(sing_box_service_manager)" == "systemd" ]] || return 0
+  have_cmd sing-box || return 0
+
+  if service_exists && grep -Eq '^RestrictAddressFamilies=.*AF_NETLINK([[:space:]]|$)' "$SING_BOX_HARDENING_DROPIN_FILE" 2>/dev/null; then
+    return 0
+  fi
+
+  active_state="$(systemctl show sing-box -p ActiveState --value 2>/dev/null || true)"
+  sub_state="$(systemctl show sing-box -p SubState --value 2>/dev/null || true)"
+  ensure_sing_box_service || return 1
+
+  if [[ "$active_state" == "failed" || "$sub_state" == auto-restart* ]]; then
+    systemctl reset-failed sing-box >/dev/null 2>&1 || true
+    if ! systemctl restart sing-box >/dev/null 2>&1 || ! verify_sing_box_service_ready; then
+      warn "已修复 sing-box 的 AF_NETLINK 权限，但服务或监听端口尚未恢复，请查看 sing-box 日志。"
+      return 1
+    fi
+  fi
 }
 
 enable_sing_box_service() {
@@ -1289,6 +1311,7 @@ init_state_file() {
   if [[ -s "$STATE_FILE" ]]; then
     migrate_state_schema
     migrate_realm_tcp_only
+    repair_sing_box_netlink_hardening
     return 0
   fi
 
@@ -1357,6 +1380,7 @@ EOF
   chmod 0600 "$STATE_FILE"
 
   migrate_realm_tcp_only
+  repair_sing_box_netlink_hardening
 }
 
 state_get() {
@@ -3047,6 +3071,25 @@ validate_sing_box_listener_ports_available() {
   done <<<"$rows"
 }
 
+verify_sing_box_service_ready() {
+  local attempt protocol port label ready
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    ready=true
+    if ! service_exists || [[ "$(sing_box_service_active 2>/dev/null || true)" != "active" ]]; then
+      ready=false
+    fi
+    while IFS=$'\t' read -r protocol port label; do
+      [[ -n "$protocol" && -n "$port" ]] || continue
+      port_is_listening "$protocol" "$port" || ready=false
+    done < <(desired_sing_box_listeners)
+    if [[ "$ready" == "true" ]]; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
 validate_realm_listener_ports_available() {
   local previous_state_file=${1:-}
   local realm_was_active=${2:-false}
@@ -3847,6 +3890,10 @@ apply_config() {
 
   write_client_exports
   restart_sing_box || return 1
+  if ! verify_sing_box_service_ready; then
+    ui_show_text "sing-box 启动后未能建立全部监听端口" "$(sing_box_recent_logs)"
+    return 1
+  fi
 
   success_text="配置已写入 $CONFIG_FILE，服务已重载。客户端信息已导出到 $CLIENT_DIR。"
   links_file="$(direct_links_file)"

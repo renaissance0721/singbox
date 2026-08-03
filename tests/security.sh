@@ -171,6 +171,10 @@ fi
 grep -Fq -- '--comment "$IPTABLES_RULE_COMMENT"' "$repo_dir/index.sh" || fail "iptables 托管规则缺少标记"
 grep -Fq 'User=${RUNTIME_USER}' "$repo_dir/index.sh" || fail "systemd sing-box 服务未设置低权限用户"
 grep -Fq 'NoNewPrivileges=true' "$repo_dir/index.sh" || fail "systemd 服务缺少 NoNewPrivileges"
+grep -Fq 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' "$repo_dir/index.sh" ||
+  fail "sing-box systemd service does not allow required AF_NETLINK route updates"
+grep -Fq 'repair_sing_box_netlink_hardening' "$repo_dir/index.sh" ||
+  fail "Existing sing-box installations do not auto-repair missing AF_NETLINK access"
 grep -Fq 'Restart=always' "$repo_dir/index.sh" || fail "Realm systemd service does not restart after every unexpected exit"
 grep -Fq "setcap 'cap_net_bind_service=+ep'" "$repo_dir/index.sh" || fail "OpenRC 低权限服务无法兼容低端口监听"
 grep -Fq 'SCRIPT_REPO_ID="1210354428"' "$repo_dir/index.sh" || fail "自动更新未固定 GitHub 仓库数字 ID"
@@ -199,6 +203,57 @@ if grep -Fq 'base64_urlsafe "${ss_method}:${ss_share_password}"' "$repo_dir/inde
 fi
 grep -Fq 'link="ss://$(uri_encode "$ss_method"):$(uri_encode "$ss_share_password")@${host}:${ss_port}#$(uri_encode "$display_name")"' "$repo_dir/index.sh" ||
   fail "SS2022 分享链接未使用 SIP002 百分号编码 userinfo"
+
+(
+  repair_root="$test_root/sing-box-netlink-repair"
+  mkdir -p "$repair_root"
+  SING_BOX_HARDENING_DROPIN_FILE="$repair_root/20-sbox-hardening.conf"
+  printf '[Service]\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n' >"$SING_BOX_HARDENING_DROPIN_FILE"
+  ensure_calls=0
+  restart_calls=0
+  verify_calls=0
+  sing_box_service_manager() { printf 'systemd\n'; }
+  have_cmd() { [[ "$1" == "sing-box" ]]; }
+  service_exists() { return 0; }
+  systemctl() {
+    if [[ "$1" == "show" && "$4" == "ActiveState" ]]; then
+      printf 'activating\n'
+    elif [[ "$1" == "show" && "$4" == "SubState" ]]; then
+      printf 'auto-restart-queued\n'
+    elif [[ "$1" == "restart" ]]; then
+      restart_calls=$((restart_calls + 1))
+    fi
+  }
+  ensure_sing_box_service() {
+    ensure_calls=$((ensure_calls + 1))
+    printf '[Service]\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\n' >"$SING_BOX_HARDENING_DROPIN_FILE"
+  }
+  verify_sing_box_service_ready() { verify_calls=$((verify_calls + 1)); }
+
+  repair_sing_box_netlink_hardening || fail "Existing sing-box AF_NETLINK restriction was not repaired"
+  [[ "$ensure_calls" -eq 1 && "$restart_calls" -eq 1 && "$verify_calls" -eq 1 ]] ||
+    fail "AF_NETLINK repair did not reload, restart, and verify the crashed sing-box service"
+  repair_sing_box_netlink_hardening || fail "Already repaired AF_NETLINK restriction was rejected"
+  [[ "$ensure_calls" -eq 1 && "$restart_calls" -eq 1 && "$verify_calls" -eq 1 ]] ||
+    fail "AF_NETLINK repair was not idempotent"
+)
+
+(
+  readiness_root="$test_root/sing-box-readiness"
+  mkdir -p "$readiness_root"
+  STATE_FILE="$readiness_root/state.json"
+  cat >"$STATE_FILE" <<'EOF'
+{"protocols":{"shadowsocks":{"enabled":true,"port":29991},"vless_reality":{"enabled":false,"port":29992},"hysteria2":{"enabled":false,"port":29993}}}
+EOF
+  service_exists() { return 0; }
+  sing_box_service_active() { printf 'active\n'; }
+  port_is_listening() {
+    local checked_port=${2%$'\r'}
+    [[ "$1" == "tcp" && "$checked_port" == "29991" ]]
+  }
+  sleep() { fail "Ready sing-box service unnecessarily waited"; }
+  verify_sing_box_service_ready || fail "Ready sing-box listener failed post-start verification"
+)
 
 (
   validation_root="$test_root/realm-port-validation"

@@ -156,10 +156,6 @@ sha256_file() {
   else
     return 1
   fi
-  wireguard_profile_active "$interface" || return 1
-  if [[ "$(wireguard_profile_field "$id" paired)" == "true" ]]; then
-    wireguard_profile_route_ready "$id" || return 1
-  fi
 }
 
 git_blob_sha1_file() {
@@ -3756,6 +3752,10 @@ wireguard_start_profile() {
     fi
   else
     return 1
+  fi
+  wireguard_profile_active "$interface" || return 1
+  if [[ "$(wireguard_profile_field "$id" paired)" == "true" ]]; then
+    wireguard_profile_route_ready "$id" || return 1
   fi
 }
 

@@ -194,6 +194,8 @@ blob_fixture="$test_root/git-blob-fixture.txt"
 printf 'hello\n' >"$blob_fixture"
 [[ "$(git_blob_sha1_file "$blob_fixture")" == "ce013625030ba8dba906f756967f9e9ca394464a" ]] ||
   fail "Git blob 哈希计算不正确"
+[[ "$(sha256_file "$blob_fixture")" == "$(sha256sum "$blob_fixture" | awk '{print tolower($1)}')" ]] ||
+  fail "SHA-256 文件计算函数异常或引用了未初始化变量"
 
 ss2022_method="2022-blake3-aes-128-gcm"
 ss2022_password="AQIDBAUGBwgJCgsMDQ4PEA==:ERITFBUWFxgZGhscHR4fIA=="

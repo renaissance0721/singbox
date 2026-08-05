@@ -6405,7 +6405,6 @@ fetch_latest_project_from_repo() {
       rm -rf "$tmp_dir"
       return 1
     }
-    actual_sha256="$api_sha256"
     warn "不可变 Raw 下载入口不可用；已使用通过仓库、所有者、提交及 Blob 哈希校验的 GitHub API 内容继续更新。"
   fi
 
@@ -6415,7 +6414,7 @@ fetch_latest_project_from_repo() {
     return 1
   }
 
-  log "更新来源校验通过：commit ${commit_sha}，SHA-256 ${actual_sha256}。"
+  log "更新来源校验通过。"
   printf '%s\n' "$project_dir"
 }
 

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+# shellcheck disable=SC2329
+
 set -Eeuo pipefail
 
 fail() {
@@ -203,6 +205,111 @@ grep -Fq 'link="ss://$(base64_urlsafe "${ss_method}:${ss_share_password}")@${hos
 if grep -Fq 'link="ss://$(uri_encode "$ss_method"):$(uri_encode "$ss_share_password")@' "$repo_dir/index.sh"; then
   fail "SS2022 分享链接仍直接在 ss:// 后输出加密方式"
 fi
+
+wg_pairing_json='{"kind":"sbox-wireguard-invite-v1","tunnel_id":"wg-test","name":"test"}'
+wg_pairing_code="$(wireguard_encode_pairing_json "$wg_pairing_json")"
+[[ "$wg_pairing_code" == SBOXWG1:* ]] || fail "WireGuard 配对信息缺少固定版本前缀"
+[[ "$(wireguard_decode_pairing_code "$wg_pairing_code")" == "$wg_pairing_json" ]] ||
+  fail "WireGuard 配对信息无法无损编码和解码"
+if wireguard_decode_pairing_code 'SBOXWG1:%%%%' >/dev/null 2>&1; then
+  fail "损坏的 WireGuard 配对信息仍被接受"
+fi
+wireguard_valid_allowed_source '198.51.100.9' || fail "WireGuard 拒绝有效的单一中转来源"
+if wireguard_valid_allowed_source '0.0.0.0/0'; then
+  fail "WireGuard 落地端错误允许全网来源"
+fi
+
+(
+  migration_root="$test_root/wireguard-migration"
+  mkdir -p "$migration_root"
+  REALM_STATE_FILE="$migration_root/realm-state.json"
+  cat >"$REALM_STATE_FILE" <<'EOF'
+{"meta":{},"global":{"use_udp":false,"no_tcp":false},"rules":[{"id":"legacy","type":"single","entries":[{"listen":"0.0.0.0:30001","remote":"192.0.2.1:443"}]}]}
+EOF
+  migrate_realm_wireguard_schema || fail "Realm WireGuard 状态迁移失败"
+  jq -e '
+    .meta.realm_wireguard_schema == 1
+    and (.wireguard.profiles | type == "array" and length == 0)
+    and .rules[0].mode == "direct"
+    and .rules[0].tunnel_id == null
+  ' "$REALM_STATE_FILE" >/dev/null || fail "旧 Realm 规则未安全迁移为 direct"
+)
+
+(
+  render_root="$test_root/wireguard-render"
+  mkdir -p "$render_root/wireguard"
+  REALM_STATE_FILE="$render_root/realm-state.json"
+  # Used by sourced WireGuard path helpers.
+  # shellcheck disable=SC2034
+  WIREGUARD_DIR="$render_root/wireguard"
+  test_wg_key="$(printf '01234567890123456789012345678901' | openssl base64 -A)"
+  printf '%s\n' "$test_wg_key" >"$(wireguard_private_key_file sbwg0)"
+  cat >"$REALM_STATE_FILE" <<EOF
+{
+  "meta":{"realm_wireguard_schema":1},
+  "global":{"log_level":"warn","log_output":"stdout","use_udp":false,"no_tcp":false},
+  "wireguard":{"profiles":[{
+    "id":"wg-test","name":"test","interface":"sbwg0","role":"relay",
+    "local_address":"10.253.10.1","peer_address":"10.253.10.2",
+    "public_key":"$test_wg_key","peer_public_key":"$test_wg_key",
+    "endpoint_host":"198.51.100.2","endpoint_port":51820,"listen_port":null,
+    "allowed_source":null,"mtu":1420,"persistent_keepalive":25,"enabled":true,"paired":true
+  }]},
+  "rules":[{"id":"wg-rule","mode":"wireguard","tunnel_id":"wg-test","entries":[{"listen":"0.0.0.0:30001","remote":"10.253.10.2:443"}]}]
+}
+EOF
+  rendered_wg="$(render_wireguard_profile_config wg-test)" || fail "WireGuard 配置渲染失败"
+  grep -Fq 'Address = 10.253.10.1/32' <<<"$rendered_wg" || fail "WireGuard 本地地址未限制为 /32"
+  grep -Fq 'AllowedIPs = 10.253.10.2/32' <<<"$rendered_wg" || fail "WireGuard 对端路由未限制为 /32"
+  if grep -Fq '0.0.0.0/0' <<<"$rendered_wg"; then
+    fail "WireGuard 配置错误接管默认路由"
+  fi
+  grep -Fq 'Endpoint = 198.51.100.2:51820' <<<"$rendered_wg" || fail "WireGuard Endpoint 渲染错误"
+  rendered_realm="$(render_realm_config)" || fail "包含 WireGuard 规则的 Realm 配置渲染失败"
+  grep -Fq 'use_udp = false' <<<"$rendered_realm" || fail "WireGuard 模式意外开启 Realm UDP"
+  grep -Fq 'remote = "10.253.10.2:443"' <<<"$rendered_realm" || fail "Realm 未指向 WireGuard 对端私网地址"
+  wireguard_profile_route_ready() { return 0; }
+  ensure_realm_wireguard_dependencies || fail "有效的 Realm WireGuard 依赖被拒绝"
+  realm_state_jq '(.wireguard.profiles[] | select(.id == "wg-test")).enabled = false'
+  if ensure_realm_wireguard_dependencies; then
+    fail "Realm 错误接受已停用的 WireGuard 依赖"
+  fi
+)
+
+(
+  firewall_root="$test_root/wireguard-firewall"
+  mkdir -p "$firewall_root"
+  STATE_FILE="$firewall_root/state.json"
+  REALM_STATE_FILE="$firewall_root/realm-state.json"
+  cat >"$STATE_FILE" <<'EOF'
+{"protocols":{"shadowsocks":{"enabled":false},"vless_reality":{"enabled":false},"hysteria2":{"enabled":false}}}
+EOF
+  cat >"$REALM_STATE_FILE" <<'EOF'
+{"wireguard":{"profiles":[{"role":"landing","enabled":true,"listen_port":51820,"allowed_source":"198.51.100.9/32"}]},"rules":[]}
+EOF
+  desired_managed_firewall_rules | grep -Fq $'wireguard\tudp\t51820\t198.51.100.9/32' ||
+    fail "WireGuard 落地端 UDP 端口未限制为中转来源"
+)
+
+grep -Fq '.global.use_udp = false' "$repo_dir/index.sh" || fail "Realm TCP-only 约束被 WireGuard 功能意外移除"
+grep -Fq 'AllowedIPs = ${peer_address}/32' "$repo_dir/index.sh" || fail "WireGuard 配置未固定对端 /32 路由"
+if grep -Fq 'net.ipv4.ip_forward=1' "$repo_dir/index.sh" || grep -Fq 'MASQUERADE' "$repo_dir/index.sh"; then
+  fail "WireGuard Realm 模式不应启用全局转发或 NAT"
+fi
+
+(
+  # Used by sourced Realm menu preparation.
+  # shellcheck disable=SC2034
+  REALM_BIN="$test_root/not-installed-realm"
+  require_linux() { :; }
+  require_root() { :; }
+  realm_service_manager() { printf 'systemd\n'; }
+  ensure_realm_dirs() { :; }
+  init_realm_state_file() { :; }
+  install_realm_binary() { fail "进入 WireGuard/Realm 菜单时不应强制安装 Realm"; }
+  ensure_realm_service() { fail "Realm 未安装时不应创建无效服务"; }
+  prepare_realm_menu || fail "未安装 Realm 时无法进入 WireGuard 管理菜单"
+)
 
 (
   repair_root="$test_root/sing-box-netlink-repair"

@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+### 新增
+
+- Realm 规则支持按规则选择公网直连或点对点 WireGuard 隧道
+- 新增 WireGuard 落地端/中转端双向公钥配对、状态、测试、修改、服务控制、修复和安全删除菜单
+- WireGuard 落地 UDP 监听支持中转来源白名单，Realm 启动前验证关联隧道接口和 `/32` 路由
+
+### 变更
+
+- 旧 Realm 规则自动迁移为 `direct`，不会因升级改变原转发路径
+- WireGuard 与 Realm 安装生命周期解耦；落地端进入隧道菜单不会被强制安装 Realm
+- Realm 卸载时保留独立 WireGuard 隧道；完整卸载仅删除脚本托管的 `sbwg*` 配置和密钥
+
 ### 安全
 
 - VLESS、Hysteria2 与 Shadowsocks 统一阻断本机、私网、链路本地和云元数据目标，并在域名解析后再次检查
@@ -14,6 +26,7 @@
 - 管理脚本支持一键安全更新：固定校验 GitHub 仓库/所有者数字 ID，将分支解析为不可变 commit，并自动验证提交身份、Git blob 哈希、SHA-256 和 Bash 语法；取消未经校验的 `curl | sudo bash` 更新链
 - 安装器校验内置 `index.sh` SHA-256 后原子替换，取消执行未经校验的 sing-box 后备安装脚本
 - APT 仓库密钥固定校验官方指纹；Realm 发布包校验 GitHub 发布摘要并以低权限解压和运行
+- WireGuard 只允许对端 `/32` 路由，拒绝默认路由设计；不启用系统 IP 转发或 NAT，私钥始终留在本机
 
 ## [0.4.1] - 2026-08-02
 

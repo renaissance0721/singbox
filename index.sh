@@ -5,7 +5,7 @@
 # 支持 Shadowsocks、VLESS + Reality 和 Hysteria2
 #
 # 作者: renaissance0721
-# 版本: 0.5.0
+# 版本: 0.6.0
 # 许可证: MIT
 #
 # 使用方法:
@@ -21,7 +21,7 @@ umask 077
 
 ORIGINAL_ARGS=("$@")
 SELF_PATH="${BASH_SOURCE[0]}"
-SCRIPT_VERSION="0.5.0"
+SCRIPT_VERSION="0.6.0"
 SCRIPT_NAME="${0##*/}"
 APP_TITLE="Sing-box 管理面板 | 输入 sbox 快捷打开脚本"
 STATE_DIR="${STATE_DIR:-/etc/sing-box-manager}"
@@ -39,6 +39,9 @@ REALM_BIN="${REALM_BIN:-/usr/local/bin/realm}"
 REALM_SERVICE_FILE="${REALM_SERVICE_FILE:-/etc/systemd/system/realm.service}"
 REALM_OPENRC_SERVICE_FILE="${REALM_OPENRC_SERVICE_FILE:-/etc/init.d/realm}"
 REALM_OPENRC_LOG_FILE="${REALM_OPENRC_LOG_FILE:-/var/log/realm.log}"
+WIREGUARD_DIR="${WIREGUARD_DIR:-/etc/wireguard}"
+WIREGUARD_INTERFACE_PREFIX="sbwg"
+WIREGUARD_OPENRC_SERVICE_PREFIX="sbox-wg"
 FIREWALL_STATE_FILE="${FIREWALL_STATE_FILE:-$STATE_DIR/firewall-managed.tsv}"
 IPTABLES_MIGRATION_MARKER="${IPTABLES_MIGRATION_MARKER:-$STATE_DIR/iptables-comment-rules.migrated}"
 IPTABLES_RULE_COMMENT="${IPTABLES_RULE_COMMENT:-sbox-managed}"
@@ -153,6 +156,10 @@ sha256_file() {
   else
     return 1
   fi
+  wireguard_profile_active "$interface" || return 1
+  if [[ "$(wireguard_profile_field "$id" paired)" == "true" ]]; then
+    wireguard_profile_route_ready "$id" || return 1
+  fi
 }
 
 git_blob_sha1_file() {
@@ -213,6 +220,10 @@ ensure_realm_dirs() {
   if runtime_account_exists; then
     chown root:"$RUNTIME_GROUP" "$REALM_DIR" "$STATE_DIR"
   fi
+}
+
+ensure_wireguard_dirs() {
+  install -d -m 0700 "$WIREGUARD_DIR" "$STATE_DIR"
 }
 
 runtime_account_exists() {
@@ -985,18 +996,29 @@ realm_service_manager() {
 }
 
 ensure_realm_service() {
-  local service_manager
+  local service_manager interface wg_systemd_units="" wg_openrc_services=""
   ensure_runtime_account
   service_manager="$(realm_service_manager)"
   [[ "$service_manager" != "none" ]] || return 0
+
+  if [[ -s "$REALM_STATE_FILE" ]] && jq -e . "$REALM_STATE_FILE" >/dev/null 2>&1; then
+    while IFS= read -r interface; do
+      wireguard_valid_interface "$interface" || continue
+      wg_systemd_units+=" wg-quick@${interface}.service"
+      wg_openrc_services+=" $(wireguard_service_name "$interface")"
+    done < <(jq -r '
+      [.rules[]? | select(.mode == "wireguard") | .tunnel_id] as $ids |
+      .wireguard.profiles[]? | select(.enabled == true) | select(.id as $id | $ids | index($id)) | .interface
+    ' "$REALM_STATE_FILE" | sort -u)
+  fi
 
   if [[ "$service_manager" == "systemd" ]]; then
     cat >"$REALM_SERVICE_FILE" <<EOF
 [Unit]
 Description=Realm relay service
 Documentation=https://github.com/zhboner/realm
-After=network-online.target nss-lookup.target
-Wants=network-online.target
+After=network-online.target nss-lookup.target${wg_systemd_units}
+Wants=network-online.target${wg_systemd_units}
 
 [Service]
 Type=simple
@@ -1046,8 +1068,8 @@ output_log="${REALM_OPENRC_LOG_FILE}"
 error_log="${REALM_OPENRC_LOG_FILE}"
 
 depend() {
-  need net
-  after firewall
+  need net${wg_openrc_services}
+  after firewall${wg_openrc_services}
 }
 
 start_pre() {
@@ -1311,6 +1333,7 @@ init_state_file() {
   if [[ -s "$STATE_FILE" ]]; then
     migrate_state_schema
     migrate_realm_tcp_only
+    migrate_realm_wireguard_schema
     repair_sing_box_netlink_hardening
     return 0
   fi
@@ -1380,6 +1403,7 @@ EOF
   chmod 0600 "$STATE_FILE"
 
   migrate_realm_tcp_only
+  migrate_realm_wireguard_schema
   repair_sing_box_netlink_hardening
 }
 
@@ -1656,6 +1680,7 @@ ui_split_shadowsocks_method_menu() {
 init_realm_state_file() {
   if [[ -s "$REALM_STATE_FILE" ]]; then
     migrate_realm_tcp_only
+    migrate_realm_wireguard_schema
     return 0
   fi
 
@@ -1675,11 +1700,15 @@ init_realm_state_file() {
     "use_udp": false,
     "no_tcp": false
   },
+  "wireguard": {
+    "profiles": []
+  },
   "rules": []
 }
 EOF
 
   chmod 0600 "$REALM_STATE_FILE"
+  migrate_realm_wireguard_schema
 }
 
 realm_state_get() {
@@ -1695,6 +1724,32 @@ realm_state_jq() {
     return 1
   fi
   rm -f "$tmp_file"
+}
+
+migrate_realm_wireguard_schema() {
+  [[ -s "$REALM_STATE_FILE" ]] || return 0
+  jq -e . "$REALM_STATE_FILE" >/dev/null 2>&1 || return 1
+
+  if jq -e '
+    (.wireguard.profiles? | type == "array")
+    and ([.rules[]? | has("mode")] | all)
+    and (.meta.realm_wireguard_schema? == 1)
+  ' "$REALM_STATE_FILE" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  realm_state_jq --arg version "$SCRIPT_VERSION" --arg ts "$(utc_now)" '
+    .wireguard = (.wireguard // {}) |
+    .wireguard.profiles = ((.wireguard.profiles // []) | map(select(type == "object"))) |
+    .rules = ((.rules // []) | map(
+      .mode = (if .mode == "wireguard" then "wireguard" else "direct" end) |
+      .tunnel_id = (if .mode == "wireguard" then (.tunnel_id // null) else null end)
+    )) |
+    .meta = (.meta // {}) |
+    .meta.realm_wireguard_schema = 1 |
+    .meta.version = $version |
+    .meta.updated_at = $ts
+  '
 }
 
 snapshot_realm_state_file() {
@@ -2876,9 +2931,12 @@ desired_managed_firewall_rules() {
   if [[ -s "$REALM_STATE_FILE" ]]; then
     jq -e . "$REALM_STATE_FILE" >/dev/null 2>&1 || return 1
     jq -r '
-      .rules[]?.entries[]?.listen
-      | try capture(":(?<port>[0-9]+)$").port catch empty
-      | ["realm", "tcp", ., "*"] | @tsv
+      (.rules[]?.entries[]?.listen
+        | try capture(":(?<port>[0-9]+)$").port catch empty
+        | ["realm", "tcp", ., "*"] | @tsv),
+      (.wireguard.profiles[]?
+        | select(.role == "landing" and .enabled == true and (.listen_port | type == "number") and (.allowed_source | type == "string") and (.allowed_source | length > 0))
+        | ["wireguard", "udp", (.listen_port | tostring), .allowed_source] | @tsv)
     ' "$REALM_STATE_FILE" 2>/dev/null || return 1
   fi
 }
@@ -3072,8 +3130,8 @@ validate_sing_box_listener_ports_available() {
 }
 
 verify_sing_box_service_ready() {
-  local attempt protocol port label ready
-  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  local protocol port label ready
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
     ready=true
     if ! service_exists || [[ "$(sing_box_service_active 2>/dev/null || true)" != "active" ]]; then
       ready=false
@@ -3383,6 +3441,888 @@ port_management_menu() {
   done
 }
 
+wireguard_config_file() {
+  wireguard_valid_interface "$1" || return 1
+  printf '%s/%s.conf\n' "$WIREGUARD_DIR" "$1"
+}
+
+wireguard_private_key_file() {
+  wireguard_valid_interface "$1" || return 1
+  printf '%s/%s.key\n' "$WIREGUARD_DIR" "$1"
+}
+
+wireguard_public_key_file() {
+  wireguard_valid_interface "$1" || return 1
+  printf '%s/%s.pub\n' "$WIREGUARD_DIR" "$1"
+}
+
+wireguard_profile_count() {
+  realm_state_get '(.wireguard.profiles // []) | length'
+}
+
+wireguard_profile_exists() {
+  jq -e --arg id "$1" '.wireguard.profiles[]? | select(.id == $id)' "$REALM_STATE_FILE" >/dev/null 2>&1
+}
+
+wireguard_profile_field() {
+  local id=$1 field=$2
+  jq -r --arg id "$id" --arg field "$field" '.wireguard.profiles[]? | select(.id == $id) | .[$field] // empty' "$REALM_STATE_FILE" | tr -d '\r'
+}
+
+wireguard_valid_key() {
+  [[ "$1" =~ ^[A-Za-z0-9+/]{43}=$ ]] || return 1
+  [[ "$(printf '%s' "$1" | openssl base64 -d -A 2>/dev/null | wc -c | tr -d '[:space:]')" == "32" ]]
+}
+
+wireguard_valid_interface() {
+  [[ "$1" =~ ^${WIREGUARD_INTERFACE_PREFIX}[0-9]{1,2}$ && ${#1} -le 15 ]]
+}
+
+wireguard_valid_endpoint_host() {
+  local host=$1
+  (( ${#host} <= 253 )) || return 1
+  is_valid_ipv4_or_cidr "$host" && [[ "$host" != */* ]] && return 0
+  is_valid_ipv6_or_cidr "$host" && [[ "$host" != */* ]] && return 0
+  [[ "$host" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ && "$host" == *.* ]]
+}
+
+wireguard_valid_allowed_source() {
+  is_valid_ip_or_cidr "$1" || return 1
+  [[ "$1" != "0.0.0.0/0" && "$1" != "::/0" ]]
+}
+
+wireguard_base64url_decode() {
+  local value=$1 padding=""
+  case $(( ${#value} % 4 )) in
+    0) ;;
+    2) padding="==" ;;
+    3) padding="=" ;;
+    *) return 1 ;;
+  esac
+  printf '%s%s' "$value" "$padding" | tr '_-' '/+' | openssl base64 -d -A
+}
+
+wireguard_decode_pairing_code() {
+  local code=$1 payload
+  [[ "$code" == SBOXWG1:* && ${#code} -le 8192 ]] || return 1
+  payload="$(wireguard_base64url_decode "${code#SBOXWG1:}")" || return 1
+  jq -ce . <<<"$payload" 2>/dev/null
+}
+
+wireguard_encode_pairing_json() {
+  printf 'SBOXWG1:%s\n' "$(base64_urlsafe "$1")"
+}
+
+wireguard_next_interface() {
+  local index interface
+  for index in $(seq 0 99); do
+    interface="${WIREGUARD_INTERFACE_PREFIX}${index}"
+    if ! jq -e --arg interface "$interface" '.wireguard.profiles[]? | select(.interface == $interface)' "$REALM_STATE_FILE" >/dev/null 2>&1 &&
+      ! ip link show dev "$interface" >/dev/null 2>&1; then
+      printf '%s\n' "$interface"
+      return 0
+    fi
+  done
+  return 1
+}
+
+wireguard_generate_address_pair() {
+  local subnet relay_address landing_address
+  for _ in $(seq 1 100); do
+    subnet=$((1 + ((RANDOM * 32768 + RANDOM) % 253)))
+    relay_address="10.253.${subnet}.1"
+    landing_address="10.253.${subnet}.2"
+    if ! jq -e --arg relay "$relay_address" --arg landing "$landing_address" '
+      .wireguard.profiles[]? | select(.local_address == $relay or .peer_address == $relay or .local_address == $landing or .peer_address == $landing)
+    ' "$REALM_STATE_FILE" >/dev/null 2>&1 &&
+      ! ip -o address show 2>/dev/null | grep -Fq " ${relay_address}/" &&
+      ! ip -o address show 2>/dev/null | grep -Fq " ${landing_address}/"; then
+      printf '%s\t%s\n' "$relay_address" "$landing_address"
+      return 0
+    fi
+  done
+  return 1
+}
+
+install_wireguard_tools() {
+  local test_interface
+  detect_pkg_manager
+  case "$PKG_MANAGER" in
+    apk)
+      apk add --no-cache wireguard-tools
+      ;;
+    apt)
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y
+      apt-get install -y wireguard-tools
+      ;;
+    dnf)
+      dnf install -y wireguard-tools
+      ;;
+    yum)
+      yum install -y epel-release >/dev/null 2>&1 || true
+      yum install -y wireguard-tools
+      ;;
+    *)
+      ui_msg "当前系统不支持自动安装 WireGuard，请手动安装 wireguard-tools。"
+      return 1
+      ;;
+  esac
+
+  if ! have_cmd wg || ! have_cmd wg-quick || ! have_cmd ip; then
+    ui_msg "WireGuard 工具安装不完整，缺少 wg、wg-quick 或 ip。"
+    return 1
+  fi
+  have_cmd modprobe && modprobe wireguard >/dev/null 2>&1 || true
+  test_interface="sbwgt$((RANDOM % 10000))"
+  if ! ip link add dev "$test_interface" type wireguard >/dev/null 2>&1; then
+    ui_msg "当前内核无法创建 WireGuard 接口，请检查内核模块或 VPS 虚拟化限制。"
+    return 1
+  fi
+  ip link del dev "$test_interface" >/dev/null 2>&1 || true
+}
+
+wireguard_generate_keypair() {
+  local interface=$1 private_file public_file
+  wireguard_valid_interface "$interface" || return 1
+  ensure_wireguard_dirs
+  private_file="$(wireguard_private_key_file "$interface")"
+  public_file="$(wireguard_public_key_file "$interface")"
+  (umask 077; wg genkey >"$private_file") || return 1
+  wg pubkey <"$private_file" >"$public_file" || {
+    rm -f "$private_file" "$public_file"
+    return 1
+  }
+  chmod 0600 "$private_file" "$public_file"
+}
+
+render_wireguard_profile_config() {
+  local id=$1 interface role local_address peer_address peer_public_key endpoint_host endpoint_port
+  local listen_port mtu keepalive private_file private_key endpoint
+  interface="$(wireguard_profile_field "$id" interface)"
+  role="$(wireguard_profile_field "$id" role)"
+  local_address="$(wireguard_profile_field "$id" local_address)"
+  peer_address="$(wireguard_profile_field "$id" peer_address)"
+  peer_public_key="$(wireguard_profile_field "$id" peer_public_key)"
+  endpoint_host="$(wireguard_profile_field "$id" endpoint_host)"
+  endpoint_port="$(wireguard_profile_field "$id" endpoint_port)"
+  listen_port="$(wireguard_profile_field "$id" listen_port)"
+  mtu="$(wireguard_profile_field "$id" mtu)"
+  keepalive="$(wireguard_profile_field "$id" persistent_keepalive)"
+  private_file="$(wireguard_private_key_file "$interface")"
+
+  wireguard_valid_interface "$interface" || return 1
+  is_valid_ipv4_or_cidr "${local_address}/32" || return 1
+  is_valid_ipv4_or_cidr "${peer_address}/32" || return 1
+  [[ -s "$private_file" ]] || return 1
+  private_key="$(tr -d '\r\n' <"$private_file")"
+  wireguard_valid_key "$private_key" || return 1
+  [[ "$mtu" =~ ^[0-9]+$ ]] && (( mtu >= 1280 && mtu <= 1500 )) || return 1
+
+  cat <<EOF
+[Interface]
+PrivateKey = ${private_key}
+Address = ${local_address}/32
+MTU = ${mtu}
+SaveConfig = false
+EOF
+
+  if [[ "$role" == "landing" ]]; then
+    [[ "$listen_port" =~ ^[0-9]+$ ]] && (( listen_port >= 1 && listen_port <= 65535 )) || return 1
+    printf 'ListenPort = %s\n' "$listen_port"
+  elif [[ "$role" != "relay" ]]; then
+    return 1
+  fi
+
+  if [[ -n "$peer_public_key" ]]; then
+    wireguard_valid_key "$peer_public_key" || return 1
+    cat <<EOF
+
+[Peer]
+PublicKey = ${peer_public_key}
+AllowedIPs = ${peer_address}/32
+EOF
+    if [[ "$role" == "relay" ]]; then
+      wireguard_valid_endpoint_host "$endpoint_host" || return 1
+      [[ "$endpoint_port" =~ ^[0-9]+$ ]] && (( endpoint_port >= 1 && endpoint_port <= 65535 )) || return 1
+      endpoint="$(format_uri_host "$endpoint_host"):${endpoint_port}"
+      printf 'Endpoint = %s\n' "$endpoint"
+      [[ "$keepalive" =~ ^[0-9]+$ ]] && (( keepalive >= 0 && keepalive <= 65535 )) || return 1
+      if (( keepalive > 0 )); then
+        printf 'PersistentKeepalive = %s\n' "$keepalive"
+      fi
+    fi
+  fi
+}
+
+write_wireguard_profile_config() {
+  local id=$1 interface config_file tmp_file
+  interface="$(wireguard_profile_field "$id" interface)"
+  config_file="$(wireguard_config_file "$interface")"
+  tmp_file="$(mktemp "$TMP_DIR/wireguard-config.XXXXXX")" || return 1
+  if ! render_wireguard_profile_config "$id" >"$tmp_file" ||
+    ! install -o root -g root -m 0600 "$tmp_file" "$config_file"; then
+    rm -f "$tmp_file"
+    return 1
+  fi
+  rm -f "$tmp_file"
+}
+
+wireguard_openrc_service_file() {
+  wireguard_valid_interface "$1" || return 1
+  printf '/etc/init.d/%s-%s\n' "$WIREGUARD_OPENRC_SERVICE_PREFIX" "$1"
+}
+
+wireguard_service_name() {
+  wireguard_valid_interface "$1" || return 1
+  printf '%s-%s\n' "$WIREGUARD_OPENRC_SERVICE_PREFIX" "$1"
+}
+
+wireguard_systemd_dropin_dir() {
+  wireguard_valid_interface "$1" || return 1
+  printf '/etc/systemd/system/wg-quick@%s.service.d\n' "$1"
+}
+
+ensure_wireguard_systemd_firewall_ordering() {
+  local interface=$1 dropin_dir
+  has_systemd || return 0
+  dropin_dir="$(wireguard_systemd_dropin_dir "$interface")"
+  install -d -m 0755 "$dropin_dir" || return 1
+  cat >"$dropin_dir/10-sbox-firewall.conf" <<'EOF'
+[Unit]
+Requires=sbox-firewall.service
+After=sbox-firewall.service
+EOF
+  systemctl daemon-reload >/dev/null 2>&1
+}
+
+ensure_wireguard_openrc_service() {
+  local interface=$1 service_file wg_quick
+  wireguard_valid_interface "$interface" || return 1
+  service_file="$(wireguard_openrc_service_file "$interface")"
+  wg_quick="$(command -v wg-quick)"
+  cat >"$service_file" <<EOF
+#!/sbin/openrc-run
+name="Sbox WireGuard ${interface}"
+description="Sbox managed WireGuard tunnel ${interface}"
+
+start() {
+  ebegin "Starting WireGuard ${interface}"
+  ${wg_quick} up "$(wireguard_config_file "$interface")"
+  eend \$?
+}
+
+stop() {
+  ebegin "Stopping WireGuard ${interface}"
+  ${wg_quick} down "$(wireguard_config_file "$interface")"
+  eend \$?
+}
+EOF
+  chmod 0755 "$service_file"
+}
+
+wireguard_profile_active() {
+  local interface=$1
+  wireguard_valid_interface "$interface" || return 1
+  ip link show dev "$interface" >/dev/null 2>&1 && wg show "$interface" >/dev/null 2>&1
+}
+
+wireguard_start_profile() {
+  local id=$1 interface role
+  interface="$(wireguard_profile_field "$id" interface)"
+  wireguard_valid_interface "$interface" || return 1
+  role="$(wireguard_profile_field "$id" role)"
+  if [[ "$role" == "landing" ]]; then
+    prepare_managed_firewall || return 1
+  fi
+  write_wireguard_profile_config "$id" || return 1
+  if has_systemd; then
+    if [[ "$role" == "landing" ]]; then
+      ensure_wireguard_systemd_firewall_ordering "$interface" || return 1
+    fi
+    systemctl enable "wg-quick@${interface}.service" >/dev/null 2>&1 || return 1
+    if wireguard_profile_active "$interface"; then
+      systemctl restart "wg-quick@${interface}.service" >/dev/null 2>&1 || return 1
+    else
+      systemctl start "wg-quick@${interface}.service" >/dev/null 2>&1 || return 1
+    fi
+  elif has_openrc; then
+    ensure_wireguard_openrc_service "$interface" || return 1
+    rc-update add "$(wireguard_service_name "$interface")" default >/dev/null 2>&1 || return 1
+    if wireguard_profile_active "$interface"; then
+      rc-service "$(wireguard_service_name "$interface")" restart >/dev/null 2>&1 || return 1
+    else
+      rc-service "$(wireguard_service_name "$interface")" start >/dev/null 2>&1 || return 1
+    fi
+  else
+    return 1
+  fi
+}
+
+wireguard_stop_profile() {
+  local id=$1 interface
+  interface="$(wireguard_profile_field "$id" interface)"
+  wireguard_valid_interface "$interface" || return 1
+  if has_systemd; then
+    systemctl disable --now "wg-quick@${interface}.service" >/dev/null 2>&1 || true
+  elif has_openrc; then
+    rc-service "$(wireguard_service_name "$interface")" stop >/dev/null 2>&1 || true
+    rc-update del "$(wireguard_service_name "$interface")" default >/dev/null 2>&1 || true
+  fi
+  if wireguard_profile_active "$interface"; then
+    wg-quick down "$(wireguard_config_file "$interface")" >/dev/null 2>&1 || ip link del dev "$interface" >/dev/null 2>&1 || true
+  fi
+}
+
+wireguard_profile_route_ready() {
+  local id=$1 interface peer_address
+  interface="$(wireguard_profile_field "$id" interface)"
+  peer_address="$(wireguard_profile_field "$id" peer_address)"
+  wireguard_profile_active "$interface" || return 1
+  ip route get "$peer_address" 2>/dev/null | head -n 1 | grep -Eq "(^|[[:space:]])dev[[:space:]]+${interface}([[:space:]]|$)"
+}
+
+wireguard_probe_tcp() {
+  local host=$1 port=$2
+  have_cmd timeout || return 1
+  timeout 4 bash -c 'exec 3<>"/dev/tcp/${1}/${2}"' _ "$host" "$port" >/dev/null 2>&1
+}
+
+ensure_realm_wireguard_dependencies() {
+  local id enabled paired role
+  while IFS= read -r id; do
+    id="${id%$'\r'}"
+    [[ -n "$id" && "$id" != "null" ]] || return 1
+    wireguard_profile_exists "$id" || return 1
+    role="$(wireguard_profile_field "$id" role)"
+    enabled="$(wireguard_profile_field "$id" enabled)"
+    paired="$(wireguard_profile_field "$id" paired)"
+    [[ "$role" == "relay" && "$enabled" == "true" && "$paired" == "true" ]] || return 1
+    if ! wireguard_profile_route_ready "$id"; then
+      wireguard_start_profile "$id" || return 1
+      wireguard_profile_route_ready "$id" || return 1
+    fi
+  done < <(jq -r '.rules[]? | select(.mode == "wireguard") | .tunnel_id' "$REALM_STATE_FILE" | sort -u)
+}
+
+select_wireguard_profile() {
+  local role_filter=${1:-any} choice index id name role interface paired
+  local -a ids=() options=()
+  while IFS=$'\t' read -r id name role interface paired; do
+    [[ -n "$id" ]] || continue
+    [[ "$role_filter" == "any" || "$role" == "$role_filter" ]] || continue
+    ids+=("$id")
+    options+=("${#ids[@]}" "${name}（${role}/${interface}，配对=${paired}）")
+  done < <(jq -r '.wireguard.profiles[]? | [.id, .name, .role, .interface, (.paired | tostring)] | @tsv' "$REALM_STATE_FILE")
+  if (( ${#ids[@]} == 0 )); then
+    ui_msg "当前没有符合条件的 WireGuard 隧道。"
+    return 1
+  fi
+  options+=("0" "返回")
+  choice="$(ui_menu "WireGuard 隧道" "请选择隧道" "${options[@]}")" || return 1
+  [[ "$choice" != "0" && "$choice" =~ ^[0-9]+$ ]] || return 1
+  index=$((choice - 1))
+  (( index >= 0 && index < ${#ids[@]} )) || return 1
+  printf '%s\n' "${ids[$index]}"
+}
+
+wireguard_invitation_for_profile() {
+  local id=$1 json
+  json="$(jq -c --arg id "$id" '
+    .wireguard.profiles[] | select(.id == $id) |
+    {
+      kind: "sbox-wireguard-invite-v1",
+      tunnel_id: .id,
+      name: .name,
+      landing_public_key: .public_key,
+      endpoint_host: .endpoint_host,
+      endpoint_port: (.endpoint_port // .listen_port),
+      relay_address: .peer_address,
+      landing_address: .local_address,
+      mtu: .mtu
+    }
+  ' "$REALM_STATE_FILE")" || return 1
+  wireguard_encode_pairing_json "$json"
+}
+
+show_wireguard_landing_invitation() {
+  local id invitation
+  id="$(select_wireguard_profile landing)" || return 0
+  invitation="$(wireguard_invitation_for_profile "$id")" || {
+    ui_msg "无法生成该隧道的配对信息。"
+    return 1
+  }
+  ui_show_text "WireGuard 落地端配对信息" "请在中转 VPS 的【加入隧道】中粘贴：
+
+${invitation}
+
+配对信息仅包含公钥、Endpoint 和私网地址，不包含私钥。"
+}
+
+offer_wireguard_peer_for_shadowsocks() {
+  local peer_address=$1 source current_sources previous_state
+  [[ -s "$STATE_FILE" ]] && jq -e '.protocols.shadowsocks.enabled == true' "$STATE_FILE" >/dev/null 2>&1 || return 0
+  source="${peer_address}/32"
+  if jq -e --arg source "$source" '.protocols.shadowsocks.allowed_sources[]? | select(. == $source)' "$STATE_FILE" >/dev/null 2>&1; then
+    return 0
+  fi
+  current_sources="$(state_get '(.protocols.shadowsocks.allowed_sources // []) | join(", ")')"
+  if [[ -z "$current_sources" ]]; then
+    ui_yesno "检测到本机 Shadowsocks 当前对全网开放。是否改为只允许 WireGuard 中转来源 ${source}？这会关闭原有公网直连。" || return 0
+  else
+    ui_yesno "是否将 WireGuard 中转来源 ${source} 加入 Shadowsocks 白名单？当前来源：${current_sources}" || return 0
+  fi
+  previous_state="$(mktemp "$TMP_DIR/singbox-state-backup.XXXXXX")" || return 1
+  install -m 0600 "$STATE_FILE" "$previous_state" || { rm -f "$previous_state"; return 1; }
+  if ! state_jq --arg source "$source" --arg ts "$(utc_now)" '
+    .protocols.shadowsocks.allowed_sources = ((.protocols.shadowsocks.allowed_sources // []) + [$source] | unique) |
+    .meta.updated_at = $ts
+  ' || ! apply_config; then
+    install -m 0600 "$previous_state" "$STATE_FILE" || true
+    apply_config || true
+    rm -f "$previous_state"
+    ui_msg "Shadowsocks 来源白名单更新失败，已恢复原配置。"
+    return 1
+  fi
+  rm -f "$previous_state"
+}
+
+create_wireguard_landing_profile() {
+  local name endpoint_host endpoint_port listen_port allowed_source interface id addresses relay_address landing_address public_key invitation
+  local error_count=0
+  install_wireguard_tools || return 1
+  ensure_wireguard_dirs
+  init_realm_state_file
+  name="$(realm_prompt_nonempty_limited error_count "WireGuard 落地端" "请输入隧道名称" "WG落地-$(( $(wireguard_profile_count) + 1 ))")" || return 1
+  (( ${#name} <= 80 )) || { ui_msg "WireGuard 隧道名称不能超过 80 个字符。"; return 1; }
+  endpoint_host="$(realm_prompt_nonempty_limited error_count "WireGuard 落地端" "请输入落地 VPS 公网 IP 或域名" "$(detect_public_address)")" || return 1
+  wireguard_valid_endpoint_host "$endpoint_host" || { ui_msg "落地 Endpoint 地址无效。"; return 1; }
+  listen_port="$(realm_prompt_number_limited error_count "WireGuard 落地端" "请输入本机 WireGuard UDP 监听端口" "$(generate_random_service_port)" 1024 65535)" || return 1
+  endpoint_port="$(realm_prompt_number_limited error_count "WireGuard 落地端" "请输入公网 Endpoint UDP 端口；普通 VPS 与本机监听端口相同" "$listen_port" 1 65535)" || return 1
+  if port_is_listening udp "$listen_port" || jq -e --argjson port "$listen_port" '.wireguard.profiles[]? | select(.role == "landing" and .listen_port == $port)' "$REALM_STATE_FILE" >/dev/null 2>&1; then
+    ui_msg "UDP/${listen_port} 已被占用，请选择其他 WireGuard 监听端口。"
+    return 1
+  fi
+  allowed_source="$(realm_prompt_nonempty_limited error_count "WireGuard 落地端" "请输入中转 VPS 公网来源 IP/CIDR" "")" || return 1
+  wireguard_valid_allowed_source "$allowed_source" || { ui_msg "中转来源 IP/CIDR 无效；WireGuard 监听不允许设置为全网来源。"; return 1; }
+  interface="$(wireguard_next_interface)" || { ui_msg "没有可用的 WireGuard 接口名称。"; return 1; }
+  addresses="$(wireguard_generate_address_pair)" || { ui_msg "无法分配无冲突的 WireGuard 私网地址。"; return 1; }
+  IFS=$'\t' read -r relay_address landing_address <<<"$addresses"
+  id="wg-$(date +%s)-$(generate_hex 4)"
+  wireguard_generate_keypair "$interface" || { ui_msg "WireGuard 密钥生成失败。"; return 1; }
+  public_key="$(tr -d '\r\n' <"$(wireguard_public_key_file "$interface")")"
+  if ! realm_state_jq --arg id "$id" --arg name "$name" --arg interface "$interface" --arg local "$landing_address" --arg peer "$relay_address" \
+    --arg public_key "$public_key" --arg endpoint_host "$endpoint_host" --arg allowed_source "$allowed_source" --argjson listen_port "$listen_port" --argjson endpoint_port "$endpoint_port" --arg ts "$(utc_now)" '
+      .wireguard.profiles += [{
+        id: $id, name: $name, interface: $interface, role: "landing",
+        local_address: $local, peer_address: $peer, public_key: $public_key,
+        peer_public_key: "", endpoint_host: $endpoint_host, endpoint_port: $endpoint_port,
+        listen_port: $listen_port, allowed_source: $allowed_source,
+        mtu: 1420, persistent_keepalive: 25, enabled: true, paired: false
+      }] |
+      .meta.updated_at = $ts
+    '; then
+    rm -f "$(wireguard_private_key_file "$interface")" "$(wireguard_public_key_file "$interface")"
+    ui_msg "WireGuard 状态写入失败。"
+    return 1
+  fi
+  if ! prepare_managed_firewall || ! sync_managed_firewall_rules || ! wireguard_start_profile "$id"; then
+    wireguard_stop_profile "$id"
+    realm_state_jq --arg id "$id" '.wireguard.profiles |= map(select(.id != $id))' || true
+    sync_managed_firewall_rules || true
+    rm -f "$(wireguard_config_file "$interface")" "$(wireguard_private_key_file "$interface")" "$(wireguard_public_key_file "$interface")"
+    rm -f "$(wireguard_systemd_dropin_dir "$interface")/10-sbox-firewall.conf" 2>/dev/null || true
+    rmdir "$(wireguard_systemd_dropin_dir "$interface")" 2>/dev/null || true
+    ui_msg "WireGuard 落地端启动失败，新增配置已撤销。"
+    return 1
+  fi
+  invitation="$(wireguard_invitation_for_profile "$id")" || return 1
+  ui_show_text "WireGuard 落地端已创建" "请在中转 VPS 选择【加入隧道（中转端）】并粘贴以下配对信息：
+
+${invitation}
+
+接口：${interface}
+落地私网地址：${landing_address}
+中转私网地址：${relay_address}
+本机 UDP 监听：${listen_port}（仅允许 ${allowed_source}）
+公网 Endpoint：${endpoint_host}:${endpoint_port}
+
+配对信息不包含任何私钥。若云厂商另有安全组，请同时把公网 UDP/${endpoint_port} 映射或放行到本机 UDP/${listen_port}，来源限制为 ${allowed_source}。"
+}
+
+join_wireguard_relay_profile() {
+  local code payload id name interface landing_public_key endpoint_host endpoint_port relay_address landing_address mtu public_key response
+  local error_count=0
+  install_wireguard_tools || return 1
+  ensure_wireguard_dirs
+  init_realm_state_file
+  code="$(realm_prompt_nonempty_limited error_count "WireGuard 中转端" "请粘贴落地端配对信息" "")" || return 1
+  payload="$(wireguard_decode_pairing_code "$code")" || { ui_msg "WireGuard 配对信息无法解析。"; return 1; }
+  [[ "$(jq -r '.kind // empty' <<<"$payload")" == "sbox-wireguard-invite-v1" ]] || { ui_msg "配对信息类型不正确。"; return 1; }
+  id="$(jq -r '.tunnel_id // empty' <<<"$payload")"
+  name="$(jq -r '.name // empty' <<<"$payload")"
+  landing_public_key="$(jq -r '.landing_public_key // empty' <<<"$payload")"
+  endpoint_host="$(jq -r '.endpoint_host // empty' <<<"$payload")"
+  endpoint_port="$(jq -r '.endpoint_port // empty' <<<"$payload")"
+  relay_address="$(jq -r '.relay_address // empty' <<<"$payload")"
+  landing_address="$(jq -r '.landing_address // empty' <<<"$payload")"
+  mtu="$(jq -r '.mtu // 1420' <<<"$payload")"
+  if [[ ! "$id" =~ ^wg-[A-Za-z0-9-]+$ || ${#id} -gt 80 || -z "$name" || ${#name} -gt 80 ]] || wireguard_profile_exists "$id"; then
+    ui_msg "隧道标识无效或已经存在。"
+    return 1
+  fi
+  if ! wireguard_valid_key "$landing_public_key" || ! wireguard_valid_endpoint_host "$endpoint_host"; then
+    ui_msg "配对信息中的公钥或 Endpoint 无效。"
+    return 1
+  fi
+  if [[ ! "$endpoint_port" =~ ^[0-9]+$ ]] || (( endpoint_port < 1 || endpoint_port > 65535 )); then
+    ui_msg "配对信息中的端口无效。"
+    return 1
+  fi
+  is_valid_ipv4_or_cidr "${relay_address}/32" && is_valid_ipv4_or_cidr "${landing_address}/32" && [[ "$relay_address" != "$landing_address" ]] || { ui_msg "配对信息中的私网地址无效。"; return 1; }
+  if ip -o address show 2>/dev/null | grep -Fq " ${relay_address}/" ||
+    ip -o address show 2>/dev/null | grep -Fq " ${landing_address}/"; then
+    ui_msg "配对信息中的 WireGuard 私网地址已被本机其他接口占用。"
+    return 1
+  fi
+  if [[ ! "$mtu" =~ ^[0-9]+$ ]] || (( mtu < 1280 || mtu > 1500 )); then
+    ui_msg "配对信息中的 MTU 无效。"
+    return 1
+  fi
+  interface="$(wireguard_next_interface)" || { ui_msg "没有可用的 WireGuard 接口名称。"; return 1; }
+  wireguard_generate_keypair "$interface" || { ui_msg "WireGuard 密钥生成失败。"; return 1; }
+  public_key="$(tr -d '\r\n' <"$(wireguard_public_key_file "$interface")")"
+  if ! realm_state_jq --arg id "$id" --arg name "$name" --arg interface "$interface" --arg local "$relay_address" --arg peer "$landing_address" \
+    --arg public_key "$public_key" --arg peer_public_key "$landing_public_key" --arg endpoint_host "$endpoint_host" --argjson endpoint_port "$endpoint_port" --argjson mtu "$mtu" --arg ts "$(utc_now)" '
+      .wireguard.profiles += [{
+        id: $id, name: $name, interface: $interface, role: "relay",
+        local_address: $local, peer_address: $peer, public_key: $public_key,
+        peer_public_key: $peer_public_key, endpoint_host: $endpoint_host,
+        endpoint_port: $endpoint_port, listen_port: null, allowed_source: null,
+        mtu: $mtu, persistent_keepalive: 25, enabled: true, paired: true
+      }] |
+      .meta.updated_at = $ts
+    '; then
+    rm -f "$(wireguard_private_key_file "$interface")" "$(wireguard_public_key_file "$interface")"
+    ui_msg "WireGuard 状态写入失败。"
+    return 1
+  fi
+  if ! wireguard_start_profile "$id" || ! wireguard_profile_route_ready "$id"; then
+    wireguard_stop_profile "$id"
+    realm_state_jq --arg id "$id" '.wireguard.profiles |= map(select(.id != $id))' || true
+    rm -f "$(wireguard_config_file "$interface")" "$(wireguard_private_key_file "$interface")" "$(wireguard_public_key_file "$interface")"
+    ui_msg "WireGuard 中转端启动失败，新增配置已撤销。"
+    return 1
+  fi
+  response="$(jq -nc --arg id "$id" --arg public_key "$public_key" --arg relay "$relay_address" --arg landing "$landing_address" '
+    {kind:"sbox-wireguard-response-v1", tunnel_id:$id, relay_public_key:$public_key, relay_address:$relay, landing_address:$landing}
+  ')"
+  response="$(wireguard_encode_pairing_json "$response")"
+  ui_show_text "WireGuard 中转端已加入" "请返回落地 VPS，选择【完成隧道配对（落地端）】并粘贴以下响应信息：
+
+${response}
+
+落地端完成配对前，当前隧道不会产生有效握手。"
+}
+
+complete_wireguard_landing_pairing() {
+  local code payload id relay_public_key relay_address landing_address expected_relay expected_landing interface previous_state
+  local error_count=0
+  init_realm_state_file
+  code="$(realm_prompt_nonempty_limited error_count "完成 WireGuard 配对" "请粘贴中转端响应信息" "")" || return 1
+  payload="$(wireguard_decode_pairing_code "$code")" || { ui_msg "WireGuard 响应信息无法解析。"; return 1; }
+  [[ "$(jq -r '.kind // empty' <<<"$payload")" == "sbox-wireguard-response-v1" ]] || { ui_msg "响应信息类型不正确。"; return 1; }
+  id="$(jq -r '.tunnel_id // empty' <<<"$payload")"
+  relay_public_key="$(jq -r '.relay_public_key // empty' <<<"$payload")"
+  relay_address="$(jq -r '.relay_address // empty' <<<"$payload")"
+  landing_address="$(jq -r '.landing_address // empty' <<<"$payload")"
+  wireguard_profile_exists "$id" && [[ "$(wireguard_profile_field "$id" role)" == "landing" ]] || { ui_msg "找不到对应的落地端隧道。"; return 1; }
+  wireguard_valid_key "$relay_public_key" || { ui_msg "中转端公钥无效。"; return 1; }
+  if [[ "$(wireguard_profile_field "$id" paired)" == "true" ]] &&
+    [[ "$(wireguard_profile_field "$id" peer_public_key)" != "$relay_public_key" ]]; then
+    ui_yesno "该落地隧道已经配对。继续会替换原中转公钥并中断旧隧道，是否继续？" || return 0
+  fi
+  expected_relay="$(wireguard_profile_field "$id" peer_address)"
+  expected_landing="$(wireguard_profile_field "$id" local_address)"
+  [[ "$relay_address" == "$expected_relay" && "$landing_address" == "$expected_landing" ]] || { ui_msg "响应中的隧道地址与落地端记录不一致。"; return 1; }
+  previous_state="$(snapshot_realm_state_file)" || return 1
+  if ! realm_state_jq --arg id "$id" --arg peer_public_key "$relay_public_key" --arg ts "$(utc_now)" '
+    (.wireguard.profiles[] | select(.id == $id)).peer_public_key = $peer_public_key |
+    (.wireguard.profiles[] | select(.id == $id)).paired = true |
+    .meta.updated_at = $ts
+  ' || ! wireguard_start_profile "$id"; then
+    install -m 0600 "$previous_state" "$REALM_STATE_FILE" || true
+    write_wireguard_profile_config "$id" || true
+    wireguard_start_profile "$id" || true
+    rm -f "$previous_state"
+    ui_msg "完成 WireGuard 配对失败，已恢复原配置。"
+    return 1
+  fi
+  rm -f "$previous_state"
+  interface="$(wireguard_profile_field "$id" interface)"
+  offer_wireguard_peer_for_shadowsocks "$relay_address" || true
+  ui_msg "WireGuard 配对已完成。接口 ${interface} 已启动；请在中转端执行隧道测试，确认最近握手和目标端口均正常。落地节点防火墙应允许来源 ${relay_address}/32。"
+}
+
+show_wireguard_profiles() {
+  local output="" id name role interface local_address peer_address enabled paired active handshake now age references transfer
+  init_realm_state_file
+  if [[ "$(wireguard_profile_count)" -eq 0 ]]; then
+    ui_msg "当前没有 WireGuard 隧道。"
+    return 0
+  fi
+  now="$(date +%s)"
+  while IFS=$'\t' read -r id name role interface local_address peer_address enabled paired; do
+    active="未运行"
+    handshake="无"
+    transfer="0 / 0 bytes"
+    if wireguard_profile_active "$interface"; then
+      active="运行中"
+      handshake="$(wg show "$interface" latest-handshakes 2>/dev/null | awk 'NR==1 {print $2}')"
+      if [[ "$handshake" =~ ^[0-9]+$ && "$handshake" -gt 0 ]]; then
+        age=$((now - handshake))
+        handshake="${age} 秒前"
+      else
+        handshake="尚未握手"
+      fi
+      transfer="$(wg show "$interface" transfer 2>/dev/null | awk 'NR==1 {print $2 " / " $3 " bytes"}')"
+      transfer="${transfer:-0 / 0 bytes}"
+    fi
+    references="$(jq -r --arg id "$id" '[.rules[]? | select(.mode == "wireguard" and .tunnel_id == $id)] | length' "$REALM_STATE_FILE")"
+    output+="${name} [${id}]\n  角色=${role}  接口=${interface}  状态=${active}  启用=${enabled}  配对=${paired}\n  ${local_address} -> ${peer_address}  最近握手=${handshake}\n  接收/发送=${transfer}  Realm 引用=${references}\n\n"
+  done < <(jq -r '.wireguard.profiles[]? | [.id,.name,.role,.interface,.local_address,.peer_address,(.enabled|tostring),(.paired|tostring)] | @tsv' "$REALM_STATE_FILE")
+  ui_show_text "WireGuard 隧道状态" "$(printf '%b' "$output")"
+}
+
+test_wireguard_profile() {
+  local id interface peer_address port handshake now age output
+  id="$(select_wireguard_profile any)" || return 0
+  interface="$(wireguard_profile_field "$id" interface)"
+  peer_address="$(wireguard_profile_field "$id" peer_address)"
+  ping -c 1 -W 2 "$peer_address" >/dev/null 2>&1 || true
+  if ! wireguard_profile_route_ready "$id"; then
+    ui_msg "隧道接口或到 ${peer_address} 的 /32 路由不正常。"
+    return 1
+  fi
+  handshake="$(wg show "$interface" latest-handshakes 2>/dev/null | awk 'NR==1 {print $2}')"
+  if [[ ! "$handshake" =~ ^[0-9]+$ || "$handshake" -eq 0 ]]; then
+    ui_msg "接口和路由正常，但尚未产生有效 WireGuard 握手。请检查对端公钥、Endpoint 和 UDP 防火墙。"
+    return 1
+  fi
+  now="$(date +%s)"
+  age=$((now - handshake))
+  output="接口和路由正常。\n最近握手：${age} 秒前。"
+  port="$(ui_input "WireGuard 目标测试" "请输入要测试的对端 TCP 端口，输入 0 跳过" "0")" || return 1
+  if [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )); then
+    if wireguard_probe_tcp "$peer_address" "$port"; then
+      output+="\n目标 ${peer_address}:${port} 可以连接。"
+    else
+      output+="\n目标 ${peer_address}:${port} 无法连接，请检查落地服务监听和防火墙。"
+    fi
+  fi
+  ui_show_text "WireGuard 测试结果" "$(printf '%b' "$output")"
+}
+
+modify_wireguard_profile() {
+  local id role name endpoint_host endpoint_port listen_port current_endpoint_port allowed_source mtu keepalive previous_state error_count=0
+  local update_ok=true
+  id="$(select_wireguard_profile any)" || return 0
+  role="$(wireguard_profile_field "$id" role)"
+  name="$(realm_prompt_nonempty_limited error_count "修改 WireGuard 隧道" "请输入隧道名称" "$(wireguard_profile_field "$id" name)")" || return 1
+  (( ${#name} <= 80 )) || { ui_msg "WireGuard 隧道名称不能超过 80 个字符。"; return 1; }
+  mtu="$(realm_prompt_number_limited error_count "修改 WireGuard 隧道" "请输入 MTU" "$(wireguard_profile_field "$id" mtu)" 1280 1500)" || return 1
+  if [[ "$role" == "relay" ]]; then
+    endpoint_host="$(realm_prompt_nonempty_limited error_count "修改 WireGuard 中转端" "请输入落地公网 IP 或域名" "$(wireguard_profile_field "$id" endpoint_host)")" || return 1
+    wireguard_valid_endpoint_host "$endpoint_host" || { ui_msg "Endpoint 地址无效。"; return 1; }
+    endpoint_port="$(realm_prompt_number_limited error_count "修改 WireGuard 中转端" "请输入落地 WireGuard UDP 端口" "$(wireguard_profile_field "$id" endpoint_port)" 1 65535)" || return 1
+    keepalive="$(realm_prompt_number_limited error_count "修改 WireGuard 中转端" "请输入 PersistentKeepalive，0 表示关闭" "$(wireguard_profile_field "$id" persistent_keepalive)" 0 65535)" || return 1
+  else
+    endpoint_host="$(realm_prompt_nonempty_limited error_count "修改 WireGuard 落地端" "请输入本机公网 IP 或域名（用于后续配对信息）" "$(wireguard_profile_field "$id" endpoint_host)")" || return 1
+    wireguard_valid_endpoint_host "$endpoint_host" || { ui_msg "Endpoint 地址无效。"; return 1; }
+    listen_port="$(realm_prompt_number_limited error_count "修改 WireGuard 落地端" "请输入 WireGuard UDP 监听端口" "$(wireguard_profile_field "$id" listen_port)" 1 65535)" || return 1
+    current_endpoint_port="$(wireguard_profile_field "$id" endpoint_port)"
+    current_endpoint_port="${current_endpoint_port:-$listen_port}"
+    endpoint_port="$(realm_prompt_number_limited error_count "修改 WireGuard 落地端" "请输入公网 Endpoint UDP 端口" "$current_endpoint_port" 1 65535)" || return 1
+    if [[ "$listen_port" != "$(wireguard_profile_field "$id" listen_port)" ]] &&
+      { port_is_listening udp "$listen_port" || jq -e --arg id "$id" --argjson port "$listen_port" '.wireguard.profiles[]? | select(.id != $id and .role == "landing" and .listen_port == $port)' "$REALM_STATE_FILE" >/dev/null 2>&1; }; then
+      ui_msg "UDP/${listen_port} 已被占用。"
+      return 1
+    fi
+    allowed_source="$(realm_prompt_nonempty_limited error_count "修改 WireGuard 落地端" "请输入中转 VPS 公网来源 IP/CIDR" "$(wireguard_profile_field "$id" allowed_source)")" || return 1
+    wireguard_valid_allowed_source "$allowed_source" || { ui_msg "中转来源 IP/CIDR 无效；WireGuard 监听不允许设置为全网来源。"; return 1; }
+  fi
+
+  previous_state="$(snapshot_realm_state_file)" || return 1
+  if [[ "$role" == "relay" ]]; then
+    realm_state_jq --arg id "$id" --arg name "$name" --arg endpoint_host "$endpoint_host" --argjson endpoint_port "$endpoint_port" --argjson mtu "$mtu" --argjson keepalive "$keepalive" --arg ts "$(utc_now)" '
+      (.wireguard.profiles[] | select(.id == $id)) |= (
+        .name = $name | .endpoint_host = $endpoint_host | .endpoint_port = $endpoint_port |
+        .mtu = $mtu | .persistent_keepalive = $keepalive
+      ) | .meta.updated_at = $ts
+    ' || update_ok=false
+  else
+    realm_state_jq --arg id "$id" --arg name "$name" --arg endpoint_host "$endpoint_host" --arg allowed_source "$allowed_source" --argjson listen_port "$listen_port" --argjson endpoint_port "$endpoint_port" --argjson mtu "$mtu" --arg ts "$(utc_now)" '
+      (.wireguard.profiles[] | select(.id == $id)) |= (
+        .name = $name | .endpoint_host = $endpoint_host | .listen_port = $listen_port |
+        .endpoint_port = $endpoint_port | .allowed_source = $allowed_source | .mtu = $mtu
+      ) | .meta.updated_at = $ts
+    ' || update_ok=false
+  fi
+
+  if [[ "$update_ok" != "true" ]] || ! sync_managed_firewall_rules || ! wireguard_start_profile "$id"; then
+    install -m 0600 "$previous_state" "$REALM_STATE_FILE" || true
+    sync_managed_firewall_rules || true
+    write_wireguard_profile_config "$id" || true
+    wireguard_start_profile "$id" || true
+    rm -f "$previous_state"
+    ui_msg "WireGuard 修改失败，已恢复原配置。"
+    return 1
+  fi
+  rm -f "$previous_state"
+  ensure_realm_service || true
+  ui_msg "WireGuard 隧道配置已更新。"
+}
+
+control_wireguard_profile() {
+  local id action interface previous_state
+  id="$(select_wireguard_profile any)" || return 0
+  interface="$(wireguard_profile_field "$id" interface)"
+  action="$(ui_menu "WireGuard 服务控制" "接口：${interface}" "1" "启动/重启" "2" "停止" "0" "返回")" || return 1
+  case "$action" in
+    1)
+      previous_state="$(snapshot_realm_state_file)" || return 1
+      if ! realm_state_jq --arg id "$id" '(.wireguard.profiles[] | select(.id == $id)).enabled = true' ||
+        ! sync_managed_firewall_rules || ! wireguard_start_profile "$id"; then
+        wireguard_stop_profile "$id"
+        install -m 0600 "$previous_state" "$REALM_STATE_FILE" || true
+        sync_managed_firewall_rules || true
+        rm -f "$previous_state"
+        ui_msg "WireGuard 隧道启动失败，已恢复原状态。"
+        return 1
+      fi
+      rm -f "$previous_state"
+      ensure_realm_service || true
+      ui_msg "WireGuard 隧道已启动。"
+      ;;
+    2)
+      if jq -e --arg id "$id" '.rules[]? | select(.mode == "wireguard" and .tunnel_id == $id)' "$REALM_STATE_FILE" >/dev/null 2>&1; then
+        ui_yesno "该隧道仍被 Realm 规则引用，停止后相关转发会中断。是否继续？" || return 0
+      fi
+      previous_state="$(snapshot_realm_state_file)" || return 1
+      wireguard_stop_profile "$id"
+      if ! realm_state_jq --arg id "$id" '(.wireguard.profiles[] | select(.id == $id)).enabled = false' || ! sync_managed_firewall_rules; then
+        install -m 0600 "$previous_state" "$REALM_STATE_FILE" || true
+        sync_managed_firewall_rules || true
+        wireguard_start_profile "$id" || true
+        rm -f "$previous_state"
+        ui_msg "WireGuard 隧道停止后的状态同步失败，已尝试恢复。"
+        return 1
+      fi
+      rm -f "$previous_state"
+      ensure_realm_service || true
+      ui_msg "WireGuard 隧道已停止。"
+      ;;
+  esac
+}
+
+repair_wireguard_profiles() {
+  local id enabled failed=false
+  install_wireguard_tools || return 1
+  ensure_wireguard_dirs
+  init_realm_state_file
+  sync_managed_firewall_rules || failed=true
+  while IFS=$'\t' read -r id enabled; do
+    [[ -n "$id" ]] || continue
+    write_wireguard_profile_config "$id" || failed=true
+    if [[ "$enabled" == "true" ]]; then
+      wireguard_start_profile "$id" || failed=true
+    fi
+  done < <(jq -r '.wireguard.profiles[]? | [.id,(.enabled|tostring)] | @tsv' "$REALM_STATE_FILE")
+  ensure_realm_service || failed=true
+  if [[ "$failed" == "true" ]]; then
+    ui_msg "WireGuard 修复未完全成功，请查看隧道状态和系统日志。"
+    return 1
+  fi
+  ui_msg "WireGuard 工具、配置、服务和防火墙已修复。"
+}
+
+delete_wireguard_profile() {
+  local id interface previous_state
+  id="$(select_wireguard_profile any)" || return 0
+  if jq -e --arg id "$id" '.rules[]? | select(.mode == "wireguard" and .tunnel_id == $id)' "$REALM_STATE_FILE" >/dev/null 2>&1; then
+    ui_msg "该隧道仍被 Realm 转发规则引用。请先删除相关规则或将其改为直接转发。"
+    return 1
+  fi
+  interface="$(wireguard_profile_field "$id" interface)"
+  wireguard_valid_interface "$interface" || { ui_msg "隧道接口名称无效，已拒绝删除。"; return 1; }
+  ui_yesno "确定删除 WireGuard 隧道 ${interface}？本机密钥将一并删除。" || return 0
+  previous_state="$(snapshot_realm_state_file)" || return 1
+  wireguard_stop_profile "$id"
+  if ! realm_state_jq --arg id "$id" --arg ts "$(utc_now)" '.wireguard.profiles |= map(select(.id != $id)) | .meta.updated_at = $ts' ||
+    ! sync_managed_firewall_rules; then
+    install -m 0600 "$previous_state" "$REALM_STATE_FILE" || true
+    sync_managed_firewall_rules || true
+    wireguard_start_profile "$id" || true
+    rm -f "$previous_state"
+    ui_msg "WireGuard 删除失败，已恢复原隧道和防火墙。"
+    return 1
+  fi
+  rm -f "$previous_state"
+  rm -f "$(wireguard_config_file "$interface")" "$(wireguard_private_key_file "$interface")" "$(wireguard_public_key_file "$interface")" "$(wireguard_openrc_service_file "$interface")"
+  rm -f "$(wireguard_systemd_dropin_dir "$interface")/10-sbox-firewall.conf" 2>/dev/null || true
+  rmdir "$(wireguard_systemd_dropin_dir "$interface")" 2>/dev/null || true
+  ui_msg "WireGuard 隧道已删除。"
+}
+
+remove_all_managed_wireguard_profiles() {
+  local id interface
+  [[ -s "$REALM_STATE_FILE" ]] || return 0
+  while IFS=$'\t' read -r id interface; do
+    [[ -n "$id" && -n "$interface" ]] || continue
+    wireguard_valid_interface "$interface" || return 1
+    wireguard_stop_profile "$id"
+    rm -f "$(wireguard_config_file "$interface")" "$(wireguard_private_key_file "$interface")" \
+      "$(wireguard_public_key_file "$interface")" "$(wireguard_openrc_service_file "$interface")"
+    rm -f "$(wireguard_systemd_dropin_dir "$interface")/10-sbox-firewall.conf" 2>/dev/null || true
+    rmdir "$(wireguard_systemd_dropin_dir "$interface")" 2>/dev/null || true
+    if has_systemd; then
+      systemctl reset-failed "wg-quick@${interface}.service" >/dev/null 2>&1 || true
+    fi
+  done < <(jq -r '.wireguard.profiles[]? | [.id,.interface] | @tsv' "$REALM_STATE_FILE")
+  realm_state_jq '.wireguard.profiles = []' || return 1
+}
+
+wireguard_submenu() {
+  local choice
+  while true; do
+    choice="$(ui_menu "WireGuard 隧道管理" "隧道数量：$(wireguard_profile_count)" \
+      "1" "创建隧道（落地端）" \
+      "2" "加入隧道（中转端）" \
+      "3" "完成隧道配对（落地端）" \
+      "4" "重新显示落地端配对信息" \
+      "5" "查看隧道列表和状态" \
+      "6" "测试隧道连通性" \
+      "7" "修改隧道" \
+      "8" "启动 / 停止 / 重启隧道" \
+      "9" "修复 WireGuard 环境" \
+      "10" "删除隧道" \
+      "0" "返回")" || continue
+    case "$choice" in
+      1) create_wireguard_landing_profile ;;
+      2) join_wireguard_relay_profile ;;
+      3) complete_wireguard_landing_pairing ;;
+      4) show_wireguard_landing_invitation ;;
+      5) show_wireguard_profiles ;;
+      6) test_wireguard_profile ;;
+      7) modify_wireguard_profile ;;
+      8) control_wireguard_profile ;;
+      9) repair_wireguard_profiles ;;
+      10) delete_wireguard_profile ;;
+      0) return 0 ;;
+    esac
+  done
+}
+
 realm_rule_group_count() {
   realm_state_get '.rules | length'
 }
@@ -3413,6 +4353,8 @@ no_tcp = ${no_tcp}
 EOF
 
   while IFS=$'\t' read -r listen remote; do
+    listen="${listen%$'\r'}"
+    remote="${remote%$'\r'}"
     [[ -n "$listen" && -n "$remote" ]] || continue
     cat <<EOF
 
@@ -3554,8 +4496,8 @@ preflight_realm_config() {
 }
 
 verify_realm_service_ready() {
-  local attempt port ready
-  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  local port ready
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
     ready=true
     if ! realm_service_exists || [[ "$(realm_service_active)" != "active" ]]; then
       ready=false
@@ -3640,6 +4582,14 @@ apply_realm_config() {
     install -m 0600 "$previous_state_file" "$REALM_STATE_FILE" || true
     rm -f "$previous_state_file" "$previous_config_file"
     ui_msg "防火墙环境不可用，Realm 变更已撤销、现有服务未停止。请执行 sbox repair-install 后重试。"
+    return 1
+  fi
+
+  if ! ensure_realm_wireguard_dependencies; then
+    install -m 0600 "$previous_state_file" "$REALM_STATE_FILE" || true
+    ensure_realm_service || true
+    rm -f "$previous_state_file" "$previous_config_file"
+    ui_msg "Realm 变更已撤销：关联的 WireGuard 隧道未配对、未启用，或接口和 /32 路由不可用。"
     return 1
   fi
 
@@ -4875,8 +5825,13 @@ realm_uninstall() {
   fi
 
   rm -f "$REALM_BIN" "$REALM_SERVICE_FILE" "$REALM_OPENRC_SERVICE_FILE" \
-    "$REALM_OPENRC_LOG_FILE" "$REALM_CONFIG_FILE" "$REALM_STATE_FILE" 2>/dev/null || true
+    "$REALM_OPENRC_LOG_FILE" "$REALM_CONFIG_FILE" 2>/dev/null || true
   rm -rf "$REALM_DIR" 2>/dev/null || true
+  if [[ -s "$REALM_STATE_FILE" ]] && [[ "$(wireguard_profile_count)" -gt 0 ]]; then
+    realm_state_jq --arg ts "$(utc_now)" '.rules = [] | .meta.updated_at = $ts' || return 1
+  else
+    rm -f "$REALM_STATE_FILE" 2>/dev/null || true
+  fi
   sync_managed_firewall_rules
 
   if has_systemd; then
@@ -4884,11 +5839,18 @@ realm_uninstall() {
     systemctl reset-failed realm >/dev/null 2>&1 || true
   fi
 
-  ui_msg "Realm 已卸载完成。"
+  ui_msg "Realm 已卸载完成。已创建的 WireGuard 隧道会继续保留，可在重新安装 Realm 后继续使用。"
+}
+
+select_realm_forward_mode() {
+  ui_menu "Realm 转发链路" "请选择本条规则使用的链路" \
+    "1" "直接转发" \
+    "2" "通过 WireGuard 隧道" \
+    "0" "返回"
 }
 
 add_realm_forward_rule() {
-  local listen_port remote_host remote_port rule_id description entries_json previous_state_file error_count=0
+  local listen_port remote_host remote_port rule_id description entries_json previous_state_file mode_choice mode tunnel_id="" tunnel_name="" error_count=0
 
   ensure_realm_dirs
   init_realm_state_file
@@ -4899,11 +5861,43 @@ add_realm_forward_rule() {
   }
 
   listen_port="$(realm_prompt_number_limited error_count "本地端口" "请输入需要监听的本地端口" "$(generate_random_service_port)" 10000 60000)" || return 1
-  remote_host="$(realm_prompt_nonempty_limited error_count "落地地址" "请输入目标地址【落地机的ip或域名】" "")" || return 1
+  mode_choice="$(select_realm_forward_mode)" || return 1
+  case "$mode_choice" in
+    1)
+      mode="direct"
+      remote_host="$(realm_prompt_nonempty_limited error_count "落地地址" "请输入目标地址【落地机的 IP 或域名】" "")" || return 1
+      ;;
+    2)
+      mode="wireguard"
+      tunnel_id="$(select_wireguard_profile relay)" || return 1
+      [[ "$(wireguard_profile_field "$tunnel_id" paired)" == "true" && "$(wireguard_profile_field "$tunnel_id" enabled)" == "true" ]] || {
+        ui_msg "所选 WireGuard 隧道尚未配对或未启用。"
+        return 1
+      }
+      remote_host="$(wireguard_profile_field "$tunnel_id" peer_address)"
+      tunnel_name="$(wireguard_profile_field "$tunnel_id" name)"
+      ;;
+    0) return 0 ;;
+    *) return 1 ;;
+  esac
   remote_port="$(realm_prompt_number_limited error_count "落地端口" "请输入目标端口【落地节点的端口】" "443" 1 65535)" || return 1
 
+  if [[ "$mode" == "wireguard" ]]; then
+    if ! wireguard_profile_route_ready "$tunnel_id"; then
+      wireguard_start_profile "$tunnel_id" || { ui_msg "WireGuard 隧道无法启动。"; return 1; }
+    fi
+    wireguard_probe_tcp "$remote_host" "$remote_port" || {
+      ui_msg "WireGuard 隧道存在，但目标 ${remote_host}:${remote_port} 无法连接。规则未保存，请检查落地节点监听和防火墙。"
+      return 1
+    }
+  fi
+
   rule_id="realm-$(date +%s)-$(generate_hex 4)"
-  description="0.0.0.0:${listen_port} -> ${remote_host}:${remote_port}"
+  if [[ "$mode" == "wireguard" ]]; then
+    description="0.0.0.0:${listen_port} -> [WG:${tunnel_name}] ${remote_host}:${remote_port}"
+  else
+    description="0.0.0.0:${listen_port} -> ${remote_host}:${remote_port}"
+  fi
   entries_json="$(jq -nc --arg listen "0.0.0.0:${listen_port}" --arg remote "${remote_host}:${remote_port}" '[{listen: $listen, remote: $remote}]')"
 
   previous_state_file="$(snapshot_realm_state_file)" || {
@@ -4911,8 +5905,8 @@ add_realm_forward_rule() {
     return 1
   }
 
-  if ! realm_state_jq --arg id "$rule_id" --arg description "$description" --argjson entries "$entries_json" --arg ts "$(utc_now)" '
-    .rules += [{id: $id, type: "single", description: $description, entries: $entries}] |
+  if ! realm_state_jq --arg id "$rule_id" --arg description "$description" --arg mode "$mode" --arg tunnel_id "$tunnel_id" --argjson entries "$entries_json" --arg ts "$(utc_now)" '
+    .rules += [{id: $id, type: "single", mode: $mode, tunnel_id: (if $mode == "wireguard" then $tunnel_id else null end), description: $description, entries: $entries}] |
     .meta.updated_at = $ts
   '; then
     rm -f "$previous_state_file"
@@ -4924,7 +5918,7 @@ add_realm_forward_rule() {
 }
 
 add_realm_range_rule() {
-  local listen_start listen_end remote_host remote_start remote_end count rule_id description entries_json previous_state_file error_count=0
+  local listen_start listen_end remote_host remote_start remote_end count rule_id description entries_json previous_state_file mode_choice mode tunnel_id="" tunnel_name="" error_count=0
 
   ensure_realm_dirs
   init_realm_state_file
@@ -4949,7 +5943,25 @@ add_realm_range_rule() {
     printf '本地结束端口不能小于起始端口，再次输错将退回菜单界面。\n' >&2
   done
 
-  remote_host="$(realm_prompt_nonempty_limited error_count "落地地址" "请输入目标地址【落地机的ip或域名】" "")" || return 1
+  mode_choice="$(select_realm_forward_mode)" || return 1
+  case "$mode_choice" in
+    1)
+      mode="direct"
+      remote_host="$(realm_prompt_nonempty_limited error_count "落地地址" "请输入目标地址【落地机的 IP 或域名】" "")" || return 1
+      ;;
+    2)
+      mode="wireguard"
+      tunnel_id="$(select_wireguard_profile relay)" || return 1
+      [[ "$(wireguard_profile_field "$tunnel_id" paired)" == "true" && "$(wireguard_profile_field "$tunnel_id" enabled)" == "true" ]] || {
+        ui_msg "所选 WireGuard 隧道尚未配对或未启用。"
+        return 1
+      }
+      remote_host="$(wireguard_profile_field "$tunnel_id" peer_address)"
+      tunnel_name="$(wireguard_profile_field "$tunnel_id" name)"
+      ;;
+    0) return 0 ;;
+    *) return 1 ;;
+  esac
   while true; do
     remote_start="$(realm_prompt_number_limited error_count "落地起始端口" "请输入目标起始端口【落地节点的端口】" "$listen_start" 1 65535)" || return 1
     remote_end="$(realm_prompt_number_limited error_count "落地结束端口" "请输入目标结束端口【落地节点的端口】" "$((remote_start + listen_end - listen_start))" 1 65535)" || return 1
@@ -4978,8 +5990,22 @@ add_realm_range_rule() {
 
   count=$((listen_end - listen_start))
 
+  if [[ "$mode" == "wireguard" ]]; then
+    if ! wireguard_profile_route_ready "$tunnel_id"; then
+      wireguard_start_profile "$tunnel_id" || { ui_msg "WireGuard 隧道无法启动。"; return 1; }
+    fi
+    wireguard_probe_tcp "$remote_host" "$remote_start" || {
+      ui_msg "WireGuard 隧道存在，但目标起始端口 ${remote_host}:${remote_start} 无法连接。规则未保存。"
+      return 1
+    }
+  fi
+
   rule_id="realm-$(date +%s)-$(generate_hex 4)"
-  description="0.0.0.0:${listen_start}-${listen_end} -> ${remote_host}:${remote_start}-${remote_end}"
+  if [[ "$mode" == "wireguard" ]]; then
+    description="0.0.0.0:${listen_start}-${listen_end} -> [WG:${tunnel_name}] ${remote_host}:${remote_start}-${remote_end}"
+  else
+    description="0.0.0.0:${listen_start}-${listen_end} -> ${remote_host}:${remote_start}-${remote_end}"
+  fi
   entries_json="$(jq -nc --arg host "$remote_host" --argjson listen_start "$listen_start" --argjson listen_end "$listen_end" --argjson remote_start "$remote_start" '
     [range(0; ($listen_end - $listen_start) + 1) | {
       listen: ("0.0.0.0:" + (($listen_start + .) | tostring)),
@@ -4992,8 +6018,8 @@ add_realm_range_rule() {
     return 1
   }
 
-  if ! realm_state_jq --arg id "$rule_id" --arg description "$description" --argjson entries "$entries_json" --arg ts "$(utc_now)" '
-    .rules += [{id: $id, type: "range", description: $description, entries: $entries}] |
+  if ! realm_state_jq --arg id "$rule_id" --arg description "$description" --arg mode "$mode" --arg tunnel_id "$tunnel_id" --argjson entries "$entries_json" --arg ts "$(utc_now)" '
+    .rules += [{id: $id, type: "range", mode: $mode, tunnel_id: (if $mode == "wireguard" then $tunnel_id else null end), description: $description, entries: $entries}] |
     .meta.updated_at = $ts
   '; then
     rm -f "$previous_state_file"
@@ -5001,6 +6027,90 @@ add_realm_range_rule() {
     return 1
   fi
 
+  apply_realm_config "$previous_state_file"
+}
+
+select_realm_rule_id() {
+  local choice index id description entry_count
+  local -a ids=() options=()
+  while IFS=$'\t' read -r id description entry_count; do
+    [[ -n "$id" ]] || continue
+    ids+=("$id")
+    options+=("${#ids[@]}" "${description}（${entry_count} 条）")
+  done < <(jq -r '.rules[]? | [.id, .description, (.entries | length)] | @tsv' "$REALM_STATE_FILE")
+  if (( ${#ids[@]} == 0 )); then
+    ui_msg "当前没有 Realm 转发规则。"
+    return 1
+  fi
+  options+=("0" "返回")
+  choice="$(ui_menu "Realm 中转菜单" "请选择转发规则" "${options[@]}")" || return 1
+  [[ "$choice" != "0" && "$choice" =~ ^[0-9]+$ ]] || return 1
+  index=$((choice - 1))
+  (( index >= 0 && index < ${#ids[@]} )) || return 1
+  printf '%s\n' "${ids[$index]}"
+}
+
+change_realm_rule_transport() {
+  local id mode_choice mode tunnel_id="" tunnel_name="" remote_host first_port last_port old_description left description previous_state_file error_count=0
+  init_realm_state_file
+  id="$(select_realm_rule_id)" || return 0
+  first_port="$(jq -r --arg id "$id" '.rules[] | select(.id == $id) | .entries[0].remote | capture(":(?<port>[0-9]+)$").port' "$REALM_STATE_FILE")" || return 1
+  last_port="$(jq -r --arg id "$id" '.rules[] | select(.id == $id) | .entries[-1].remote | capture(":(?<port>[0-9]+)$").port' "$REALM_STATE_FILE")" || return 1
+  mode_choice="$(select_realm_forward_mode)" || return 1
+  case "$mode_choice" in
+    1)
+      mode="direct"
+      remote_host="$(realm_prompt_nonempty_limited error_count "切换为直接转发" "请输入落地公网 IP 或域名" "")" || return 1
+      ;;
+    2)
+      mode="wireguard"
+      tunnel_id="$(select_wireguard_profile relay)" || return 1
+      [[ "$(wireguard_profile_field "$tunnel_id" paired)" == "true" && "$(wireguard_profile_field "$tunnel_id" enabled)" == "true" ]] || {
+        ui_msg "所选 WireGuard 隧道尚未配对或未启用。"
+        return 1
+      }
+      remote_host="$(wireguard_profile_field "$tunnel_id" peer_address)"
+      tunnel_name="$(wireguard_profile_field "$tunnel_id" name)"
+      if ! wireguard_profile_route_ready "$tunnel_id"; then
+        wireguard_start_profile "$tunnel_id" || { ui_msg "WireGuard 隧道无法启动。"; return 1; }
+      fi
+      wireguard_probe_tcp "$remote_host" "$first_port" || {
+        ui_msg "WireGuard 目标 ${remote_host}:${first_port} 无法连接，链路未切换。"
+        return 1
+      }
+      ;;
+    0) return 0 ;;
+    *) return 1 ;;
+  esac
+
+  old_description="$(jq -r --arg id "$id" '.rules[] | select(.id == $id) | .description' "$REALM_STATE_FILE")"
+  left="${old_description%% -> *}"
+  if [[ "$first_port" == "$last_port" ]]; then
+    if [[ "$mode" == "wireguard" ]]; then
+      description="${left} -> [WG:${tunnel_name}] ${remote_host}:${first_port}"
+    else
+      description="${left} -> ${remote_host}:${first_port}"
+    fi
+  elif [[ "$mode" == "wireguard" ]]; then
+    description="${left} -> [WG:${tunnel_name}] ${remote_host}:${first_port}-${last_port}"
+  else
+    description="${left} -> ${remote_host}:${first_port}-${last_port}"
+  fi
+
+  previous_state_file="$(snapshot_realm_state_file)" || return 1
+  if ! realm_state_jq --arg id "$id" --arg mode "$mode" --arg tunnel_id "$tunnel_id" --arg remote_host "$remote_host" --arg description "$description" --arg ts "$(utc_now)" '
+    (.rules[] | select(.id == $id)) |= (
+      .mode = $mode |
+      .tunnel_id = (if $mode == "wireguard" then $tunnel_id else null end) |
+      .description = $description |
+      .entries |= map(.remote = ($remote_host + ":" + (.remote | capture(":(?<port>[0-9]+)$").port)))
+    ) |
+    .meta.updated_at = $ts
+  '; then
+    rm -f "$previous_state_file"
+    ui_msg "Realm 链路更新失败，原规则未改变。"
+    return 1
+  fi
   apply_realm_config "$previous_state_file"
 }
 
@@ -5306,48 +6416,56 @@ realm_submenu() {
   while true; do
     menu_text="$(realm_menu_text)"
     choice="$(ui_menu "Realm 中转菜单" "$menu_text" \
-      "1" "安装 / 重置 Realm" \
-      "2" "卸载 Realm" \
-      "3" "添加转发规则" \
-      "4" "添加端口段转发" \
-      "5" "删除转发规则" \
-      "6" "查看当前配置" \
-      "7" "启动服务" \
-      "8" "停止服务" \
-      "9" "重启服务" \
-      "10" "更新脚本" \
+      "1" "WireGuard 隧道管理" \
+      "2" "安装 / 重置 Realm" \
+      "3" "卸载 Realm" \
+      "4" "添加转发规则" \
+      "5" "添加端口段转发" \
+      "6" "修改转发链路（直连 / WireGuard）" \
+      "7" "删除转发规则" \
+      "8" "查看当前配置" \
+      "9" "启动服务" \
+      "10" "停止服务" \
+      "11" "重启服务" \
+      "12" "更新脚本" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || continue
 
     case "$choice" in
       1)
-        realm_install_or_reset
+        wireguard_submenu
         ;;
       2)
-        realm_uninstall
+        realm_install_or_reset
         ;;
       3)
-        add_realm_forward_rule
+        realm_uninstall
         ;;
       4)
-        add_realm_range_rule
+        add_realm_forward_rule
         ;;
       5)
-        delete_realm_rule
+        add_realm_range_rule
         ;;
       6)
-        show_realm_config
+        change_realm_rule_transport
         ;;
       7)
-        start_realm_service
+        delete_realm_rule
         ;;
       8)
-        stop_realm_service
+        show_realm_config
         ;;
       9)
-        restart_realm_service
+        start_realm_service
         ;;
       10)
+        stop_realm_service
+        ;;
+      11)
+        restart_realm_service
+        ;;
+      12)
         update_manager_script
         ;;
       0)
@@ -5380,7 +6498,7 @@ realm_install_status() {
 }
 
 main_menu_text() {
-  local realm_forward_count=0
+  local realm_forward_count=0 wireguard_tunnel_count=0
 
   if ! have_cmd jq; then
     cat <<EOF
@@ -5394,12 +6512,14 @@ EOF
 
   if [[ -s "$REALM_STATE_FILE" ]]; then
     realm_forward_count="$(realm_rule_group_count)"
+    wireguard_tunnel_count="$(wireguard_profile_count)"
   fi
 
   cat <<EOF
 Sing-box 状态：$(sing_box_install_status)
 节点个数：$(state_get '[.protocols[]?.users[]?] | length') 个
 Realm转发个数：${realm_forward_count} 个
+WireGuard隧道：${wireguard_tunnel_count} 个
 分流落地：$(state_get '(.routing.split.outbounds // []) | length') 个
 
 请选择要执行的操作
@@ -5407,16 +6527,19 @@ EOF
 }
 
 realm_menu_text() {
-  local rule_count
+  local rule_count tunnel_count
   if [[ -s "$REALM_STATE_FILE" ]]; then
     rule_count="$(realm_rule_group_count)"
+    tunnel_count="$(wireguard_profile_count)"
   else
     rule_count="0"
+    tunnel_count="0"
   fi
 
   cat <<EOF
 Realm 状态：$(realm_install_status)
 转发规则组个数：${rule_count}
+WireGuard 隧道个数：${tunnel_count}
 
 请选择要执行的操作（输入 0 返回上一级，输入 00 退出脚本）
 EOF
@@ -5433,15 +6556,9 @@ prepare_realm_menu() {
   ensure_realm_dirs
   init_realm_state_file
 
-  if [[ ! -x "$REALM_BIN" ]]; then
-    log "未检测到 Realm，正在自动安装..."
-    install_realm_binary || {
-      ui_msg "Realm 自动安装失败，请稍后重试。"
-      return 1
-    }
+  if [[ -x "$REALM_BIN" ]]; then
+    ensure_realm_service
   fi
-
-  ensure_realm_service
 }
 
 show_client_info() {
@@ -5564,7 +6681,7 @@ show_service_status() {
 
 uninstall_sbox() {
   local uninstall_text
-  uninstall_text=$'这将执行以下操作：\n- 停止并禁用 sing-box\n- 停止并禁用 Realm\n- 卸载 sing-box 软件包（如果存在）\n- 删除 /etc/sing-box、/etc/realm 和 /etc/sing-box-manager\n- 删除 sbox 与 realm 命令\n\n是否继续？'
+  uninstall_text=$'这将执行以下操作：\n- 停止并禁用 sing-box\n- 停止并禁用 Realm 及脚本托管的 sbwg* WireGuard 隧道\n- 卸载 sing-box 软件包（如果存在）\n- 删除脚本托管的节点、Realm、WireGuard 密钥和状态\n- 删除 sbox 与 realm 命令\n\n不会删除非 sbwg* 的用户 WireGuard 配置。是否继续？'
 
   ui_yesno "$uninstall_text" || return 0
 
@@ -5580,6 +6697,11 @@ uninstall_sbox() {
     rc-service realm stop >/dev/null 2>&1 || true
     rc-update del realm default >/dev/null 2>&1 || true
   fi
+
+  remove_all_managed_wireguard_profiles || {
+    ui_msg "脚本托管的 WireGuard 隧道未能完全清理，卸载已中止。"
+    return 1
+  }
 
   remove_firewall_restore_service
   if ! remove_all_managed_firewall_rules; then

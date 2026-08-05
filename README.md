@@ -20,6 +20,8 @@
 - 新建 Shadowsocks 主节点与分流仅提供 SS2022；主节点支持来源 IP/CIDR 白名单
 - 经 Shadowsocks、VLESS 或 Hysteria2 入站转发的流量都会拒绝访问本机、私网、链路本地地址和常见云元数据地址
 - Realm 仅启用 TCP 转发；升级时会迁移旧配置并清理脚本管理的 Realm UDP 放行规则
+- Realm 每条规则可选择直接转发或通过脚本托管的点对点 WireGuard 隧道转发
+- 支持 WireGuard 落地端/中转端公钥配对、状态检查、目标端口测试、修改、修复和依赖保护
 - 支持查看监听端口和占用进程，并管理本脚本托管的防火墙端口
 - 支持 UFW、firewalld、iptables/ip6tables，并为托管规则提供 systemd/OpenRC 重启恢复
 - iptables/ip6tables 托管规则保留既有拒绝、限速和 Fail2ban 的优先级，并兼容链末端默认拒绝规则
@@ -182,6 +184,7 @@ sbox uninstall
 - 客户端导出目录：`/etc/sing-box-manager/clients/`
 - Hysteria2 证书目录：`/etc/sing-box-manager/certs/`
 - Realm 配置目录：`/etc/realm/`
+- 脚本托管 WireGuard 配置：`/etc/wireguard/sbwg*.conf`（不会修改其他 WireGuard 配置）
 - 脚本托管防火墙状态：`/etc/sing-box-manager/firewall-managed.tsv`
 
 ## 协议说明
@@ -214,6 +217,12 @@ sbox uninstall
 
 - Realm 仅创建 TCP 转发，不启用 UDP
 - 每条规则由本机监听端口和远端地址/端口组成
+- 每条规则可以独立选择直接转发，或选择一个已经配对的 WireGuard 隧道
+- WireGuard 只封装中转到落地之间的 TCP 数据包，Realm 和落地节点仍处理 TCP
+- WireGuard 配置只添加对端 `/32` 路由，不修改默认路由，不启用 IP 转发或 NAT
+- 落地端 WireGuard UDP 端口由脚本限制为指定中转公网 IP/CIDR
+- 建立顺序为：落地端创建配对信息 → 中转端加入并生成响应 → 落地端完成配对 → 中转端测试隧道
+- WireGuard 只能保护中转到落地这一段，不能隐藏客户端正在连接的中转公网 IP
 - 更新旧安装时，脚本会把 Realm 配置迁移为 TCP-only，并清理本机由脚本管理的 UDP 放行规则
 - 云厂商安全组、控制面板防火墙和 NAT 映射不受脚本管理，原有 UDP 映射需要自行删除
 
@@ -251,6 +260,19 @@ journalctl -u sing-box -n 50 --no-pager
 - 确认证书、私钥和伪装域名配置有效
 - systemd：执行 `journalctl -u sing-box -n 50 --no-pager` 查看最近日志
 - Alpine/OpenRC：sing-box 执行 `tail -n 50 /var/log/sing-box.log`，Realm 执行 `tail -n 50 /var/log/realm.log`
+
+### WireGuard 隧道无法握手
+
+```bash
+sudo wg show
+sudo ip route get 对端私网IP
+sudo journalctl -u wg-quick@sbwg0 -n 50 --no-pager
+```
+
+- 确认落地云安全组已放行 WireGuard UDP 端口，且来源是中转公网 IP
+- 确认中转 Endpoint 填写的是落地公网地址和公网映射端口
+- 接口和握手正常但目标 TCP 端口不通时，检查落地节点监听及来源白名单
+- 线路不支持 UDP 时 WireGuard 无法工作，应将 Realm 规则切回直接转发
 
 ### 防火墙同步失败
 

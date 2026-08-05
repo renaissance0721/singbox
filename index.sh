@@ -6650,19 +6650,19 @@ show_subscription_links() {
 
 show_overview() {
   local server_address service_status ss_users vless_users hy2_users overview node_name links_file
-  server_address="$(state_get '.meta.server_address')"
-  node_name="$(state_get '.meta.node_name')"
+  server_address="$(state_get '.meta.server_address' 2>/dev/null || true)"
+  node_name="$(state_get '.meta.node_name' 2>/dev/null || true)"
 
   if service_exists; then
-    service_status="$(sing_box_service_active)"
+    service_status="$(sing_box_service_active 2>/dev/null || printf 'unknown\n')"
   else
     service_status="unknown"
   fi
 
-  ss_users="$(jq -r '.protocols.shadowsocks.users | map(.name) | if length == 0 then "-" else join(", ") end' "$STATE_FILE")"
-  vless_users="$(jq -r '.protocols.vless_reality.users | map(.name) | if length == 0 then "-" else join(", ") end' "$STATE_FILE")"
-  hy2_users="$(jq -r '.protocols.hysteria2.users | map(.name) | if length == 0 then "-" else join(", ") end' "$STATE_FILE")"
-  links_file="$(direct_links_file)"
+  ss_users="$(jq -r '.protocols.shadowsocks.users | map(.name) | if length == 0 then "-" else join(", ") end' "$STATE_FILE" 2>/dev/null || printf -- '-\n')"
+  vless_users="$(jq -r '.protocols.vless_reality.users | map(.name) | if length == 0 then "-" else join(", ") end' "$STATE_FILE" 2>/dev/null || printf -- '-\n')"
+  hy2_users="$(jq -r '.protocols.hysteria2.users | map(.name) | if length == 0 then "-" else join(", ") end' "$STATE_FILE" 2>/dev/null || printf -- '-\n')"
+  links_file="$(direct_links_file 2>/dev/null || true)"
 
   overview=$(
     cat <<EOF
@@ -6702,25 +6702,30 @@ rule_sets = $(format_split_rule_list)
 EOF
   )
 
-  ui_show_text "当前概览" "$overview"
+  ui_show_text "当前概览" "$overview" || true
+  return 0
 }
 
 show_service_status() {
-  local text="" service_manager
-  service_manager="$(sing_box_service_manager)"
+  local text="" service_manager version_output active_status enabled_status recent_logs
+  service_manager="$(sing_box_service_manager 2>/dev/null || printf 'unknown\n')"
 
   if have_cmd sing-box; then
-    text+="sing-box version: $(run_as_runtime sing-box version 2>/dev/null | head -n 1)\n"
+    version_output="$(run_as_runtime sing-box version 2>/dev/null | head -n 1 || true)"
+    text+="sing-box version: ${version_output:-读取失败}\n"
   else
     text+="sing-box version: 未安装\n"
   fi
 
   if service_exists; then
+    active_status="$(sing_box_service_active 2>/dev/null || printf 'unknown\n')"
+    enabled_status="$(sing_box_service_enabled 2>/dev/null || printf 'unknown\n')"
+    recent_logs="$(sing_box_recent_logs 2>/dev/null || printf '无法读取最近日志。\n')"
     text+="service manager: ${service_manager}\n"
-    text+="service active: $(sing_box_service_active)\n"
-    text+="service enabled: $(sing_box_service_enabled)\n"
+    text+="service active: ${active_status}\n"
+    text+="service enabled: ${enabled_status}\n"
     text+="\n最近日志:\n"
-    text+="$(sing_box_recent_logs)"
+    text+="${recent_logs}"
   else
     if [[ "$service_manager" != "none" ]]; then
       text+="未检测到 sing-box ${service_manager} 服务。\n"
@@ -6731,7 +6736,8 @@ show_service_status() {
     fi
   fi
 
-  ui_show_text "服务状态" "$(printf '%b' "$text")"
+  ui_show_text "服务状态" "$(printf '%b' "$text")" || true
+  return 0
 }
 
 uninstall_sbox() {
@@ -6861,10 +6867,12 @@ main_menu() {
         fi
         ;;
       5)
-        show_overview || true
+        show_overview
+        continue
         ;;
       6)
-        show_service_status || true
+        show_service_status
+        continue
         ;;
       7)
         port_management_menu || true

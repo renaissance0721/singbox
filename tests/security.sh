@@ -222,6 +222,36 @@ set -e
 
 printf '0\n' >"$menu_counter_file"
 set +e
+main_view_test_output="$(REPO_DIR="$repo_dir" MENU_COUNTER_FILE="$menu_counter_file" bash -c '
+  set -Eeuo pipefail
+  source <(sed "\$d" "$REPO_DIR/index.sh")
+  main_menu_text() { printf "test\n"; }
+  have_cmd() { [[ "$1" == "jq" ]]; }
+  service_exists() { return 1; }
+  ui_show_text() { printf "view:%s\n" "$1"; return 0; }
+  ui_menu() {
+    local count
+    count="$(cat "$MENU_COUNTER_FILE")"
+    count=$((count + 1))
+    printf "%s\n" "$count" >"$MENU_COUNTER_FILE"
+    case "$count" in
+      1) printf "5\n" ;;
+      2) printf "6\n" ;;
+      *) printf "0\n" ;;
+    esac
+  }
+  main_menu
+  printf "main-view-menu-survived\n"
+')"
+main_view_test_status=$?
+set -e
+[[ "$main_view_test_status" -eq 0 && "$main_view_test_output" == *view:当前概览* &&
+   "$main_view_test_output" == *view:服务状态* && "$main_view_test_output" == *main-view-menu-survived* &&
+   "$(cat "$menu_counter_file")" -eq 3 ]] ||
+  fail "查看当前概览或服务状态后仍会退出主菜单"
+
+printf '0\n' >"$menu_counter_file"
+set +e
 realm_menu_test_output="$(REPO_DIR="$repo_dir" MENU_COUNTER_FILE="$menu_counter_file" bash -c '
   set -Eeuo pipefail
   source <(sed "\$d" "$REPO_DIR/index.sh")

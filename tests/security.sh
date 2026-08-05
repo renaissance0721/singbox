@@ -189,8 +189,58 @@ grep -Fq 'mktemp "$(dirname "$target_path")/.sbox-update.XXXXXX"' "$repo_dir/ind
 if grep -q 'SBOX_UPDATE_INDEX_SHA256\|请输入可信发布说明中 index.sh' "$repo_dir/index.sh"; then
   fail "自动更新仍要求手动输入 SHA-256"
 fi
+grep -Fq '"12" "卸载 Realm"' "$repo_dir/index.sh" || fail "Realm 卸载选项未移动到操作菜单末尾"
+grep -Fq 'realm_install_or_reset || true' "$repo_dir/index.sh" || fail "Realm 菜单未捕获操作失败状态"
+grep -Fq 'quick_install || true' "$repo_dir/index.sh" || fail "主菜单未捕获操作失败状态"
+grep -Fq 'read -r _ || true' "$repo_dir/index.sh" || fail "按回车返回菜单仍可能把读取状态传递为脚本失败"
 grep -Fq 'if [[ -v BASH_SOURCE ]]; then' "$repo_dir/install.sh" ||
   fail "install.sh 通过标准输入执行时仍可能因 BASH_SOURCE[0] 未定义而退出"
+
+menu_counter_file="$test_root/menu-counter"
+printf '0\n' >"$menu_counter_file"
+set +e
+menu_test_output="$(REPO_DIR="$repo_dir" MENU_COUNTER_FILE="$menu_counter_file" bash -c '
+  set -Eeuo pipefail
+  source <(sed "\$d" "$REPO_DIR/index.sh")
+  main_menu_text() { printf "test\n"; }
+  have_cmd() { return 0; }
+  quick_install() { return 1; }
+  ui_menu() {
+    local count
+    count="$(cat "$MENU_COUNTER_FILE")"
+    count=$((count + 1))
+    printf "%s\n" "$count" >"$MENU_COUNTER_FILE"
+    if (( count == 1 )); then printf "1\n"; else printf "0\n"; fi
+  }
+  main_menu
+  printf "menu-survived\n"
+')"
+menu_test_status=$?
+set -e
+[[ "$menu_test_status" -eq 0 && "$menu_test_output" == *menu-survived* && "$(cat "$menu_counter_file")" -eq 2 ]] ||
+  fail "主菜单操作返回非零状态后仍会退出脚本"
+
+printf '0\n' >"$menu_counter_file"
+set +e
+realm_menu_test_output="$(REPO_DIR="$repo_dir" MENU_COUNTER_FILE="$menu_counter_file" bash -c '
+  set -Eeuo pipefail
+  source <(sed "\$d" "$REPO_DIR/index.sh")
+  realm_menu_text() { printf "test\n"; }
+  realm_install_or_reset() { return 1; }
+  ui_menu() {
+    local count
+    count="$(cat "$MENU_COUNTER_FILE")"
+    count=$((count + 1))
+    printf "%s\n" "$count" >"$MENU_COUNTER_FILE"
+    if (( count == 1 )); then printf "2\n"; else printf "0\n"; fi
+  }
+  realm_submenu
+  printf "realm-menu-survived\n"
+')"
+realm_menu_test_status=$?
+set -e
+[[ "$realm_menu_test_status" -eq 0 && "$realm_menu_test_output" == *realm-menu-survived* && "$(cat "$menu_counter_file")" -eq 2 ]] ||
+  fail "Realm 操作返回非零状态后仍会退出脚本"
 
 blob_fixture="$test_root/git-blob-fixture.txt"
 printf 'hello\n' >"$blob_fixture"

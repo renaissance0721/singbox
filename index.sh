@@ -291,9 +291,10 @@ ensure_openrc_low_port_capability() {
 ui_pause() {
   if is_interactive; then
     printf '按回车键返回菜单...' >&2
-    read -r _
+    read -r _ || true
     printf '\n' >&2
   fi
+  return 0
 }
 
 ui_msg() {
@@ -303,6 +304,7 @@ ui_msg() {
   printf '========================================\n' >&2
   printf '%s\n\n' "$text" >&2
   ui_pause
+  return 0
 }
 
 ui_show_text() {
@@ -313,14 +315,16 @@ ui_show_text() {
   printf '========================================\n' >&2
   printf '%s\n\n' "$text" >&2
   ui_pause
+  return 0
 }
 
 ui_input_error_return() {
   printf '\n\033[31m连续输入错误两次，按 Enter 退回菜单界面。\033[0m' >&2
   if [[ -t 0 ]]; then
-    read -r _
+    read -r _ || true
   fi
   printf '\n' >&2
+  return 0
 }
 
 ui_yesno() {
@@ -3437,10 +3441,10 @@ port_management_menu() {
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || continue
     case "$choice" in
-      1) show_all_listening_ports ;;
-      2) show_managed_port_status ;;
-      3) close_inactive_managed_ports ;;
-      4) open_active_managed_ports ;;
+      1) show_all_listening_ports || true ;;
+      2) show_managed_port_status || true ;;
+      3) close_inactive_managed_ports || true ;;
+      4) open_active_managed_ports || true ;;
       0) return 0 ;;
       00) exit 0 ;;
       *) ui_msg "无效选项，请重新选择。" ;;
@@ -4319,16 +4323,16 @@ wireguard_submenu() {
       "10" "删除隧道" \
       "0" "返回")" || continue
     case "$choice" in
-      1) create_wireguard_landing_profile ;;
-      2) join_wireguard_relay_profile ;;
-      3) complete_wireguard_landing_pairing ;;
-      4) show_wireguard_landing_invitation ;;
-      5) show_wireguard_profiles ;;
-      6) test_wireguard_profile ;;
-      7) modify_wireguard_profile ;;
-      8) control_wireguard_profile ;;
-      9) repair_wireguard_profiles ;;
-      10) delete_wireguard_profile ;;
+      1) create_wireguard_landing_profile || true ;;
+      2) join_wireguard_relay_profile || true ;;
+      3) complete_wireguard_landing_pairing || true ;;
+      4) show_wireguard_landing_invitation || true ;;
+      5) show_wireguard_profiles || true ;;
+      6) test_wireguard_profile || true ;;
+      7) modify_wireguard_profile || true ;;
+      8) control_wireguard_profile || true ;;
+      9) repair_wireguard_profiles || true ;;
+      10) delete_wireguard_profile || true ;;
       0) return 0 ;;
     esac
   done
@@ -5151,13 +5155,13 @@ node_submenu() {
         delete_node || true
         ;;
       3)
-        client_submenu
+        client_submenu || true
         ;;
       4)
-        show_subscription_links
+        show_subscription_links || true
         ;;
       5)
-        apply_config
+        apply_config || true
         ;;
       6)
         change_node_address || true
@@ -5618,12 +5622,12 @@ split_routing_submenu() {
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || continue
     case "$choice" in
-      1) configure_split_routing ;;
-      2) edit_split_routing ;;
-      3) delete_split_outbound ;;
-      4) show_split_routing_rules ;;
-      5) append_split_routing_rules ;;
-      6) delete_split_routing_rule ;;
+      1) configure_split_routing || true ;;
+      2) edit_split_routing || true ;;
+      3) delete_split_outbound || true ;;
+      4) show_split_routing_rules || true ;;
+      5) append_split_routing_rules || true ;;
+      6) delete_split_routing_rule || true ;;
       0) return 0 ;;
       00) exit 0 ;;
       *) ui_msg "无效选项，请重新选择。" ;;
@@ -6469,55 +6473,55 @@ realm_submenu() {
     choice="$(ui_menu "Realm 中转菜单" "$menu_text" \
       "1" "WireGuard 隧道管理" \
       "2" "安装 / 重置 Realm" \
-      "3" "卸载 Realm" \
-      "4" "添加转发规则" \
-      "5" "添加端口段转发" \
-      "6" "修改转发链路（直连 / WireGuard）" \
-      "7" "删除转发规则" \
-      "8" "查看当前配置" \
-      "9" "启动服务" \
-      "10" "停止服务" \
-      "11" "重启服务" \
-      "12" "更新脚本" \
+      "3" "添加转发规则" \
+      "4" "添加端口段转发" \
+      "5" "修改转发链路（直连 / WireGuard）" \
+      "6" "删除转发规则" \
+      "7" "查看当前配置" \
+      "8" "启动服务" \
+      "9" "停止服务" \
+      "10" "重启服务" \
+      "11" "更新脚本" \
+      "12" "卸载 Realm" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || continue
 
     case "$choice" in
       1)
-        wireguard_submenu
+        wireguard_submenu || true
         ;;
       2)
-        realm_install_or_reset
+        realm_install_or_reset || true
         ;;
       3)
-        realm_uninstall
+        add_realm_forward_rule || true
         ;;
       4)
-        add_realm_forward_rule
+        add_realm_range_rule || true
         ;;
       5)
-        add_realm_range_rule
+        change_realm_rule_transport || true
         ;;
       6)
-        change_realm_rule_transport
+        delete_realm_rule || true
         ;;
       7)
-        delete_realm_rule
+        show_realm_config || true
         ;;
       8)
-        show_realm_config
+        start_realm_service || true
         ;;
       9)
-        start_realm_service
+        stop_realm_service || true
         ;;
       10)
-        stop_realm_service
+        restart_realm_service || true
         ;;
       11)
-        restart_realm_service
+        update_manager_script || true
         ;;
       12)
-        update_manager_script
+        realm_uninstall || true
         ;;
       0)
         return 0
@@ -6843,31 +6847,33 @@ main_menu() {
 
     case "$choice" in
       1)
-        quick_install
+        quick_install || true
         ;;
       2)
-        node_submenu
+        node_submenu || true
         ;;
       3)
-        split_routing_submenu
+        split_routing_submenu || true
         ;;
       4)
-        prepare_realm_menu && realm_submenu
+        if prepare_realm_menu; then
+          realm_submenu || true
+        fi
         ;;
       5)
-        show_overview
+        show_overview || true
         ;;
       6)
-        show_service_status
+        show_service_status || true
         ;;
       7)
-        port_management_menu
+        port_management_menu || true
         ;;
       8)
-        update_manager_script
+        update_manager_script || true
         ;;
       9)
-        uninstall_sbox
+        uninstall_sbox || true
         ;;
       0)
         break

@@ -181,8 +181,10 @@ grep -Fq 'Restart=always' "$repo_dir/index.sh" || fail "Realm systemd service do
 grep -Fq "setcap 'cap_net_bind_service=+ep'" "$repo_dir/index.sh" || fail "OpenRC 低权限服务无法兼容低端口监听"
 grep -Fq 'SCRIPT_REPO_ID="1210354428"' "$repo_dir/index.sh" || fail "自动更新未固定 GitHub 仓库数字 ID"
 grep -Fq 'SCRIPT_REPO_OWNER_ID="197479185"' "$repo_dir/index.sh" || fail "自动更新未固定 GitHub 所有者数字 ID"
-grep -Fq 'git_blob_sha1_file "$project_dir/index.sh"' "$repo_dir/index.sh" || fail "自动更新未校验不可变 commit 的 Git blob 哈希"
+grep -Fq 'git_blob_sha1_file "$api_copy"' "$repo_dir/index.sh" || fail "自动更新未校验 GitHub API 内容的 Git blob 哈希"
+grep -Fq 'git_blob_sha1_file "$raw_copy"' "$repo_dir/index.sh" || fail "自动更新未校验不可变 Raw 内容的 Git blob 哈希"
 grep -Fq '"$actual_sha256" != "$api_sha256"' "$repo_dir/index.sh" || fail "自动更新未交叉校验 API 与原始文件的 SHA-256"
+grep -Fq 'cp -f "$api_copy" "$project_dir/index.sh"' "$repo_dir/index.sh" || fail "Raw 不可用时未回退到已认证的 GitHub API 内容"
 grep -Fq 'mktemp "$(dirname "$target_path")/.sbox-update.XXXXXX"' "$repo_dir/index.sh" || fail "自动更新未使用同目录临时文件原子替换"
 if grep -q 'SBOX_UPDATE_INDEX_SHA256\|请输入可信发布说明中 index.sh' "$repo_dir/index.sh"; then
   fail "自动更新仍要求手动输入 SHA-256"
@@ -535,6 +537,49 @@ EOF
   if fetch_latest_project_from_repo >/dev/null 2>&1; then
     fail "仓库或所有者数字 ID 不匹配时仍允许自动更新"
   fi
+)
+
+(
+  test_commit_sha="1111111111111111111111111111111111111111"
+  test_content_sha="$(git_blob_sha1_file "$repo_dir/index.sh")"
+
+  download_to_file() {
+    local destination=$1 url=$2
+    case "$url" in
+      "https://api.github.com/repos/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}")
+        jq -n \
+          --argjson repo_id "$SCRIPT_REPO_ID" \
+          --argjson owner_id "$SCRIPT_REPO_OWNER_ID" \
+          --arg full_name "${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}" \
+          --arg branch "$SCRIPT_REPO_BRANCH" \
+          '{id:$repo_id,owner:{id:$owner_id},full_name:$full_name,default_branch:$branch}' >"$destination"
+        ;;
+      */branches/*)
+        jq -n --arg sha "$test_commit_sha" '{commit:{sha:$sha}}' >"$destination"
+        ;;
+      */commits/*)
+        jq -n --arg sha "$test_commit_sha" --argjson owner_id "$SCRIPT_REPO_OWNER_ID" \
+          '{sha:$sha,author:{id:$owner_id},committer:null}' >"$destination"
+        ;;
+      */contents/index.sh*)
+        jq -Rs \
+          --arg sha "$test_content_sha" \
+          --arg download_url "https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/${test_commit_sha}/index.sh" \
+          '{type:"file",path:"index.sh",encoding:"base64",sha:$sha,download_url:$download_url,content:@base64}' \
+          "$repo_dir/index.sh" >"$destination"
+        ;;
+      https://raw.githubusercontent.com/*)
+        return 1
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  }
+
+  fallback_project="$(fetch_latest_project_from_repo)" || fail "Raw 不可用时未使用已认证的 GitHub API 内容继续更新"
+  cmp -s "$repo_dir/index.sh" "$fallback_project/index.sh" || fail "Raw 回退得到的脚本与 GitHub API 内容不一致"
+  rm -rf -- "$(dirname "$fallback_project")"
 )
 
 if [[ "${SBOX_TEST_REMOTE_UPDATE:-0}" == "1" ]]; then

@@ -133,14 +133,25 @@ download_to_file() {
         "$url" -o "$destination"; then
         return 0
       fi
+      # Some VPS networks advertise unusable IPv6 routes. Retry through IPv4
+      # before falling back to wget so a single broken address family does not
+      # make an otherwise reachable update source fail.
+      if curl -4 -fsSL --connect-timeout 10 --retry 2 --retry-delay 1 --speed-limit 1024 --speed-time 30 \
+        "$url" -o "$destination"; then
+        return 0
+      fi
     done
-  elif have_cmd wget; then
+  fi
+
+  if have_cmd wget; then
     for url in "$@"; do
       if wget --timeout=30 --tries=2 -qO "$destination" "$url"; then
         return 0
       fi
     done
-  else
+  fi
+
+  if ! have_cmd curl && ! have_cmd wget; then
     die "未检测到 curl 或 wget，无法下载文件。"
   fi
 
@@ -6255,7 +6266,8 @@ restart_realm_service() {
 fetch_latest_project_from_repo() {
   local tmp_dir project_dir api_root repo_json branch_json commit_json content_json
   local repo_id owner_id full_name default_branch commit_sha commit_author_id commit_committer_id
-  local content_type content_path content_encoding content_sha download_url api_copy actual_blob_sha actual_sha256 api_sha256
+  local content_type content_path content_encoding content_sha download_url api_copy raw_copy
+  local api_blob_sha raw_blob_sha actual_sha256 api_sha256
   tmp_dir="$(mktemp -d "$TMP_DIR/sbox-repo.XXXXXX")" || return 1
   project_dir="$tmp_dir/repo"
   mkdir -p "$project_dir"
@@ -6267,6 +6279,7 @@ fetch_latest_project_from_repo() {
   content_json="$tmp_dir/content.json"
 
   download_to_file "$repo_json" "$api_root" || {
+    warn "无法访问 GitHub 仓库 API；请检查 VPS 的 DNS、IPv4/IPv6 路由或 GitHub 连通性。"
     rm -rf "$tmp_dir"
     return 1
   }
@@ -6282,6 +6295,7 @@ fetch_latest_project_from_repo() {
   fi
 
   download_to_file "$branch_json" "$api_root/branches/$SCRIPT_REPO_BRANCH" || {
+    warn "无法读取 GitHub 分支信息，未能确定最新提交。"
     rm -rf "$tmp_dir"
     return 1
   }
@@ -6294,6 +6308,7 @@ fetch_latest_project_from_repo() {
   commit_sha="${commit_sha,,}"
 
   download_to_file "$commit_json" "$api_root/commits/$commit_sha" || {
+    warn "无法读取 GitHub 提交身份信息，已拒绝在无法验证作者时更新。"
     rm -rf "$tmp_dir"
     return 1
   }
@@ -6311,6 +6326,7 @@ fetch_latest_project_from_repo() {
   fi
 
   download_to_file "$content_json" "$api_root/contents/index.sh?ref=$commit_sha" || {
+    warn "无法读取 GitHub API 中不可变提交的 index.sh 内容。"
     rm -rf "$tmp_dir"
     return 1
   }
@@ -6333,35 +6349,68 @@ fetch_latest_project_from_repo() {
     return 1
   fi
 
-  download_to_file "$project_dir/index.sh" "$download_url" || {
+  api_blob_sha="$(git_blob_sha1_file "$api_copy")" || {
+    warn "无法计算 GitHub API 文件的 Git Blob 哈希，已拒绝更新。"
     rm -rf "$tmp_dir"
     return 1
   }
-
-  actual_blob_sha="$(git_blob_sha1_file "$project_dir/index.sh")" || {
-    rm -rf "$tmp_dir"
-    return 1
-  }
-  if [[ "$actual_blob_sha" != "${content_sha,,}" ]]; then
-    warn "下载脚本的 Git 内容哈希与不可变提交不匹配，已拒绝更新。"
+  if [[ "$api_blob_sha" != "${content_sha,,}" ]]; then
+    warn "GitHub API 文件的 Git Blob 哈希与不可变提交不匹配，已拒绝更新。"
     rm -rf "$tmp_dir"
     return 1
   fi
 
-  actual_sha256="$(sha256_file "$project_dir/index.sh")" || {
-    rm -rf "$tmp_dir"
-    return 1
-  }
   api_sha256="$(sha256_file "$api_copy")" || {
+    warn "无法计算 GitHub API 文件的 SHA-256，已拒绝更新。"
     rm -rf "$tmp_dir"
     return 1
   }
-  if [[ "$actual_sha256" != "$api_sha256" ]]; then
-    warn "GitHub API 与不可变 commit 原始文件的 SHA-256 不一致，已拒绝更新。"
-    rm -rf "$tmp_dir"
-    return 1
+
+  # The authenticated GitHub API copy is sufficient after the pinned
+  # repository/owner/commit/blob checks above. An immutable Raw copy remains
+  # an additional cross-endpoint check, but Raw being unreachable must not
+  # block updates on VPS networks where only api.github.com is reachable.
+  raw_copy="$tmp_dir/index.raw"
+  if download_to_file "$raw_copy" "$download_url"; then
+    raw_blob_sha="$(git_blob_sha1_file "$raw_copy")" || {
+      warn "无法计算不可变 Raw 文件的 Git Blob 哈希，已拒绝更新。"
+      rm -rf "$tmp_dir"
+      return 1
+    }
+    if [[ "$raw_blob_sha" != "${content_sha,,}" ]]; then
+      warn "不可变 Raw 文件的 Git Blob 哈希与 GitHub API 不匹配，已拒绝更新。"
+      rm -rf "$tmp_dir"
+      return 1
+    fi
+
+    actual_sha256="$(sha256_file "$raw_copy")" || {
+      warn "无法计算不可变 Raw 文件的 SHA-256，已拒绝更新。"
+      rm -rf "$tmp_dir"
+      return 1
+    }
+    if [[ "$actual_sha256" != "$api_sha256" ]]; then
+      warn "GitHub API 与不可变 commit 原始文件的 SHA-256 不一致，已拒绝更新。"
+      rm -rf "$tmp_dir"
+      return 1
+    fi
+    cp -f "$raw_copy" "$project_dir/index.sh" || {
+      warn "无法准备已经校验的更新脚本。"
+      rm -rf "$tmp_dir"
+      return 1
+    }
+    log "更新内容已通过 GitHub API 与不可变 Raw 双路径交叉校验。"
+  else
+    cp -f "$api_copy" "$project_dir/index.sh" || {
+      warn "无法准备已经校验的 GitHub API 更新脚本。"
+      rm -rf "$tmp_dir"
+      return 1
+    }
+    actual_sha256="$api_sha256"
+    warn "不可变 Raw 下载入口不可用；已使用通过仓库、所有者、提交及 Blob 哈希校验的 GitHub API 内容继续更新。"
   fi
+
   bash -n "$project_dir/index.sh" || {
+    warn "下载脚本未通过 Bash 语法校验，现有脚本不会被修改。"
     rm -rf "$tmp_dir"
     return 1
   }
@@ -6378,15 +6427,18 @@ install_manager_project_from_repo() {
 
   install -d -m 0755 "$(dirname "$target_path")"
   install_tmp="$(mktemp "$(dirname "$target_path")/.sbox-update.XXXXXX")" || {
+    warn "无法在脚本目录创建更新临时文件，现有脚本未修改。"
     rm -rf "$(dirname "$project_dir")"
     return 1
   }
   if ! install -o root -g root -m 0755 "$project_dir/index.sh" "$install_tmp"; then
+    warn "无法写入更新临时文件，现有脚本未修改。"
     rm -f "$install_tmp"
     rm -rf "$(dirname "$project_dir")"
     return 1
   fi
   if ! mv -f "$install_tmp" "$target_path"; then
+    warn "无法原子替换管理脚本，现有脚本未修改。"
     rm -f "$install_tmp"
     rm -rf "$(dirname "$project_dir")"
     return 1
@@ -6401,7 +6453,7 @@ install_manager_project_from_repo() {
 update_manager_script() {
   log "正在从固定 GitHub 仓库检查并安全更新管理脚本..."
   install_manager_project_from_repo || {
-    ui_msg "更新来源、提交身份、内容哈希或语法校验失败；现有脚本未修改。"
+    ui_msg "安全更新失败；具体失败阶段见上方提示，现有脚本未修改。"
     return 1
   }
 

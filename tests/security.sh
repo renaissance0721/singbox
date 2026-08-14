@@ -181,6 +181,8 @@ grep -Fq 'Restart=always' "$repo_dir/index.sh" || fail "Realm systemd service do
 grep -Fq "setcap 'cap_net_bind_service=+ep'" "$repo_dir/index.sh" || fail "OpenRC 低权限服务无法兼容低端口监听"
 grep -Fq 'SCRIPT_REPO_ID="1210354428"' "$repo_dir/index.sh" || fail "自动更新未固定 GitHub 仓库数字 ID"
 grep -Fq 'SCRIPT_REPO_OWNER_ID="197479185"' "$repo_dir/index.sh" || fail "自动更新未固定 GitHub 所有者数字 ID"
+[[ "$(grep -Fc 'install -d -m 0755 /etc/apt/keyrings' "$repo_dir/index.sh")" -eq 2 ]] ||
+  fail "APT keyrings 目录未显式允许 _apt 用户读取签名密钥"
 grep -Fq 'git_blob_sha1_file "$api_copy"' "$repo_dir/index.sh" || fail "自动更新未校验 GitHub API 内容的 Git blob 哈希"
 grep -Fq 'git_blob_sha1_file "$raw_copy"' "$repo_dir/index.sh" || fail "自动更新未校验不可变 Raw 内容的 Git blob 哈希"
 grep -Fq '"$actual_sha256" != "$api_sha256"' "$repo_dir/index.sh" || fail "自动更新未交叉校验 API 与原始文件的 SHA-256"

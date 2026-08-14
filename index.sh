@@ -577,6 +577,9 @@ install_dependencies() {
       ;;
     apt)
       export DEBIAN_FRONTEND=noninteractive
+      # Repair keyring directories left unreadable by this script's strict
+      # umask before the first apt update (including upgrades/retries).
+      install -d -m 0755 /etc/apt/keyrings || die "无法修复 APT 密钥目录权限。"
       normalize_debian_apt_sources || warn "Debian apt 源自动修复失败，将继续尝试 apt-get update。"
       apt-get update -y
       apt-get install -y curl jq openssl ca-certificates tar gzip iproute2 iptables gnupg
@@ -597,7 +600,11 @@ install_dependencies() {
 install_sing_box_apt_repo() {
   local key_tmp key_fingerprint
   normalize_debian_apt_sources || warn "Debian apt 源自动修复失败，将继续尝试安装 sing-box。"
-  mkdir -p /etc/apt/keyrings || return 1
+  # The script-wide umask is 077, while apt verifies repository signatures as
+  # the unprivileged _apt user.  Make the directory traversable explicitly;
+  # otherwise a newly created keyrings directory is 0700 and apt reports the
+  # installed key as NO_PUBKEY.
+  install -d -m 0755 /etc/apt/keyrings || return 1
   key_tmp="$(mktemp "$TMP_DIR/sagernet-key.XXXXXX")" || return 1
   curl -fsSL https://sing-box.app/gpg.key -o "$key_tmp" || {
     rm -f "$key_tmp"

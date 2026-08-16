@@ -26,6 +26,8 @@ SCRIPT_NAME="${0##*/}"
 APP_TITLE="Sing-box 管理面板 | 输入 sbox 快捷打开脚本"
 STATE_DIR="${STATE_DIR:-/etc/sing-box-manager}"
 STATE_FILE="${STATE_FILE:-$STATE_DIR/state.json}"
+RULE_SET_CACHE_DIR="${RULE_SET_CACHE_DIR:-$STATE_DIR/rule-set-cache}"
+RULE_SET_CACHE_FILE="${RULE_SET_CACHE_FILE:-$RULE_SET_CACHE_DIR/cache.db}"
 BACKUP_DIR="${BACKUP_DIR:-$STATE_DIR/backups}"
 CLIENT_DIR="${CLIENT_DIR:-$STATE_DIR/clients}"
 CERT_DIR="${CERT_DIR:-$STATE_DIR/certs}"
@@ -220,6 +222,11 @@ ensure_dirs() {
   if runtime_account_exists; then
     chown root:"$RUNTIME_GROUP" "$STATE_DIR" "$CERT_DIR" "$(dirname "$CONFIG_FILE")"
   fi
+}
+
+ensure_rule_set_cache_dir() {
+  ensure_runtime_account
+  install -d -o root -g "$RUNTIME_GROUP" -m 0770 "$RULE_SET_CACHE_DIR"
 }
 
 ensure_realm_dirs() {
@@ -839,6 +846,7 @@ LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
+ReadWritePaths=${RULE_SET_CACHE_DIR}
 EOF
 
     systemctl daemon-reload >/dev/null 2>&1 || true
@@ -1599,7 +1607,17 @@ format_split_rule_list() {
   jq -r '
     [.routing.split.outbounds[]?.rule_sets[]?]
     | unique
-    | map(if startswith("domain:") then (ltrimstr("domain:") + "（网址）") else . end)
+    | map(
+        if startswith("domain:") then
+          (ltrimstr("domain:") + "（网址）")
+        elif startswith("geosite:") then
+          (ltrimstr("geosite:") + "（GeoSite）")
+        elif startswith("srs:") then
+          (ltrimstr("srs:") + "（远程 SRS）")
+        else
+          .
+        end
+      )
     | join(", ")
   ' "$STATE_FILE"
 }
@@ -1645,6 +1663,34 @@ build_split_domains_json() {
         )
       ))
     | map("domain:" + .)
+    | unique
+  '
+}
+
+build_split_geosite_json() {
+  local input=$1
+  jq -nc --arg input "$input" '
+    ($input | ascii_downcase)
+    | gsub("，|、|；"; ",")
+    | gsub("[,;[:space:]]+"; ",")
+    | split(",")
+    | map(gsub("^\\s+|\\s+$"; ""))
+    | map(select(test("^[a-z0-9][a-z0-9._@!+\\-]*$")))
+    | map("geosite:" + .)
+    | unique
+  '
+}
+
+build_split_srs_json() {
+  local input=$1
+  jq -nc --arg input "$input" '
+    $input
+    | gsub("，|、|；"; ",")
+    | gsub("[,;[:space:]]+"; ",")
+    | split(",")
+    | map(gsub("^\\s+|\\s+$"; ""))
+    | map(select(test("^https://[^[:space:],]+\\.srs([?#][^[:space:],]*)?$")))
+    | map("srs:" + .)
     | unique
   '
 }
@@ -2224,7 +2270,7 @@ validate_state() {
   local errors=""
   local ss_enabled vless_enabled hy2_enabled
   local server_address vless_server_name handshake_server
-  local split_name split_enabled split_type split_server split_port split_username split_password split_method split_rule_count ss_source
+  local split_name split_enabled split_type split_server split_port split_username split_password split_method split_rule_count split_rule ss_source
 
   ss_enabled="$(state_get '.protocols.shadowsocks.enabled')"
   vless_enabled="$(state_get '.protocols.vless_reality.enabled')"
@@ -2299,6 +2345,26 @@ validate_state() {
     ] | map(tostring) | join("\u001f")
   ' "$STATE_FILE")
 
+  while IFS=$'\x1f' read -r split_name split_rule; do
+    split_rule="${split_rule%$'\r'}"
+    case "$split_rule" in
+      geosite:*)
+        [[ "${split_rule#geosite:}" =~ ^[a-z0-9][a-z0-9._@!+-]*$ ]] ||
+          errors+="分流落地 ${split_name} 的 GeoSite 分类名无效：${split_rule#geosite:}"$'\n'
+        ;;
+      srs:*)
+        [[ "${split_rule#srs:}" =~ ^https://[^[:space:],]+\.srs([?#][^[:space:],]*)?$ ]] ||
+          errors+="分流落地 ${split_name} 的远程 SRS 地址无效，必须是 HTTPS .srs：${split_rule#srs:}"$'\n'
+        ;;
+    esac
+  done < <(jq -r '
+    .routing.split.outbounds[]?
+    | select(.enabled // false)
+    | .name as $name
+    | (.rule_sets // [])[]?
+    | [$name, .] | join("\u001f")
+  ' "$STATE_FILE")
+
   if [[ -n "$errors" ]]; then
     ui_show_text "配置校验失败" "$errors"
     return 1
@@ -2308,11 +2374,11 @@ validate_state() {
 }
 
 render_config() {
-  jq '
+  jq --arg rule_set_cache_file "$RULE_SET_CACHE_FILE" '
   def split_outbound_tag:
     "split-out:" + .;
-  def split_rule_tag($id; $rule):
-    "split:" + $id + ":" + $rule;
+  def split_rule_tag($id; $index):
+    "split:" + $id + ":" + ($index | tostring);
   def split_ss_method:
     if . == "plain" then
       "none"
@@ -2461,17 +2527,38 @@ render_config() {
           .routing.split.outbounds[]?
           | select((.enabled // false) and ((.rule_sets // []) | length > 0))
           | . as $outbound
-          | .rule_sets[] | {
-              type: "inline",
-              tag: split_rule_tag($outbound.id; .),
-              rules: [
-                if startswith("domain:") then
-                  { domain_suffix: [ltrimstr("domain:")] }
-                else
-                  { domain_keyword: [.] }
-                end
-              ]
-            }
+          | .rule_sets
+          | to_entries[]
+          | . as $entry
+          | if $entry.value | startswith("geosite:") then
+              {
+                type: "remote",
+                tag: split_rule_tag($outbound.id; $entry.key),
+                format: "binary",
+                url: ("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-" + ($entry.value | ltrimstr("geosite:")) + ".srs"),
+                update_interval: "1d"
+              }
+            elif $entry.value | startswith("srs:") then
+              {
+                type: "remote",
+                tag: split_rule_tag($outbound.id; $entry.key),
+                format: "binary",
+                url: ($entry.value | ltrimstr("srs:")),
+                update_interval: "1d"
+              }
+            else
+              {
+                type: "inline",
+                tag: split_rule_tag($outbound.id; $entry.key),
+                rules: [
+                  if $entry.value | startswith("domain:") then
+                    { domain_suffix: [$entry.value | ltrimstr("domain:")] }
+                  else
+                    { domain_keyword: [$entry.value] }
+                  end
+                ]
+              }
+            end
         )
       ],
       rules: [
@@ -2519,17 +2606,31 @@ render_config() {
             .routing.split.outbounds[]?
             | select((.enabled // false) and ((.rule_sets // []) | length > 0))
             | . as $outbound
-            | .rule_sets[]
+            | .rule_sets
+            | to_entries[]
             | {
                 outbound_id: $outbound.id,
-                rule: .,
-                kind_rank: (if startswith("domain:") then 0 else 1 end),
-                specificity: length
+                rule_index: .key,
+                rule: .value,
+                kind_rank: (
+                  if .value | startswith("domain:") then 0
+                  elif (.value | startswith("geosite:")) or (.value | startswith("srs:")) then 1
+                  else 2
+                  end
+                ),
+                specificity: (
+                  if (.value | startswith("domain:")) or
+                     (((.value | startswith("geosite:")) or (.value | startswith("srs:"))) | not) then
+                    (.value | length)
+                  else
+                    0
+                  end
+                )
               }
           ]
           | sort_by([.kind_rank, (-.specificity), .rule, .outbound_id])[]
           | {
-              rule_set: [split_rule_tag(.outbound_id; .rule)],
+              rule_set: [split_rule_tag(.outbound_id; .rule_index)],
               action: "route",
               outbound: (.outbound_id | split_outbound_tag)
             }
@@ -2574,6 +2675,12 @@ render_config() {
         )
       ],
       final: "direct"
+    },
+    experimental: {
+      cache_file: {
+        enabled: true,
+        path: $rule_set_cache_file
+      }
     }
   }' "$STATE_FILE"
 }
@@ -4875,6 +4982,10 @@ apply_config() {
   local enabled_count tmp_config check_output success_text links_file check_bin port_error
   local service_was_active=false
   ensure_sing_box_service
+  ensure_rule_set_cache_dir || {
+    ui_msg "无法准备远程规则集缓存目录，配置未应用。"
+    return 1
+  }
   enabled_count="$(enabled_protocol_count)"
 
   if ! prepare_managed_firewall; then
@@ -5384,7 +5495,7 @@ select_split_outbound_id() {
 
 configure_split_routing() {
   local outbound_id=${1:-}
-  local is_new=0 current_enabled current_type current_server current_port current_username current_password current_method current_rules current_domains
+  local is_new=0 current_enabled current_type current_server current_port current_username current_password current_method current_rules current_special_rules
   local type_choice outbound_type server port username password password_default method_choice method rules_input rules_json name yesno_result auth_choice previous_state_file
   local name_attempts=0 password_attempts=0
 
@@ -5414,7 +5525,7 @@ configure_split_routing() {
     current_password=""
     current_method="2022-blake3-aes-128-gcm"
     current_rules=""
-    current_domains="[]"
+    current_special_rules="[]"
   else
     name="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | .name')"
     current_enabled="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.enabled // false)')"
@@ -5428,14 +5539,14 @@ configure_split_routing() {
       .routing.split.outbounds[]
       | select(.id == $id)
       | (.rule_sets // [])
-      | map(select(startswith("domain:") | not))
+      | map(select(test("^(domain|geosite|srs):") | not))
       | join(", ")
     ')"
-    current_domains="$(jq -c --arg id "$outbound_id" '
+    current_special_rules="$(jq -c --arg id "$outbound_id" '
       [.routing.split.outbounds[]
         | select(.id == $id)
         | (.rule_sets // [])[]
-        | select(startswith("domain:"))
+        | select(test("^(domain|geosite|srs):"))
       ]
     ' "$STATE_FILE")"
   fi
@@ -5539,7 +5650,7 @@ configure_split_routing() {
     done
   fi
 
-  rules_input="$(ui_input "落地关键词规则" "请输入该落地绑定的关键词，可用逗号或空格分隔；已有网址规则会保留" "$current_rules")" || return 1
+  rules_input="$(ui_input "落地关键词规则" "请输入该落地绑定的关键词，可用逗号或空格分隔；已有网址、GeoSite 和远程 SRS 规则会保留" "$current_rules")" || return 1
   rules_json="$(build_split_rules_json "$rules_input")"
 
   previous_state_file="$(snapshot_sing_box_state_file)" || {
@@ -5548,8 +5659,8 @@ configure_split_routing() {
   }
   if ! state_jq --arg id "$outbound_id" --arg name "$name" --arg outbound_type "$outbound_type" \
     --arg server "$server" --argjson port "$port" --arg username "$username" --arg password "$password" \
-    --arg method "$method" --argjson rules "$rules_json" --argjson domains "$current_domains" --arg ts "$(utc_now)" '
-    (($rules + $domains) | unique) as $all_rules |
+    --arg method "$method" --argjson rules "$rules_json" --argjson special_rules "$current_special_rules" --arg ts "$(utc_now)" '
+    (($rules + $special_rules) | unique) as $all_rules |
     {
       id: $id,
       name: $name,
@@ -5581,9 +5692,9 @@ configure_split_routing() {
     return 1
   fi
 
-  if [[ "$(jq -nc --argjson rules "$rules_json" --argjson domains "$current_domains" '$rules + $domains | length')" -eq 0 ]]; then
+  if [[ "$(jq -nc --argjson rules "$rules_json" --argjson special_rules "$current_special_rules" '$rules + $special_rules | length')" -eq 0 ]]; then
     rm -f "$previous_state_file"
-    ui_msg "落地已保存但未启用，请为它添加至少一个关键词或网址分流规则。"
+    ui_msg "落地已保存但未启用，请为它添加至少一个关键词、网址、GeoSite 或远程 SRS 分流规则。"
   else
     apply_sing_box_state_transaction "$previous_state_file" "保存分流落地"
   fi
@@ -5617,7 +5728,7 @@ show_split_routing_rules() {
     if (.routing.split.outbounds // [] | length) == 0 then
       "当前没有分流落地。"
     else
-      "匹配优先级：域名后缀优先于关键词，同类规则越长越优先。\n\n"
+      "匹配优先级：自定义域名 > GeoSite / 远程 SRS > 关键词；域名和关键词同类规则越长越优先。\n\n"
       + (.routing.split.outbounds
         | map(
           "[\(.name)]\n"
@@ -5626,8 +5737,10 @@ show_split_routing_rules() {
           + "address = \(.server):\(.port)\n"
           + "username = \(if ((.username // "") | length) > 0 then .username else "-" end)\n"
           + "method = \(.method // "-")\n"
-          + "keyword_rules = \((.rule_sets // []) | map(select(startswith("domain:") | not)) | join(", "))\n"
-          + "domains = \((.rule_sets // []) | map(select(startswith("domain:")) | ltrimstr("domain:")) | join(", "))"
+          + "keyword_rules = \((.rule_sets // []) | map(select(test("^(domain|geosite|srs):") | not)) | join(", "))\n"
+          + "domains = \((.rule_sets // []) | map(select(startswith("domain:")) | ltrimstr("domain:")) | join(", "))\n"
+          + "geosite = \((.rule_sets // []) | map(select(startswith("geosite:")) | ltrimstr("geosite:")) | join(", "))\n"
+          + "remote_srs = \((.rule_sets // []) | map(select(startswith("srs:")) | ltrimstr("srs:")) | join(", "))"
         )
         | join("\n\n"))
     end
@@ -5649,6 +5762,8 @@ append_split_routing_rules() {
     rule_type="$(ui_menu "新增分流规则" "请选择规则类型" \
       "1" "关键词规则，例如 chatgpt" \
       "2" "自定义网址 / 域名，例如 nodeseek.com" \
+      "3" "GeoSite 分类，例如 openai、netflix" \
+      "4" "远程 SRS 规则集（HTTPS）" \
       "0" "返回")" || return 1
     case "$rule_type" in
       1)
@@ -5659,21 +5774,31 @@ append_split_routing_rules() {
         rule_type="domain"
         rules_input="$(prompt_nonempty "新增自定义网址" "请输入网址或域名，可不带 http:// 或 https://；例如 nodeseek.com" "")" || return 1
         ;;
+      3)
+        rule_type="geosite"
+        rules_input="$(prompt_nonempty "新增 GeoSite 分类" "请输入 SagerNet GeoSite 分类名，可用逗号或空格分隔；例如 openai, netflix" "")" || return 1
+        ;;
+      4)
+        rule_type="srs"
+        rules_input="$(prompt_nonempty "新增远程 SRS" "请输入可信来源的 HTTPS .srs 地址，可用逗号或空格分隔" "")" || return 1
+        ;;
       0) return 0 ;;
       *) ui_msg "无效选项，请重新选择。"; return 1 ;;
     esac
   fi
-  if [[ "$rule_type" == "domain" ]]; then
-    rules_json="$(build_split_domains_json "$rules_input")"
-  else
-    rules_json="$(build_split_rules_json "$rules_input")"
-  fi
+  case "$rule_type" in
+    domain) rules_json="$(build_split_domains_json "$rules_input")" ;;
+    geosite) rules_json="$(build_split_geosite_json "$rules_input")" ;;
+    srs) rules_json="$(build_split_srs_json "$rules_input")" ;;
+    *) rules_json="$(build_split_rules_json "$rules_input")" ;;
+  esac
   [[ "$(printf '%s' "$rules_json" | jq -r 'length')" -gt 0 ]] || {
-    if [[ "$rule_type" == "domain" ]]; then
-      ui_msg "网址格式无效，请输入类似 nodeseek.com 的域名。"
-    else
-      ui_msg "关键词规则格式无效。"
-    fi
+    case "$rule_type" in
+      domain) ui_msg "网址格式无效，请输入类似 nodeseek.com 的域名。" ;;
+      geosite) ui_msg "GeoSite 分类名格式无效，请输入类似 openai 或 netflix 的分类名。" ;;
+      srs) ui_msg "远程 SRS 地址无效，只接受 HTTPS 的 .srs 地址。" ;;
+      *) ui_msg "关键词规则格式无效。" ;;
+    esac
     return 1
   }
   previous_state_file="$(snapshot_sing_box_state_file)" || return 1
@@ -5710,6 +5835,10 @@ delete_split_routing_rule() {
     rule_values+=("$selected_rule")
     if [[ "$selected_rule" == domain:* ]]; then
       options+=("${#rule_values[@]}" "网址：${selected_rule#domain:}")
+    elif [[ "$selected_rule" == geosite:* ]]; then
+      options+=("${#rule_values[@]}" "GeoSite：${selected_rule#geosite:}")
+    elif [[ "$selected_rule" == srs:* ]]; then
+      options+=("${#rule_values[@]}" "远程 SRS：${selected_rule#srs:}")
     else
       options+=("${#rule_values[@]}" "关键词：$selected_rule")
     fi
@@ -5745,7 +5874,7 @@ split_routing_menu_text() {
 已启用落地数量：$(state_get '[.routing.split.outbounds[]? | select(.enabled == true)] | length')
 分流规则总数：$(state_get '[.routing.split.outbounds[]?.rule_sets[]?] | length')
 
-每个落地可绑定关键词或自定义域名。域名后缀优先于关键词，同类规则越长越优先。
+每个落地可绑定关键词、自定义域名、GeoSite 分类或远程 SRS。优先级：自定义域名 > GeoSite / SRS > 关键词。
 请选择要执行的操作（输入 0 返回上一级，输入 00 退出脚本）
 EOF
 }

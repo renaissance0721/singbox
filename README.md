@@ -127,14 +127,19 @@ sbox delete-split-route
 
 升级前已经保存的传统 AEAD、`none` 或 `plain` 配置会继续保留兼容，但菜单不再允许新建这些配置。
 
-脚本不预置任何规则集。新增落地或为已有落地追加规则时，可以选择关键词规则，例如：
+脚本不预置任何分流规则。新增落地或为已有落地追加规则时，可以选择以下四种类型：
+
+- 自定义网址 / 域名：精确匹配该域名及其子域名，优先推荐
+- GeoSite 分类：例如 `openai`、`netflix`、`youtube`
+- 远程 SRS：可信来源提供的 HTTPS `.srs` 地址
+- 关键词：按域名子串匹配，例如：
 
 ```text
 chatgpt
 claude
 ```
 
-每个名称会创建一个独立的内联规则集，并按域名关键词匹配。也可以一次输入多个名称：
+每个关键词会创建一个独立的内联规则集。也可以一次输入多个名称：
 
 ```bash
 sbox add-split-rule chatgpt claude
@@ -153,13 +158,23 @@ https://www.nodeseek.com/space
 
 网址可以不带 `http://` 或 `https://`。脚本会自动去除协议、`www.`、端口和路径，并让该域名及其子域名通过指定落地。
 
+GeoSite 入口使用熟悉的分类名，但不会生成已被新版 sing-box 移除的旧 `geosite` 配置字段。脚本会把分类名转换为 SagerNet 官方发布的二进制规则集，例如 `openai` 对应：
+
+```text
+https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-openai.srs
+```
+
+远程规则集每天检查更新，并使用 sing-box 缓存文件，服务重启时不必重复下载未变化的内容。自定义 SRS 只接受 HTTPS 地址；请仅使用可信来源，因为上游规则变化会直接影响流量去向。
+
+匹配优先级固定为“自定义域名 > GeoSite / 远程 SRS > 关键词”。域名和关键词规则内部按长度从长到短匹配，避免较宽泛规则抢先命中。GeoSite 与远程 SRS 的内部规则由其发布者维护，若两个远程集合存在重叠，应避免把它们绑定到不同落地。
+
 查看全部落地和分流规则：
 
 ```bash
 sbox split-rules
 ```
 
-删除关键词或网址分流规则：
+删除关键词、网址、GeoSite 或远程 SRS 分流规则：
 
 ```bash
 sbox delete-split-rule

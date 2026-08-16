@@ -136,23 +136,54 @@ state_jq '
       id: "domain-route", name: "domain-route", enabled: true,
       outbound_type: "socks", server: "127.0.0.2", port: 1080,
       username: "", password: "", method: "2022-blake3-aes-128-gcm",
-      rule_sets: ["domain:google.com", "domain:mail.google.com"]
+      rule_sets: [
+        "domain:google.com",
+        "domain:mail.google.com",
+        "geosite:openai",
+        "srs:https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-netflix.srs"
+      ]
     }
   ]
 '
 split_rendered="$test_root/split-rendered.json"
 render_config >"$split_rendered"
+if [[ -n "${SBOX_TEST_SPLIT_RENDERED_CONFIG:-}" ]]; then
+  cp "$split_rendered" "$SBOX_TEST_SPLIT_RENDERED_CONFIG"
+fi
 jq -e '
   ([.route.rules[] | select(.action == "sniff") | .timeout] == ["300ms"])
   and ([.route.rules[] | select(.action == "route" and ((.outbound // "") | startswith("split-out:"))) | .rule_set[0]] == [
-    "split:domain-route:domain:mail.google.com",
-    "split:domain-route:domain:google.com",
-    "split:keyword-route:chatgpt",
-    "split:keyword-route:google"
+    "split:domain-route:1",
+    "split:domain-route:0",
+    "split:domain-route:2",
+    "split:domain-route:3",
+    "split:keyword-route:1",
+    "split:keyword-route:0"
   ])
+  and ([.route.rule_set[] | select(.tag == "split:domain-route:2")] == [{
+    type: "remote",
+    tag: "split:domain-route:2",
+    format: "binary",
+    url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-openai.srs",
+    update_interval: "1d"
+  }])
+  and ([.route.rule_set[] | select(.tag == "split:domain-route:3") | .url] == ["https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-netflix.srs"])
   and ([.outbounds[] | select(.tag == "split-out:keyword-route") | has("username")] == [false])
   and ([.outbounds[] | select(.tag == "split-out:keyword-route") | has("password")] == [false])
-' "$split_rendered" >/dev/null || fail "分流优先级、sniff 超时或无认证 SOCKS5 渲染错误"
+' "$split_rendered" >/dev/null || fail "分流优先级、GeoSite/SRS、sniff 超时或无认证 SOCKS5 渲染错误"
+jq -e --arg cache_file "$RULE_SET_CACHE_FILE" '
+  .experimental.cache_file == {enabled: true, path: $cache_file}
+' "$split_rendered" >/dev/null || fail "远程规则集缓存没有启用或路径错误"
+
+geosite_rules="$(build_split_geosite_json 'OpenAI, geolocation-!cn, bad/name')"
+jq -e '
+  length == 2
+  and index("geosite:openai") != null
+  and index("geosite:geolocation-!cn") != null
+' <<<"$geosite_rules" >/dev/null || fail "GeoSite 分类解析或校验错误"
+srs_rules="$(build_split_srs_json 'https://rules.example.com/a.srs, http://rules.example.com/b.srs, https://rules.example.com/not-json.json')"
+jq -e 'length == 1 and .[0] == "srs:https://rules.example.com/a.srs"' <<<"$srs_rules" >/dev/null ||
+  fail "远程 SRS URL 解析或 HTTPS 限制错误"
 validate_state || fail "无认证 SOCKS5 分流未通过状态校验"
 (
   ui_show_text() { :; }
@@ -281,6 +312,8 @@ fi
 grep -Fq -- '--comment "$IPTABLES_RULE_COMMENT"' "$repo_dir/index.sh" || fail "iptables 托管规则缺少标记"
 grep -Fq 'User=${RUNTIME_USER}' "$repo_dir/index.sh" || fail "systemd sing-box 服务未设置低权限用户"
 grep -Fq 'NoNewPrivileges=true' "$repo_dir/index.sh" || fail "systemd 服务缺少 NoNewPrivileges"
+grep -Fq 'ReadWritePaths=${RULE_SET_CACHE_DIR}' "$repo_dir/index.sh" ||
+  fail "systemd 沙箱没有放行远程规则集缓存目录"
 grep -Fq 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' "$repo_dir/index.sh" ||
   fail "sing-box systemd service does not allow required AF_NETLINK route updates"
 grep -Fq 'repair_sing_box_netlink_hardening' "$repo_dir/index.sh" ||

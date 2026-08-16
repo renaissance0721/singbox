@@ -322,6 +322,9 @@ grep -Fq 'Restart=always' "$repo_dir/index.sh" || fail "Realm systemd service do
 grep -Fq "'cap_net_bind_service=+ep'" "$repo_dir/index.sh" || fail "OpenRC 低权限服务无法兼容低端口监听"
 grep -Fq 'ensure_setcap_command' "$repo_dir/index.sh" || fail "OpenRC 节点流程不会自动修复缺失的 setcap"
 grep -Eq 'apk add .*libcap-setcap' "$repo_dir/index.sh" || fail "APK 无法自动安装 setcap"
+grep -Eq 'apk add .*iptables-openrc' "$repo_dir/index.sh" || fail "APK 依赖未安装 OpenRC 防火墙持久化组件"
+grep -Fq 'ensure_managed_firewall_backend' "$repo_dir/index.sh" || fail "节点应用流程不会自动修复缺失的防火墙后端"
+grep -Fq 'ensure_socket_inspection_command' "$repo_dir/index.sh" || fail "节点应用流程不会自动修复缺失的 ss 端口检查工具"
 grep -Eq 'apt-get install .*libcap2-bin' "$repo_dir/index.sh" || fail "APT 无法自动安装 setcap"
 grep -Eq 'dnf install .*libcap' "$repo_dir/index.sh" || fail "DNF 无法自动安装 setcap"
 grep -Eq 'yum install .*libcap' "$repo_dir/index.sh" || fail "YUM 无法自动安装 setcap"
@@ -357,6 +360,34 @@ grep -Fq '/usr/sbin/runuser /sbin/runuser' "$repo_dir/index.sh" || fail "低权�
   setcap_install_output="$(ensure_setcap_command 2>/dev/null)"
   [[ -z "$setcap_install_output" ]] || fail "自动安装 setcap 时意外向调用方输出内容"
   grep -Fxq 'add --no-cache libcap-setcap' "$setcap_install_log" || fail "OpenRC 节点流程缺少 setcap 时未自动安装 libcap-setcap"
+)
+(
+  firewall_install_log="$test_root/firewall-install.log"
+  active_firewall_backend() {
+    if [[ -s "$firewall_install_log" ]]; then
+      printf 'iptables\n'
+    else
+      printf 'none\n'
+    fi
+  }
+  detect_pkg_manager() { PKG_MANAGER=apk; }
+  apk() { printf '%s\n' "$*" | tee -a "$firewall_install_log"; }
+
+  firewall_install_output="$(ensure_managed_firewall_backend 2>/dev/null)"
+  [[ -z "$firewall_install_output" ]] || fail "自动安装防火墙组件时意外向调用方输出内容"
+  grep -Fxq 'add --no-cache iptables iptables-openrc' "$firewall_install_log" || fail "Alpine 节点流程缺少防火墙时未自动安装 iptables-openrc"
+)
+(
+  socket_install_log="$test_root/socket-install.log"
+  have_cmd() {
+    [[ "$1" == "ss" && -s "$socket_install_log" ]]
+  }
+  detect_pkg_manager() { PKG_MANAGER=apk; }
+  apk() { printf '%s\n' "$*" | tee -a "$socket_install_log"; }
+
+  socket_install_output="$(ensure_socket_inspection_command 2>/dev/null)"
+  [[ -z "$socket_install_output" ]] || fail "自动安装 ss 时意外向调用方输出内容"
+  grep -Fxq 'add --no-cache iproute2-ss' "$socket_install_log" || fail "Alpine 节点流程缺少 ss 时未自动安装 iproute2-ss"
 )
 grep -Fq 'SCRIPT_REPO_ID="1210354428"' "$repo_dir/index.sh" || fail "自动更新未固定 GitHub 仓库数字 ID"
 grep -Fq 'SCRIPT_REPO_OWNER_ID="197479185"' "$repo_dir/index.sh" || fail "自动更新未固定 GitHub 所有者数字 ID"

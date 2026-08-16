@@ -688,7 +688,7 @@ install_dependencies() {
 
     case "$PKG_MANAGER" in
       apk)
-      apk add --no-cache bash curl jq openssl ca-certificates tar gzip openrc coreutils findutils iptables iproute2 su-exec libcap-setcap
+      apk add --no-cache bash curl jq openssl ca-certificates tar gzip openrc coreutils findutils iptables iptables-openrc iproute2 su-exec libcap-setcap
       ;;
     apt)
       export DEBIAN_FRONTEND=noninteractive
@@ -2958,6 +2958,59 @@ active_firewall_backend() {
   fi
 }
 
+ensure_managed_firewall_backend() {
+  [[ "$(active_firewall_backend)" != "none" ]] && return 0
+
+  detect_pkg_manager
+  case "$PKG_MANAGER" in
+    apk)
+      apk add --no-cache iptables iptables-openrc >&2 || die "自动安装 Alpine 防火墙组件失败。"
+      ;;
+    apt)
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y >&2 || die "更新 APT 软件包索引失败，无法安装防火墙组件。"
+      apt-get install -y iptables >&2 || die "自动安装 iptables 失败。"
+      ;;
+    dnf)
+      dnf install -y iptables >&2 || die "自动安装 iptables 失败。"
+      ;;
+    yum)
+      yum install -y iptables >&2 || die "自动安装 iptables 失败。"
+      ;;
+    *)
+      ;;
+  esac
+
+  [[ "$(active_firewall_backend)" != "none" ]] ||
+    die "无法安装或找到本地防火墙后端。Alpine 请安装 iptables 和 iptables-openrc。"
+}
+
+ensure_socket_inspection_command() {
+  have_cmd ss && return 0
+
+  detect_pkg_manager
+  case "$PKG_MANAGER" in
+    apk)
+      apk add --no-cache iproute2-ss >&2 || die "自动安装 ss 端口检查工具失败。"
+      ;;
+    apt)
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y >&2 || die "更新 APT 软件包索引失败，无法安装 ss。"
+      apt-get install -y iproute2 >&2 || die "自动安装 iproute2/ss 失败。"
+      ;;
+    dnf)
+      dnf install -y iproute >&2 || die "自动安装 iproute/ss 失败。"
+      ;;
+    yum)
+      yum install -y iproute >&2 || die "自动安装 iproute/ss 失败。"
+      ;;
+    *)
+      ;;
+  esac
+
+  have_cmd ss || die "无法安装或找到 ss，无法安全检查节点端口冲突。"
+}
+
 managed_firewall_rules_present() {
   [[ -s "$FIREWALL_STATE_FILE" ]] && return 0
   [[ -n "$(desired_managed_firewall_rules 2>/dev/null | head -n 1)" ]]
@@ -3013,8 +3066,8 @@ prepare_managed_firewall() {
   managed_firewall_rules_present || return 0
   backend="$(active_firewall_backend)"
   if [[ "$backend" == "none" ]]; then
-    warn "未检测到可用的 UFW、firewalld 或 iptables。请先执行 sbox repair-install 安装依赖。"
-    return 1
+    ensure_managed_firewall_backend
+    backend="$(active_firewall_backend)"
   fi
   ensure_firewall_restore_service || {
     warn "无法安装防火墙开机恢复服务。"
@@ -5097,7 +5150,7 @@ apply_config() {
   enabled_count="$(enabled_protocol_count)"
 
   if ! prepare_managed_firewall; then
-    ui_msg "防火墙环境不可用，配置未应用、现有服务未停止。请执行 sbox repair-install 后重试。"
+    ui_msg "防火墙环境准备失败，配置未应用、现有服务未停止。请根据上方具体错误处理后重试。"
     return 1
   fi
 
@@ -5112,6 +5165,7 @@ apply_config() {
     return 0
   fi
 
+  ensure_socket_inspection_command
   normalize_protocol_listen_addresses
   validate_state || return 1
 

@@ -597,6 +597,27 @@ test_wireguard_dpkg_repair_failure() (
 test_wireguard_dpkg_repair_failure ||
   fail "dpkg 状态恢复失败后仍继续调用 APT"
 
+wireguard_valid_address_pair "10.253.42.1" "10.253.42.2" ||
+  fail "WireGuard 拒绝有效的托管私网地址对"
+if wireguard_valid_address_pair "10.253.42.1" "10.253.43.2" ||
+  wireguard_valid_address_pair "10.253.0.1" "10.253.0.2" ||
+  wireguard_valid_address_pair "192.0.2.1" "192.0.2.2"; then
+  fail "WireGuard 接受了托管地址池以外或子网不匹配的地址对"
+fi
+(
+  ip() {
+    printf '2: eth0    inet 10.253.42.1/32 scope global eth0\n'
+    printf '3: sbwg0    inet 10.253.43.2/32 scope global sbwg0\n'
+  }
+  wireguard_address_pair_in_use "10.253.42.1" "10.253.42.2" ||
+    fail "WireGuard 未检测到其他接口上的私网地址冲突"
+  if wireguard_address_pair_in_use "10.253.43.1" "10.253.43.2" "sbwg0"; then
+    fail "WireGuard 地址冲突检测未忽略当前托管接口"
+  fi
+)
+grep -Fq '(.wireguard.profiles[] | select(.id == $id)).peer_address = $relay_address' "$repo_dir/index.sh" ||
+  fail "落地端未同步中转端重新协商的 WireGuard 地址"
+
 wg_pairing_json='{"kind":"sbox-wireguard-invite-v1","tunnel_id":"wg-test","name":"test"}'
 wg_pairing_code="$(wireguard_encode_pairing_json "$wg_pairing_json")"
 [[ "$wg_pairing_code" == SBOXWG1:* ]] || fail "WireGuard 配对信息缺少固定版本前缀"

@@ -3901,6 +3901,30 @@ wireguard_next_interface() {
   return 1
 }
 
+wireguard_valid_address_pair() {
+  local relay_address=$1 landing_address=$2 relay_subnet landing_subnet
+  [[ "$relay_address" =~ ^10\.253\.([1-9][0-9]{0,2})\.1$ ]] || return 1
+  relay_subnet="${BASH_REMATCH[1]}"
+  [[ "$landing_address" =~ ^10\.253\.([1-9][0-9]{0,2})\.2$ ]] || return 1
+  landing_subnet="${BASH_REMATCH[1]}"
+  [[ "$relay_subnet" == "$landing_subnet" ]] && (( 10#$relay_subnet >= 1 && 10#$relay_subnet <= 253 ))
+}
+
+wireguard_address_pair_in_use() {
+  local relay_address=$1 landing_address=$2 ignored_interface=${3:-}
+  local address_output line interface
+  address_output="$(ip -o address show 2>/dev/null)" || return 1
+  while IFS= read -r line; do
+    interface="$(awk '{print $2}' <<<"$line")"
+    interface="${interface%:}"
+    [[ -n "$ignored_interface" && "$interface" == "$ignored_interface" ]] && continue
+    if [[ "$line" == *" ${relay_address}/"* || "$line" == *" ${landing_address}/"* ]]; then
+      return 0
+    fi
+  done <<<"$address_output"
+  return 1
+}
+
 wireguard_generate_address_pair() {
   local subnet relay_address landing_address
   for _ in $(seq 1 100); do
@@ -3910,8 +3934,7 @@ wireguard_generate_address_pair() {
     if ! jq -e --arg relay "$relay_address" --arg landing "$landing_address" '
       .wireguard.profiles[]? | select(.local_address == $relay or .peer_address == $relay or .local_address == $landing or .peer_address == $landing)
     ' "$REALM_STATE_FILE" >/dev/null 2>&1 &&
-      ! ip -o address show 2>/dev/null | grep -Fq " ${relay_address}/" &&
-      ! ip -o address show 2>/dev/null | grep -Fq " ${landing_address}/"; then
+      ! wireguard_address_pair_in_use "$relay_address" "$landing_address"; then
       printf '%s\t%s\n' "$relay_address" "$landing_address"
       return 0
     fi
@@ -4367,7 +4390,7 @@ ${invitation}
 }
 
 join_wireguard_relay_profile() {
-  local code payload id name interface landing_public_key endpoint_host endpoint_port relay_address landing_address mtu public_key response
+  local code payload id name interface landing_public_key endpoint_host endpoint_port relay_address landing_address mtu public_key response addresses
   local error_count=0
   install_wireguard_tools || return 1
   ensure_wireguard_dirs
@@ -4395,11 +4418,11 @@ join_wireguard_relay_profile() {
     ui_msg "配对信息中的端口无效。"
     return 1
   fi
-  is_valid_ipv4_or_cidr "${relay_address}/32" && is_valid_ipv4_or_cidr "${landing_address}/32" && [[ "$relay_address" != "$landing_address" ]] || { ui_msg "配对信息中的私网地址无效。"; return 1; }
-  if ip -o address show 2>/dev/null | grep -Fq " ${relay_address}/" ||
-    ip -o address show 2>/dev/null | grep -Fq " ${landing_address}/"; then
-    ui_msg "配对信息中的 WireGuard 私网地址已被本机其他接口占用。"
-    return 1
+  wireguard_valid_address_pair "$relay_address" "$landing_address" || { ui_msg "配对信息中的私网地址无效。"; return 1; }
+  if wireguard_address_pair_in_use "$relay_address" "$landing_address"; then
+    addresses="$(wireguard_generate_address_pair)" || { ui_msg "配对地址冲突，且无法分配新的 WireGuard 私网地址。"; return 1; }
+    IFS=$'\t' read -r relay_address landing_address <<<"$addresses"
+    ui_msg "配对信息中的私网地址已被本机占用，已自动改用 ${relay_address}/32 和 ${landing_address}/32。"
   fi
   if [[ ! "$mtu" =~ ^[0-9]+$ ]] || (( mtu < 1280 || mtu > 1500 )); then
     ui_msg "配对信息中的 MTU 无效。"
@@ -4442,7 +4465,7 @@ ${response}
 }
 
 complete_wireguard_landing_pairing() {
-  local code payload id relay_public_key relay_address landing_address expected_relay expected_landing interface previous_state
+  local code payload id relay_public_key relay_address landing_address expected_relay expected_landing interface previous_state address_notice=""
   local error_count=0
   init_realm_state_file
   code="$(realm_prompt_nonempty_limited error_count "完成 WireGuard 配对" "请粘贴中转端响应信息" "")" || return 1
@@ -4460,10 +4483,20 @@ complete_wireguard_landing_pairing() {
   fi
   expected_relay="$(wireguard_profile_field "$id" peer_address)"
   expected_landing="$(wireguard_profile_field "$id" local_address)"
-  [[ "$relay_address" == "$expected_relay" && "$landing_address" == "$expected_landing" ]] || { ui_msg "响应中的隧道地址与落地端记录不一致。"; return 1; }
+  interface="$(wireguard_profile_field "$id" interface)"
+  wireguard_valid_address_pair "$relay_address" "$landing_address" || { ui_msg "响应中的隧道地址无效。"; return 1; }
+  if wireguard_address_pair_in_use "$relay_address" "$landing_address" "$interface"; then
+    ui_msg "中转端协商的 WireGuard 私网地址也被落地端其他接口占用，请删除该隧道后重新创建。"
+    return 1
+  fi
+  if [[ "$relay_address" != "$expected_relay" || "$landing_address" != "$expected_landing" ]]; then
+    address_notice="；私网地址已协商调整为 ${landing_address}/32 ↔ ${relay_address}/32"
+  fi
   previous_state="$(snapshot_realm_state_file)" || return 1
-  if ! realm_state_jq --arg id "$id" --arg peer_public_key "$relay_public_key" --arg ts "$(utc_now)" '
+  if ! realm_state_jq --arg id "$id" --arg peer_public_key "$relay_public_key" --arg relay_address "$relay_address" --arg landing_address "$landing_address" --arg ts "$(utc_now)" '
     (.wireguard.profiles[] | select(.id == $id)).peer_public_key = $peer_public_key |
+    (.wireguard.profiles[] | select(.id == $id)).peer_address = $relay_address |
+    (.wireguard.profiles[] | select(.id == $id)).local_address = $landing_address |
     (.wireguard.profiles[] | select(.id == $id)).paired = true |
     .meta.updated_at = $ts
   ' || ! wireguard_start_profile "$id"; then
@@ -4475,9 +4508,8 @@ complete_wireguard_landing_pairing() {
     return 1
   fi
   rm -f "$previous_state"
-  interface="$(wireguard_profile_field "$id" interface)"
   offer_wireguard_peer_for_shadowsocks "$relay_address" || true
-  ui_msg "WireGuard 配对已完成。接口 ${interface} 已启动；请在中转端执行隧道测试，确认最近握手和目标端口均正常。落地节点防火墙应允许来源 ${relay_address}/32。"
+  ui_msg "WireGuard 配对已完成。接口 ${interface} 已启动${address_notice}；请在中转端执行隧道测试，确认最近握手和目标端口均正常。落地节点防火墙应允许来源 ${relay_address}/32。"
 }
 
 show_wireguard_profiles() {

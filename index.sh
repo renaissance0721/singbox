@@ -552,12 +552,58 @@ detect_pkg_manager() {
 }
 
 repair_dpkg_state() {
+  local timeout="${SBOX_DPKG_LOCK_TIMEOUT:-180}"
+  local retry_interval="${SBOX_DPKG_LOCK_RETRY_INTERVAL:-3}"
+  local deadline output_file output lock_pid lock_process="" last_notice=-15
+
   have_cmd dpkg || return 0
   export DEBIAN_FRONTEND=noninteractive
-  if ! dpkg --configure -a; then
-    ui_msg "dpkg 中断状态自动修复失败。请确认没有其他 apt/dpkg 进程正在运行后重试。"
-    return 1
-  fi
+  [[ "$timeout" =~ ^[0-9]+$ ]] && (( timeout >= 1 && timeout <= 3600 )) || timeout=180
+  [[ "$retry_interval" =~ ^[0-9]+([.][0-9]+)?$ ]] || retry_interval=3
+  output_file="$(mktemp "$TMP_DIR/sbox-dpkg-repair.XXXXXX")" || return 1
+  deadline=$((SECONDS + timeout))
+
+  while true; do
+    if dpkg --configure -a >"$output_file" 2>&1; then
+      [[ ! -s "$output_file" ]] || command cat "$output_file" >&2
+      rm -f "$output_file"
+      return 0
+    fi
+
+    output="$(<"$output_file")"
+    if ! grep -Eqi 'frontend lock.*(another process|held by process|locked)|could not get lock|unable to acquire.*lock|lock.*is another process using it' <<<"$output"; then
+      [[ -z "$output" ]] || printf '%s\n' "$output" >&2
+      rm -f "$output_file"
+      ui_msg "dpkg 中断状态自动修复失败；错误并非软件包锁占用，请根据上方输出处理后重试。"
+      return 1
+    fi
+
+    lock_pid="$(sed -nE 's/.*(pid|process)[[:space:]]+([0-9]+).*/\2/p' <<<"$output" | head -n 1)"
+    lock_process=""
+    if [[ "$lock_pid" =~ ^[0-9]+$ && -r "/proc/${lock_pid}/comm" ]]; then
+      lock_process="$(tr -d '\r\n' <"/proc/${lock_pid}/comm")"
+    fi
+
+    if (( SECONDS >= deadline )); then
+      rm -f "$output_file"
+      if [[ -n "$lock_pid" ]]; then
+        ui_msg "等待 APT/dpkg 释放软件包锁已超时（PID ${lock_pid}${lock_process:+，进程 ${lock_process}}）。脚本没有删除锁文件；请等待该进程正常结束后重试。"
+      else
+        ui_msg "等待 APT/dpkg 释放软件包锁已超时。脚本没有删除锁文件；请等待正在运行的软件包任务正常结束后重试。"
+      fi
+      return 1
+    fi
+
+    if (( SECONDS - last_notice >= 15 )); then
+      if [[ -n "$lock_pid" ]]; then
+        log "APT/dpkg 正由 PID ${lock_pid}${lock_process:+（${lock_process}）} 使用；等待其正常结束，最多 ${timeout} 秒……"
+      else
+        log "检测到 APT/dpkg 软件包锁；等待当前软件包任务正常结束，最多 ${timeout} 秒……"
+      fi
+      last_notice=$SECONDS
+    fi
+    sleep "$retry_interval"
+  done
 }
 
 debian_os_value() {

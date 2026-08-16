@@ -4,6 +4,7 @@
 
 ## [Unreleased]
 
+- 检测到 APT/dpkg 软件包锁被其他进程持有时，安全等待其正常结束后自动重试 `dpkg --configure -a`；等待超时会报告持锁 PID，且绝不删除锁文件。
 - 将 VLESS Reality 的默认 SNI 与握手站点恢复为 `www.tesla.com`，避免未经跨线路验证的目标站点导致握手兼容性问题。
 - 修复未启用 `systemd-resolved` 的 Linux 上 sing-box 本地 DNS 解析失败：启用 Go 解析器，避免 VLESS Reality 握手站域名解析报错。
 - WireGuard 中转端检测到邀请中的私网地址冲突时，会自动协商新的空闲地址并由落地端同步应用。

@@ -577,6 +577,49 @@ test_wireguard_package_manager_killed_after_install() (
 test_wireguard_package_manager_killed_after_install ||
   fail "WireGuard 已安装后包管理器被终止仍被误判为安装失败"
 
+test_dpkg_lock_wait_and_retry() (
+  local counter_file="$test_root/dpkg-lock-retry-counter"
+  local output
+  printf '0\n' >"$counter_file"
+  have_cmd() { [[ "$1" == "dpkg" ]]; }
+  dpkg() {
+    local calls
+    calls="$(cat "$counter_file")"
+    calls=$((calls + 1))
+    printf '%s\n' "$calls" >"$counter_file"
+    if (( calls < 3 )); then
+      printf 'dpkg: error: dpkg frontend lock was locked by another process with pid 8866\n' >&2
+      return 2
+    fi
+    printf 'dpkg configured\n'
+  }
+  sleep() { :; }
+
+  output="$(SBOX_DPKG_LOCK_TIMEOUT=10 SBOX_DPKG_LOCK_RETRY_INTERVAL=0 repair_dpkg_state 2>&1)" || return 1
+  [[ "$(cat "$counter_file")" -eq 3 ]] &&
+    [[ "$output" == *"PID 8866"* ]] &&
+    [[ "$output" == *"dpkg configured"* ]]
+)
+test_dpkg_lock_wait_and_retry ||
+  fail "dpkg 软件包锁释放后未自动重试修复"
+
+test_dpkg_lock_wait_timeout() (
+  local output
+  have_cmd() { [[ "$1" == "dpkg" ]]; }
+  dpkg() {
+    printf 'E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 8866\n' >&2
+    return 100
+  }
+  sleep() { SECONDS=$((SECONDS + 1)); }
+
+  if output="$(SBOX_DPKG_LOCK_TIMEOUT=1 SBOX_DPKG_LOCK_RETRY_INTERVAL=0 repair_dpkg_state 2>&1)"; then
+    return 1
+  fi
+  [[ "$output" == *"已超时"* ]] && [[ "$output" == *"没有删除锁文件"* ]]
+)
+test_dpkg_lock_wait_timeout ||
+  fail "dpkg 软件包锁等待超时未安全退出"
+
 test_wireguard_dpkg_repair_failure() (
   local apt_calls=0
   detect_pkg_manager() { PKG_MANAGER="apt"; }

@@ -550,6 +550,32 @@ test_wireguard_dependency_install_case false true "wireguard-tools" ||
 test_wireguard_dependency_install_case true true "" ||
   fail "WireGuard 工具齐全时仍重复调用包管理器"
 
+test_wireguard_package_manager_killed_after_install() (
+  local wireguard_available=false
+  detect_pkg_manager() { PKG_MANAGER="apt"; }
+  have_cmd() {
+    case "$1" in
+      wg|wg-quick) [[ "$wireguard_available" == "true" ]] ;;
+      ip|dpkg) return 0 ;;
+      modprobe) return 1 ;;
+      *) return 1 ;;
+    esac
+  }
+  dpkg() { return 0; }
+  apt-get() {
+    if [[ "$1" == "install" ]]; then
+      wireguard_available=true
+      return 137
+    fi
+    return 0
+  }
+  ip() { return 0; }
+
+  install_wireguard_tools >/dev/null
+)
+test_wireguard_package_manager_killed_after_install ||
+  fail "WireGuard 已安装后包管理器被终止仍被误判为安装失败"
+
 test_wireguard_dpkg_repair_failure() (
   local apt_calls=0
   detect_pkg_manager() { PKG_MANAGER="apt"; }

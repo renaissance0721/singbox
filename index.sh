@@ -3920,7 +3920,7 @@ wireguard_generate_address_pair() {
 }
 
 install_wireguard_tools() {
-  local test_interface cmd
+  local test_interface cmd install_failed=false
   local -a packages=() missing_commands=()
 
   if ! have_cmd wg || ! have_cmd wg-quick; then
@@ -3942,28 +3942,32 @@ install_wireguard_tools() {
   if (( ${#packages[@]} > 0 )); then
     case "$PKG_MANAGER" in
       apk)
-        apk add --no-cache "${packages[@]}"
+        apk add --no-cache "${packages[@]}" || install_failed=true
         ;;
       apt)
         export DEBIAN_FRONTEND=noninteractive
-        repair_dpkg_state || return 1
-        apt-get update -y || return 1
-        apt-get install -y "${packages[@]}"
+        if ! repair_dpkg_state; then
+          install_failed=true
+        elif ! apt-get update -y; then
+          install_failed=true
+        elif ! apt-get install -y "${packages[@]}"; then
+          install_failed=true
+        fi
         ;;
       dnf)
-        dnf install -y "${packages[@]}"
+        dnf install -y "${packages[@]}" || install_failed=true
         ;;
       yum)
         if [[ " ${packages[*]} " == *" wireguard-tools "* ]]; then
           yum install -y epel-release >/dev/null 2>&1 || true
         fi
-        yum install -y "${packages[@]}"
+        yum install -y "${packages[@]}" || install_failed=true
         ;;
       *)
         ui_msg "当前系统不支持自动安装 WireGuard，请手动安装 wireguard-tools 和 iproute2。"
         return 1
         ;;
-    esac || return 1
+    esac
     hash -r 2>/dev/null || true
   fi
 
@@ -3971,8 +3975,15 @@ install_wireguard_tools() {
     have_cmd "$cmd" || missing_commands+=("$cmd")
   done
   if (( ${#missing_commands[@]} > 0 )); then
-    ui_msg "WireGuard 工具安装不完整，仍缺少：${missing_commands[*]}。"
+    if [[ "$install_failed" == "true" ]]; then
+      ui_msg "WireGuard 软件包安装失败，仍缺少：${missing_commands[*]}。"
+    else
+      ui_msg "WireGuard 工具安装不完整，仍缺少：${missing_commands[*]}。"
+    fi
     return 1
+  fi
+  if [[ "$install_failed" == "true" ]]; then
+    ui_msg "软件包管理器异常退出，但 WireGuard 所需命令已安装，将继续配置。"
   fi
   have_cmd modprobe && modprobe wireguard >/dev/null 2>&1 || true
   test_interface="sbwgt$((RANDOM % 10000))"

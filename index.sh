@@ -589,14 +589,14 @@ install_dependencies() {
       install -d -m 0755 /etc/apt/keyrings || die "无法修复 APT 密钥目录权限。"
       normalize_debian_apt_sources || warn "Debian apt 源自动修复失败，将继续尝试 apt-get update。"
       apt-get update -y
-      apt-get install -y curl jq openssl ca-certificates tar gzip iproute2 iptables gnupg
+      apt-get install -y curl jq openssl ca-certificates tar gzip iproute2 iptables gnupg util-linux
       ;;
     dnf)
-      dnf install -y curl jq openssl ca-certificates tar gzip iproute iptables gnupg2
+      dnf install -y curl jq openssl ca-certificates tar gzip iproute iptables gnupg2 util-linux
       ;;
     yum)
       yum install -y epel-release || true
-      yum install -y curl jq openssl ca-certificates tar gzip iproute iptables gnupg2
+      yum install -y curl jq openssl ca-certificates tar gzip iproute iptables gnupg2 util-linux
       ;;
     *)
       die "暂不支持自动安装依赖，请手动安装 bash、curl、jq、openssl、ca-certificates、tar、gzip 后再运行。"

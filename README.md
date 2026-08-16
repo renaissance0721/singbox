@@ -309,13 +309,13 @@ sbox repair-install
 ```bash
 # Debian / Ubuntu
 sudo apt update
-sudo apt install curl jq openssl ca-certificates git tar gzip iproute2 iptables
+sudo apt install curl jq openssl ca-certificates git tar gzip iproute2 iptables util-linux
 
 # RHEL / CentOS
-sudo yum install curl jq openssl ca-certificates git tar gzip iproute iptables
+sudo yum install curl jq openssl ca-certificates git tar gzip iproute iptables util-linux
 
 # Alpine Linux
-apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc coreutils findutils iproute2 iptables iptables-openrc
+apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc coreutils findutils iproute2 iptables iptables-openrc su-exec libcap-setcap
 ```
 
 ## 安全提醒

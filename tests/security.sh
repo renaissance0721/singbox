@@ -320,6 +320,10 @@ grep -Fq 'repair_sing_box_netlink_hardening' "$repo_dir/index.sh" ||
   fail "Existing sing-box installations do not auto-repair missing AF_NETLINK access"
 grep -Fq 'Restart=always' "$repo_dir/index.sh" || fail "Realm systemd service does not restart after every unexpected exit"
 grep -Fq "setcap 'cap_net_bind_service=+ep'" "$repo_dir/index.sh" || fail "OpenRC 低权限服务无法兼容低端口监听"
+grep -Eq 'apt-get install .*util-linux' "$repo_dir/index.sh" || fail "APT 依赖未安装提供 runuser 的 util-linux"
+grep -Eq 'dnf install .*util-linux' "$repo_dir/index.sh" || fail "DNF 依赖未安装提供 runuser 的 util-linux"
+grep -Eq 'yum install .*util-linux' "$repo_dir/index.sh" || fail "YUM 依赖未安装提供 runuser 的 util-linux"
+grep -Eq 'apk add .*su-exec' "$repo_dir/index.sh" || fail "APK 依赖未安装低权限执行工具 su-exec"
 grep -Fq 'SCRIPT_REPO_ID="1210354428"' "$repo_dir/index.sh" || fail "自动更新未固定 GitHub 仓库数字 ID"
 grep -Fq 'SCRIPT_REPO_OWNER_ID="197479185"' "$repo_dir/index.sh" || fail "自动更新未固定 GitHub 所有者数字 ID"
 [[ "$(grep -Fc 'install -d -m 0755 /etc/apt/keyrings' "$repo_dir/index.sh")" -eq 2 ]] ||

@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+- 修复 WireGuard 工具安装流程：检测到缺少 `ip` 时，会按发行版自动补装 `iproute2` 或 `iproute`，并避免重复安装已有工具。
+
 ### 新增
 
 - Realm 规则支持按规则选择公网直连或点对点 WireGuard 隧道

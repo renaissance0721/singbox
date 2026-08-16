@@ -502,6 +502,48 @@ if grep -Fq 'link="ss://$(uri_encode "$ss_method"):$(uri_encode "$ss_share_passw
   fail "SS2022 分享链接仍直接在 ss:// 后输出加密方式"
 fi
 
+test_wireguard_dependency_install_case() (
+  local wireguard_available=$1 ip_available=$2 expected_install=$3
+  local -a apt_calls=()
+
+  detect_pkg_manager() { PKG_MANAGER="apt"; }
+  have_cmd() {
+    case "$1" in
+      wg|wg-quick) [[ "$wireguard_available" == "true" ]] ;;
+      ip) [[ "$ip_available" == "true" ]] ;;
+      modprobe) return 1 ;;
+      *) command -v "$1" >/dev/null 2>&1 ;;
+    esac
+  }
+  apt-get() {
+    apt_calls+=("$*")
+    if [[ "$1" == "install" ]]; then
+      [[ " $* " == *" wireguard-tools "* ]] && wireguard_available=true
+      [[ " $* " == *" iproute2 "* ]] && ip_available=true
+    fi
+    return 0
+  }
+  ip() { return 0; }
+
+  install_wireguard_tools || return 1
+  if [[ -z "$expected_install" ]]; then
+    (( ${#apt_calls[@]} == 0 ))
+  else
+    (( ${#apt_calls[@]} == 2 )) &&
+      [[ "${apt_calls[0]}" == "update -y" ]] &&
+      [[ "${apt_calls[1]}" == "install -y $expected_install" ]]
+  fi
+)
+
+test_wireguard_dependency_install_case false false "wireguard-tools iproute2" ||
+  fail "WireGuard 未能自动补装全部缺失命令"
+test_wireguard_dependency_install_case true false "iproute2" ||
+  fail "WireGuard 未能单独补装缺失的 ip 命令"
+test_wireguard_dependency_install_case false true "wireguard-tools" ||
+  fail "WireGuard 未能单独补装缺失的 wg/wg-quick 命令"
+test_wireguard_dependency_install_case true true "" ||
+  fail "WireGuard 工具齐全时仍重复调用包管理器"
+
 wg_pairing_json='{"kind":"sbox-wireguard-invite-v1","tunnel_id":"wg-test","name":"test"}'
 wg_pairing_code="$(wireguard_encode_pairing_json "$wg_pairing_json")"
 [[ "$wg_pairing_code" == SBOXWG1:* ]] || fail "WireGuard 配对信息缺少固定版本前缀"

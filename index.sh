@@ -3905,32 +3905,57 @@ wireguard_generate_address_pair() {
 }
 
 install_wireguard_tools() {
-  local test_interface
-  detect_pkg_manager
-  case "$PKG_MANAGER" in
-    apk)
-      apk add --no-cache wireguard-tools
-      ;;
-    apt)
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update -y
-      apt-get install -y wireguard-tools
-      ;;
-    dnf)
-      dnf install -y wireguard-tools
-      ;;
-    yum)
-      yum install -y epel-release >/dev/null 2>&1 || true
-      yum install -y wireguard-tools
-      ;;
-    *)
-      ui_msg "当前系统不支持自动安装 WireGuard，请手动安装 wireguard-tools。"
-      return 1
-      ;;
-  esac
+  local test_interface cmd
+  local -a packages=() missing_commands=()
 
-  if ! have_cmd wg || ! have_cmd wg-quick || ! have_cmd ip; then
-    ui_msg "WireGuard 工具安装不完整，缺少 wg、wg-quick 或 ip。"
+  if ! have_cmd wg || ! have_cmd wg-quick; then
+    packages+=(wireguard-tools)
+  fi
+
+  detect_pkg_manager
+  if ! have_cmd ip; then
+    case "$PKG_MANAGER" in
+      apk|apt) packages+=(iproute2) ;;
+      dnf|yum) packages+=(iproute) ;;
+      *)
+        ui_msg "当前系统不支持自动安装 WireGuard，请手动安装 wireguard-tools 和 iproute2。"
+        return 1
+        ;;
+    esac
+  fi
+
+  if (( ${#packages[@]} > 0 )); then
+    case "$PKG_MANAGER" in
+      apk)
+        apk add --no-cache "${packages[@]}"
+        ;;
+      apt)
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -y || return 1
+        apt-get install -y "${packages[@]}"
+        ;;
+      dnf)
+        dnf install -y "${packages[@]}"
+        ;;
+      yum)
+        if [[ " ${packages[*]} " == *" wireguard-tools "* ]]; then
+          yum install -y epel-release >/dev/null 2>&1 || true
+        fi
+        yum install -y "${packages[@]}"
+        ;;
+      *)
+        ui_msg "当前系统不支持自动安装 WireGuard，请手动安装 wireguard-tools 和 iproute2。"
+        return 1
+        ;;
+    esac || return 1
+    hash -r 2>/dev/null || true
+  fi
+
+  for cmd in wg wg-quick ip; do
+    have_cmd "$cmd" || missing_commands+=("$cmd")
+  done
+  if (( ${#missing_commands[@]} > 0 )); then
+    ui_msg "WireGuard 工具安装不完整，仍缺少：${missing_commands[*]}。"
     return 1
   fi
   have_cmd modprobe && modprobe wireguard >/dev/null 2>&1 || true

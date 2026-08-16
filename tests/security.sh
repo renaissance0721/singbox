@@ -504,6 +504,7 @@ fi
 
 test_wireguard_dependency_install_case() (
   local wireguard_available=$1 ip_available=$2 expected_install=$3
+  local dpkg_calls=0
   local -a apt_calls=()
 
   detect_pkg_manager() { PKG_MANAGER="apt"; }
@@ -511,6 +512,7 @@ test_wireguard_dependency_install_case() (
     case "$1" in
       wg|wg-quick) [[ "$wireguard_available" == "true" ]] ;;
       ip) [[ "$ip_available" == "true" ]] ;;
+      dpkg) return 0 ;;
       modprobe) return 1 ;;
       *) command -v "$1" >/dev/null 2>&1 ;;
     esac
@@ -523,13 +525,17 @@ test_wireguard_dependency_install_case() (
     fi
     return 0
   }
+  dpkg() {
+    [[ "$*" == "--configure -a" ]] || return 1
+    dpkg_calls=$((dpkg_calls + 1))
+  }
   ip() { return 0; }
 
   install_wireguard_tools || return 1
   if [[ -z "$expected_install" ]]; then
-    (( ${#apt_calls[@]} == 0 ))
+    (( dpkg_calls == 0 && ${#apt_calls[@]} == 0 ))
   else
-    (( ${#apt_calls[@]} == 2 )) &&
+    (( dpkg_calls == 1 && ${#apt_calls[@]} == 2 )) &&
       [[ "${apt_calls[0]}" == "update -y" ]] &&
       [[ "${apt_calls[1]}" == "install -y $expected_install" ]]
   fi
@@ -543,6 +549,27 @@ test_wireguard_dependency_install_case false true "wireguard-tools" ||
   fail "WireGuard 未能单独补装缺失的 wg/wg-quick 命令"
 test_wireguard_dependency_install_case true true "" ||
   fail "WireGuard 工具齐全时仍重复调用包管理器"
+
+test_wireguard_dpkg_repair_failure() (
+  local apt_calls=0
+  detect_pkg_manager() { PKG_MANAGER="apt"; }
+  have_cmd() {
+    case "$1" in
+      wg|wg-quick) return 1 ;;
+      ip|dpkg) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+  dpkg() { return 1; }
+  apt-get() { apt_calls=$((apt_calls + 1)); }
+
+  if install_wireguard_tools >/dev/null 2>&1; then
+    return 1
+  fi
+  (( apt_calls == 0 ))
+)
+test_wireguard_dpkg_repair_failure ||
+  fail "dpkg 状态恢复失败后仍继续调用 APT"
 
 wg_pairing_json='{"kind":"sbox-wireguard-invite-v1","tunnel_id":"wg-test","name":"test"}'
 wg_pairing_code="$(wireguard_encode_pairing_json "$wg_pairing_json")"

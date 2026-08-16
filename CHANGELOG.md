@@ -4,7 +4,7 @@
 
 ## [Unreleased]
 
-- 修复 WireGuard 工具安装流程：检测到缺少 `ip` 时，会按发行版自动补装 `iproute2` 或 `iproute`，并避免重复安装已有工具。
+- 修复 WireGuard 工具安装流程：检测到缺少 `ip` 时，会按发行版自动补装 `iproute2` 或 `iproute`，并避免重复安装已有工具；APT 安装前会自动执行 `dpkg --configure -a` 恢复中断的软件包状态。
 
 ### 新增
 

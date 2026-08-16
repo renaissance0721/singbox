@@ -312,6 +312,7 @@ ensure_runtime_launcher() {
       ;;
     apt)
       export DEBIAN_FRONTEND=noninteractive
+      repair_dpkg_state || die "无法恢复 dpkg 软件包状态，无法安装 runuser。"
       apt-get update -y >&2 || die "更新 APT 软件包索引失败，无法安装 runuser。"
       apt-get install -y util-linux >&2 || die "自动安装 util-linux/runuser 失败。"
       ;;
@@ -376,6 +377,7 @@ ensure_setcap_command() {
       ;;
     apt)
       export DEBIAN_FRONTEND=noninteractive
+      repair_dpkg_state || die "无法恢复 dpkg 软件包状态，无法安装 setcap。"
       apt-get update -y >&2 || die "更新 APT 软件包索引失败，无法安装 setcap。"
       apt-get install -y libcap2-bin >&2 || die "自动安装 libcap2-bin/setcap 失败。"
       ;;
@@ -549,6 +551,15 @@ detect_pkg_manager() {
   fi
 }
 
+repair_dpkg_state() {
+  have_cmd dpkg || return 0
+  export DEBIAN_FRONTEND=noninteractive
+  if ! dpkg --configure -a; then
+    ui_msg "dpkg 中断状态自动修复失败。请确认没有其他 apt/dpkg 进程正在运行后重试。"
+    return 1
+  fi
+}
+
 debian_os_value() {
   local key=$1
 
@@ -692,6 +703,7 @@ install_dependencies() {
       ;;
     apt)
       export DEBIAN_FRONTEND=noninteractive
+      repair_dpkg_state || die "无法恢复 dpkg 软件包状态。"
       # Repair keyring directories left unreadable by this script's strict
       # umask before the first apt update (including upgrades/retries).
       install -d -m 0755 /etc/apt/keyrings || die "无法修复 APT 密钥目录权限。"
@@ -746,6 +758,7 @@ Signed-By: /etc/apt/keyrings/sagernet.asc
 EOF
 
   export DEBIAN_FRONTEND=noninteractive
+  repair_dpkg_state || return 1
   apt-get update -y || return 1
   apt-get install -y sing-box || return 1
 }
@@ -2968,6 +2981,7 @@ ensure_managed_firewall_backend() {
       ;;
     apt)
       export DEBIAN_FRONTEND=noninteractive
+      repair_dpkg_state || die "无法恢复 dpkg 软件包状态，无法安装防火墙组件。"
       apt-get update -y >&2 || die "更新 APT 软件包索引失败，无法安装防火墙组件。"
       apt-get install -y iptables >&2 || die "自动安装 iptables 失败。"
       ;;
@@ -2995,6 +3009,7 @@ ensure_socket_inspection_command() {
       ;;
     apt)
       export DEBIAN_FRONTEND=noninteractive
+      repair_dpkg_state || die "无法恢复 dpkg 软件包状态，无法安装 ss。"
       apt-get update -y >&2 || die "更新 APT 软件包索引失败，无法安装 ss。"
       apt-get install -y iproute2 >&2 || die "自动安装 iproute2/ss 失败。"
       ;;
@@ -3931,6 +3946,7 @@ install_wireguard_tools() {
         ;;
       apt)
         export DEBIAN_FRONTEND=noninteractive
+        repair_dpkg_state || return 1
         apt-get update -y || return 1
         apt-get install -y "${packages[@]}"
         ;;

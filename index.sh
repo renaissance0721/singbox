@@ -1387,8 +1387,8 @@ init_state_file() {
       "enabled": false,
       "listen": "0.0.0.0",
       "port": $vless_default_port,
-      "server_name": "www.tesla.com",
-      "handshake_server": "www.tesla.com",
+      "server_name": "static.genshinniubi.top",
+      "handshake_server": "static.genshinniubi.top",
       "handshake_port": 443,
       "private_key": "",
       "public_key": "",
@@ -4996,7 +4996,7 @@ configure_vless_reality() {
 
   ss_port="$(state_get '.protocols.shadowsocks.port')"
   port="$(prompt_number "VLESS 端口" "请输入 VLESS + Reality 监听端口" "$(generate_random_service_port_excluding "$ss_port")" 1 65535)" || return 1
-  sni="$(prompt_nonempty "Reality SNI" "请输入第三方 Reality 伪装域名（例如 www.cloudflare.com，不能填写本机 IP 或节点域名）" "www.tesla.com")" || return 1
+  sni="$(prompt_nonempty "Reality SNI" "请输入第三方 Reality 伪装域名（例如 www.cloudflare.com，不能填写本机 IP 或节点域名）" "static.genshinniubi.top")" || return 1
   handshake_port="$(prompt_number "Reality 握手端口" "请输入 Reality 伪装站点端口" "443" 1 65535)" || return 1
 
   keypair="$(generate_reality_keypair)"

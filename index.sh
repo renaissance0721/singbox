@@ -19,6 +19,11 @@
 set -Eeuo pipefail
 umask 077
 
+# Root shells started by minimal images or control panels may omit sbin paths,
+# even though runuser/su-exec and account-management tools are installed there.
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+export PATH
+
 ORIGINAL_ARGS=("$@")
 SELF_PATH="${BASH_SOURCE[0]}"
 SCRIPT_VERSION="0.6.0"
@@ -275,15 +280,72 @@ ensure_runtime_account() {
   ensure_realm_dirs
 }
 
+runtime_launcher_path() {
+  local launcher candidate
+
+  for launcher in runuser su-exec; do
+    candidate="$(command -v "$launcher" 2>/dev/null || true)"
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  for candidate in /usr/sbin/runuser /sbin/runuser /usr/bin/runuser /usr/local/sbin/runuser \
+    /sbin/su-exec /usr/sbin/su-exec /usr/bin/su-exec /usr/local/sbin/su-exec; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+ensure_runtime_launcher() {
+  runtime_launcher_path >/dev/null 2>&1 && return 0
+
+  detect_pkg_manager
+  case "$PKG_MANAGER" in
+    apk)
+      apk add --no-cache su-exec >&2 || die "自动安装 su-exec 失败。"
+      ;;
+    apt)
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y >&2 || die "更新 APT 软件包索引失败，无法安装 runuser。"
+      apt-get install -y util-linux >&2 || die "自动安装 util-linux/runuser 失败。"
+      ;;
+    dnf)
+      dnf install -y util-linux >&2 || die "自动安装 util-linux/runuser 失败。"
+      ;;
+    yum)
+      yum install -y util-linux >&2 || die "自动安装 util-linux/runuser 失败。"
+      ;;
+    *)
+      ;;
+  esac
+
+  runtime_launcher_path >/dev/null 2>&1 ||
+    die "无法安装或找到 runuser/su-exec，无法以低权限运行 sing-box/Realm。请确认 /usr/sbin、/sbin 在 PATH 中，并手动安装 util-linux（Alpine 安装 su-exec）。"
+}
+
 run_as_runtime() {
+  local launcher
   ensure_runtime_account
-  if have_cmd runuser; then
-    runuser -u "$RUNTIME_USER" -- "$@"
-  elif have_cmd su-exec; then
-    su-exec "${RUNTIME_USER}:${RUNTIME_GROUP}" "$@"
-  else
-    die "缺少 runuser 或 su-exec，无法以低权限运行 sing-box/Realm。"
-  fi
+  ensure_runtime_launcher
+  launcher="$(runtime_launcher_path)"
+
+  case "${launcher##*/}" in
+    runuser)
+      "$launcher" -u "$RUNTIME_USER" -- "$@"
+      ;;
+    su-exec)
+      "$launcher" "${RUNTIME_USER}:${RUNTIME_GROUP}" "$@"
+      ;;
+    *)
+      die "无法识别低权限执行工具：$launcher"
+      ;;
+  esac
 }
 
 ensure_openrc_low_port_capability() {

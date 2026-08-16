@@ -324,6 +324,22 @@ grep -Eq 'apt-get install .*util-linux' "$repo_dir/index.sh" || fail "APT 依赖
 grep -Eq 'dnf install .*util-linux' "$repo_dir/index.sh" || fail "DNF 依赖未安装提供 runuser 的 util-linux"
 grep -Eq 'yum install .*util-linux' "$repo_dir/index.sh" || fail "YUM 依赖未安装提供 runuser 的 util-linux"
 grep -Eq 'apk add .*su-exec' "$repo_dir/index.sh" || fail "APK 依赖未安装低权限执行工具 su-exec"
+grep -Fq 'ensure_runtime_launcher' "$repo_dir/index.sh" || fail "节点配置检查不会自动修复缺失的低权限执行工具"
+grep -Fq '/usr/sbin/runuser /sbin/runuser' "$repo_dir/index.sh" || fail "低权限执行工具检查仍完全依赖 PATH"
+(
+  runtime_launcher_log="$test_root/runtime-launcher.log"
+  runtime_launcher_path() {
+    [[ -s "$runtime_launcher_log" ]] || return 1
+    printf '/usr/sbin/runuser\n'
+  }
+  detect_pkg_manager() { PKG_MANAGER=apt; }
+  apt-get() { printf '%s\n' "$*" | tee -a "$runtime_launcher_log"; }
+
+  runtime_launcher_output="$(ensure_runtime_launcher 2>/dev/null)"
+  [[ -z "$runtime_launcher_output" ]] || fail "自动安装 runuser 的输出污染了 SS2022 密码生成结果"
+  grep -Fxq 'update -y' "$runtime_launcher_log" || fail "节点流程缺少 runuser 时未更新 APT 索引"
+  grep -Fxq 'install -y util-linux' "$runtime_launcher_log" || fail "节点流程缺少 runuser 时未自动安装 util-linux"
+)
 grep -Fq 'SCRIPT_REPO_ID="1210354428"' "$repo_dir/index.sh" || fail "自动更新未固定 GitHub 仓库数字 ID"
 grep -Fq 'SCRIPT_REPO_OWNER_ID="197479185"' "$repo_dir/index.sh" || fail "自动更新未固定 GitHub 所有者数字 ID"
 [[ "$(grep -Fc 'install -d -m 0755 /etc/apt/keyrings' "$repo_dir/index.sh")" -eq 2 ]] ||

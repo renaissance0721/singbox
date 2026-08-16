@@ -18,7 +18,7 @@
 
 ### 修复
 
-- Debian/Ubuntu 与 RHEL 系列显式安装提供 `runuser` 的 `util-linux`，修复精简系统缺少低权限执行工具而无法启动 sing-box/Realm 的问题
+- Debian/Ubuntu 与 RHEL 系列显式安装提供 `runuser` 的 `util-linux`；节点配置检查会自动补装缺失的低权限执行工具，并能识别不在原始 `PATH` 中的 `/usr/sbin/runuser` 或 `/sbin/su-exec`
 - 修复严格 `umask` 将 `/etc/apt/keyrings` 创建为仅 root 可访问，导致 Debian/Ubuntu 安装 sing-box 时误报 `NO_PUBKEY` 的问题
 - 安全更新增加 curl IPv4 与 wget 备用下载路径；不可变 Raw 入口不可用时，允许使用已通过仓库、所有者、提交身份及 Git Blob 哈希校验的 GitHub API 内容继续更新
 - 更新失败时显示明确的网络、身份、哈希、语法或写入阶段，不再只返回无法定位原因的合并提示

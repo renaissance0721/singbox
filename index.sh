@@ -348,12 +348,58 @@ run_as_runtime() {
   esac
 }
 
+setcap_command_path() {
+  local candidate
+  candidate="$(command -v setcap 2>/dev/null || true)"
+  if [[ -n "$candidate" && -x "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  for candidate in /usr/sbin/setcap /sbin/setcap /usr/bin/setcap /usr/local/sbin/setcap; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+ensure_setcap_command() {
+  setcap_command_path >/dev/null 2>&1 && return 0
+
+  detect_pkg_manager
+  case "$PKG_MANAGER" in
+    apk)
+      apk add --no-cache libcap-setcap >&2 || die "自动安装 libcap-setcap 失败。"
+      ;;
+    apt)
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y >&2 || die "更新 APT 软件包索引失败，无法安装 setcap。"
+      apt-get install -y libcap2-bin >&2 || die "自动安装 libcap2-bin/setcap 失败。"
+      ;;
+    dnf)
+      dnf install -y libcap >&2 || die "自动安装 libcap/setcap 失败。"
+      ;;
+    yum)
+      yum install -y libcap >&2 || die "自动安装 libcap/setcap 失败。"
+      ;;
+    *)
+      ;;
+  esac
+
+  setcap_command_path >/dev/null 2>&1 ||
+    die "无法安装或找到 setcap。Alpine 请安装 libcap-setcap，Debian/Ubuntu 请安装 libcap2-bin，RHEL 系列请安装 libcap。"
+}
+
 ensure_openrc_low_port_capability() {
-  local binary_path=$1 label=$2
+  local binary_path=$1 label=$2 setcap_bin
   has_openrc && ! has_systemd || return 0
   [[ -x "$binary_path" ]] || return 0
-  have_cmd setcap || die "OpenRC 下需要 setcap 才能让低权限 ${label} 监听 1-1023 端口。"
-  setcap 'cap_net_bind_service=+ep' "$binary_path" ||
+  ensure_setcap_command
+  setcap_bin="$(setcap_command_path)"
+  "$setcap_bin" 'cap_net_bind_service=+ep' "$binary_path" ||
     die "无法为 ${label} 设置低端口监听能力，已拒绝回退为 root 运行。"
 }
 

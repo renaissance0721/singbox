@@ -319,7 +319,12 @@ grep -Fq 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' "$repo_di
 grep -Fq 'repair_sing_box_netlink_hardening' "$repo_dir/index.sh" ||
   fail "Existing sing-box installations do not auto-repair missing AF_NETLINK access"
 grep -Fq 'Restart=always' "$repo_dir/index.sh" || fail "Realm systemd service does not restart after every unexpected exit"
-grep -Fq "setcap 'cap_net_bind_service=+ep'" "$repo_dir/index.sh" || fail "OpenRC 低权限服务无法兼容低端口监听"
+grep -Fq "'cap_net_bind_service=+ep'" "$repo_dir/index.sh" || fail "OpenRC 低权限服务无法兼容低端口监听"
+grep -Fq 'ensure_setcap_command' "$repo_dir/index.sh" || fail "OpenRC 节点流程不会自动修复缺失的 setcap"
+grep -Eq 'apk add .*libcap-setcap' "$repo_dir/index.sh" || fail "APK 无法自动安装 setcap"
+grep -Eq 'apt-get install .*libcap2-bin' "$repo_dir/index.sh" || fail "APT 无法自动安装 setcap"
+grep -Eq 'dnf install .*libcap' "$repo_dir/index.sh" || fail "DNF 无法自动安装 setcap"
+grep -Eq 'yum install .*libcap' "$repo_dir/index.sh" || fail "YUM 无法自动安装 setcap"
 grep -Eq 'apt-get install .*util-linux' "$repo_dir/index.sh" || fail "APT 依赖未安装提供 runuser 的 util-linux"
 grep -Eq 'dnf install .*util-linux' "$repo_dir/index.sh" || fail "DNF 依赖未安装提供 runuser 的 util-linux"
 grep -Eq 'yum install .*util-linux' "$repo_dir/index.sh" || fail "YUM 依赖未安装提供 runuser 的 util-linux"
@@ -339,6 +344,19 @@ grep -Fq '/usr/sbin/runuser /sbin/runuser' "$repo_dir/index.sh" || fail "低权�
   [[ -z "$runtime_launcher_output" ]] || fail "自动安装 runuser 的输出污染了 SS2022 密码生成结果"
   grep -Fxq 'update -y' "$runtime_launcher_log" || fail "节点流程缺少 runuser 时未更新 APT 索引"
   grep -Fxq 'install -y util-linux' "$runtime_launcher_log" || fail "节点流程缺少 runuser 时未自动安装 util-linux"
+)
+(
+  setcap_install_log="$test_root/setcap-install.log"
+  setcap_command_path() {
+    [[ -s "$setcap_install_log" ]] || return 1
+    printf '/usr/sbin/setcap\n'
+  }
+  detect_pkg_manager() { PKG_MANAGER=apk; }
+  apk() { printf '%s\n' "$*" | tee -a "$setcap_install_log"; }
+
+  setcap_install_output="$(ensure_setcap_command 2>/dev/null)"
+  [[ -z "$setcap_install_output" ]] || fail "自动安装 setcap 时意外向调用方输出内容"
+  grep -Fxq 'add --no-cache libcap-setcap' "$setcap_install_log" || fail "OpenRC 节点流程缺少 setcap 时未自动安装 libcap-setcap"
 )
 grep -Fq 'SCRIPT_REPO_ID="1210354428"' "$repo_dir/index.sh" || fail "自动更新未固定 GitHub 仓库数字 ID"
 grep -Fq 'SCRIPT_REPO_OWNER_ID="197479185"' "$repo_dir/index.sh" || fail "自动更新未固定 GitHub 所有者数字 ID"

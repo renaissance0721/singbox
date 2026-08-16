@@ -118,7 +118,8 @@ if [[ -n "${SBOX_TEST_RENDERED_CONFIG:-}" ]]; then
   cp "$rendered" "$SBOX_TEST_RENDERED_CONFIG"
 fi
 jq -e '
-  ([.route.rules[] | select(.action == "reject" and ((.inbound // []) | index("vless-reality-in")) and .ip_is_private == true)] | length) == 2
+  .dns.servers == [{type:"local", tag:"local", prefer_go:true}]
+  and ([.route.rules[] | select(.action == "reject" and ((.inbound // []) | index("vless-reality-in")) and .ip_is_private == true)] | length) == 2
   and ([.route.rules[] | select(.action == "reject" and ((.inbound // []) | index("vless-reality-in")) and ((.ip_cidr // []) | index("169.254.169.254/32")))] | length) == 2
   and ([.route.rules[] | select(.action == "resolve" and ((.inbound // []) | index("vless-reality-in")))] | length) == 1
   and .route.final == "direct"

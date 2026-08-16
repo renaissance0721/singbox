@@ -2521,7 +2521,8 @@ render_config() {
       servers: [
         {
           type: "local",
-          tag: "local"
+          tag: "local",
+          prefer_go: true
         }
       ]
     },

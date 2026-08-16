@@ -4,6 +4,7 @@
 
 ## [Unreleased]
 
+- 将 VLESS Reality 的默认 SNI 与握手站点恢复为 `www.tesla.com`，避免未经跨线路验证的目标站点导致握手兼容性问题。
 - 修复未启用 `systemd-resolved` 的 Linux 上 sing-box 本地 DNS 解析失败：启用 Go 解析器，避免 VLESS Reality 握手站域名解析报错。
 - WireGuard 中转端检测到邀请中的私网地址冲突时，会自动协商新的空闲地址并由落地端同步应用。
 - 修复 WireGuard 工具安装流程：检测到缺少 `ip` 时，会按发行版自动补装 `iproute2` 或 `iproute`，并避免重复安装已有工具；APT 安装前会自动执行 `dpkg --configure -a` 恢复中断的软件包状态；包管理器安装完成后异常退出时，以实际命令检测结果为准，避免误报安装失败。

@@ -54,6 +54,7 @@ if [[ "${SBOX_SECURITY_TEST_PORTABLE:-0}" == "1" ]]; then
   }
   chmod() { :; }
   chown() { :; }
+  jq() { command jq "$@" | tr -d '\r'; }
 fi
 
 ensure_dirs
@@ -122,6 +123,113 @@ jq -e '
   and ([.route.rules[] | select(.action == "resolve" and ((.inbound // []) | index("vless-reality-in")))] | length) == 1
   and .route.final == "direct"
 ' "$rendered" >/dev/null || fail "VLESS 私网/元数据两阶段阻断规则缺失"
+
+state_jq '
+  .routing.split.outbounds = [
+    {
+      id: "keyword-route", name: "keyword-route", enabled: true,
+      outbound_type: "socks", server: "127.0.0.1", port: 1080,
+      username: "", password: "", method: "2022-blake3-aes-128-gcm",
+      rule_sets: ["google", "chatgpt"]
+    },
+    {
+      id: "domain-route", name: "domain-route", enabled: true,
+      outbound_type: "socks", server: "127.0.0.2", port: 1080,
+      username: "", password: "", method: "2022-blake3-aes-128-gcm",
+      rule_sets: ["domain:google.com", "domain:mail.google.com"]
+    }
+  ]
+'
+split_rendered="$test_root/split-rendered.json"
+render_config >"$split_rendered"
+jq -e '
+  ([.route.rules[] | select(.action == "sniff") | .timeout] == ["300ms"])
+  and ([.route.rules[] | select(.action == "route" and ((.outbound // "") | startswith("split-out:"))) | .rule_set[0]] == [
+    "split:domain-route:domain:mail.google.com",
+    "split:domain-route:domain:google.com",
+    "split:keyword-route:chatgpt",
+    "split:keyword-route:google"
+  ])
+  and ([.outbounds[] | select(.tag == "split-out:keyword-route") | has("username")] == [false])
+  and ([.outbounds[] | select(.tag == "split-out:keyword-route") | has("password")] == [false])
+' "$split_rendered" >/dev/null || fail "分流优先级、sniff 超时或无认证 SOCKS5 渲染错误"
+validate_state || fail "无认证 SOCKS5 分流未通过状态校验"
+(
+  ui_show_text() { :; }
+  show_split_routing_rules
+) || fail "分流规则展示生成失败"
+
+state_jq '(.routing.split.outbounds[] | select(.id == "keyword-route") | .enabled) = false'
+(
+  ui_menu() { printf '1\n'; }
+  apply_sing_box_state_transaction() { rm -f "$1"; return 0; }
+  delete_split_routing_rule
+)
+jq -e '
+  .routing.split.outbounds[]
+  | select(.id == "keyword-route")
+  | (.enabled == false and (.rule_sets | length) == 1)
+' "$STATE_FILE" >/dev/null || fail "从停用落地删除规则后意外重新启用了落地"
+
+state_jq '.meta.log_level = "info"'
+transaction_snapshot="$(snapshot_sing_box_state_file)"
+state_jq '.meta.log_level = "debug"'
+(
+  apply_attempt=0
+  apply_config() {
+    apply_attempt=$((apply_attempt + 1))
+    (( apply_attempt > 1 ))
+  }
+  ui_msg() { :; }
+  if apply_sing_box_state_transaction "$transaction_snapshot" "测试分流事务"; then
+    fail "失败的分流事务返回了成功状态"
+  fi
+)
+[[ "$(state_get '.meta.log_level')" == "info" ]] || fail "分流应用失败后未恢复原状态"
+
+migration_snapshot="$(snapshot_sing_box_state_file)"
+state_jq '
+  .routing = {
+    ai: {
+      enabled: true,
+      outbound_type: "socks",
+      server: "127.0.0.1",
+      port: 1080,
+      password: "",
+      method: "2022-blake3-aes-128-gcm",
+      domain_suffix: ["example.com"],
+      domain_keyword: ["brand"]
+    }
+  }
+'
+migrate_state_schema
+jq -e '
+  (.routing.split.outbounds[0].rule_sets | index("domain:example.com")) != null
+  and (.routing.split.outbounds[0].rule_sets | index("brand")) != null
+' "$STATE_FILE" >/dev/null || fail "旧版域名后缀迁移成了不精确的关键词规则"
+
+state_jq '
+  .routing = {
+    split: {
+      enabled: true,
+      outbound_type: "socks",
+      server: "127.0.0.1",
+      port: 1080,
+      username: "",
+      password: "",
+      method: "2022-blake3-aes-128-gcm",
+      rule_sets: ["openai.com", "my-custom-rule"]
+    }
+  }
+'
+migrate_state_schema
+jq -e '
+  (.routing.split.outbounds[0].rule_sets | index("openai.com")) != null
+  and (.routing.split.outbounds[0].rule_sets | index("my-custom-rule")) != null
+' "$STATE_FILE" >/dev/null || fail "旧版迁移误删了用户自定义的常见域名规则"
+install -m 0600 "$migration_snapshot" "$STATE_FILE"
+rm -f "$migration_snapshot"
+state_jq '.routing.split.outbounds = []'
 
 write_client_exports
 if [[ "${SBOX_SECURITY_TEST_PORTABLE:-0}" != "1" ]]; then

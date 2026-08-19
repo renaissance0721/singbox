@@ -27,6 +27,7 @@
 - iptables/ip6tables 托管规则保留既有拒绝、限速和 Fail2ban 的优先级，并兼容链末端默认拒绝规则
 - 支持零预置的自定义分流规则集，可随时新增、查看和删除
 - 支持添加多个 SOCKS5 / Shadowsocks 分流落地
+- 集成 NodeQuality、TcpQuality、Tcpfit、流媒体解锁和 IP 质量体检的一键入口
 
 ## 适用环境
 
@@ -34,6 +35,7 @@
 - Debian / Ubuntu、RHEL 系列或 Alpine Linux
 - `systemd` 或 OpenRC
 - `root` 或具备 `sudo` 权限的用户
+- Realm 自动安装支持 `x86_64/amd64` 与 `aarch64/arm64`，并自动区分 glibc 和 musl
 - 云厂商安全组或 NAT 映射已允许协议对应端口；脚本只能管理 VPS 本机防火墙
 
 ## 快速开始
@@ -78,16 +80,65 @@ sbox change-address
 
 修改后会自动重新生成客户端配置和订阅链接，并按需重载 sing-box 服务。
 
-常用管理命令：
+## 命令速查
+
+所有管理操作均需要 root 权限；非 root 用户请在命令前添加 `sudo`。
+
+| 命令 | 说明 |
+| --- | --- |
+| `sbox` | 打开主菜单 |
+| `sbox quick-install` | 安装依赖与官方 sing-box，初始化基础环境；不会自动创建节点 |
+| `sbox node` | 打开代理节点管理菜单 |
+| `sbox change-address` | 更改所有协议共用的节点出口 IP 或域名 |
+| `sbox delete-node` | 删除一个已经启用的协议节点及其客户端 |
+| `sbox add-client` | 为指定协议新增客户端 |
+| `sbox remove-client` | 删除指定协议的客户端 |
+| `sbox show` | 查看全部客户端信息和订阅链接 |
+| `sbox apply` | 重新生成配置、同步防火墙并重载服务 |
+| `sbox overview` | 查看节点、协议、客户端和分流概览 |
+| `sbox status` | 查看服务状态与最近日志 |
+| `sbox split` | 打开分流管理菜单 |
+| `sbox split-route` | 新增 SOCKS5 或 Shadowsocks 分流落地 |
+| `sbox edit-split-route` | 编辑、启用或停用分流落地 |
+| `sbox delete-split-route` | 删除分流落地 |
+| `sbox split-rules` | 查看全部分流落地与规则 |
+| `sbox add-split-rule chatgpt claude` | 新增关键词规则并选择绑定落地 |
+| `sbox delete-split-rule` | 删除关键词、域名、GeoSite 或远程 SRS 规则 |
+| `sbox realm` | 打开 Realm 与 WireGuard 管理菜单 |
+| `sbox ports` | 查看端口并管理本机防火墙规则 |
+| `sbox tools` | 打开一键常用脚本菜单 |
+| `sbox repair-install` | 使用当前脚本修复依赖、权限、服务和配置，保留现有规则 |
+| `sbox uninstall` | 卸载 sing-box、Realm 和本脚本管理的数据 |
+| `sbox --version` | 查看脚本版本 |
+| `sbox --help` | 查看命令帮助 |
+
+## 节点与客户端管理
+
+“安装 / 初始化 sing-box”只准备基础环境。安装完成后，需要进入“代理节点管理 → 新建节点”，选择并配置至少一个协议。Shadowsocks、VLESS + Reality 和 Hysteria2 可以分别启用，并共用节点名称与出口地址。
+
+首次创建某个协议节点时，脚本会自动创建一个默认客户端并立即生成服务端配置、客户端参数和订阅链接。之后可以通过“管理客户端”或以下命令继续增删客户端：
 
 ```bash
-sbox node             # 节点管理
-sbox realm            # Realm TCP 中转管理
-sbox ports            # 端口与本机防火墙管理
-sbox tools            # NodeQuality、TcpQuality、Tcpfit、流媒体与 IP 质量检测
-sbox repair-install   # 修复核心、权限、服务和配置，不执行未校验的远程脚本
-sbox status           # 查看 sing-box 服务状态
+sbox add-client
+sbox remove-client
+sbox show
 ```
+
+每次创建、删除或修改节点后，脚本会先检查配置与监听端口，再同步本机防火墙并重载服务。若没有启用任何协议，sing-box 服务会停止，但状态文件会保留。
+
+## 一键常用脚本
+
+主菜单选择“一键常用脚本”，或执行 `sbox tools`，可以运行以下第三方项目：
+
+| 选项 | 下载入口 |
+| --- | --- |
+| NodeQuality | `https://run.NodeQuality.com` |
+| TcpQuality | `https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh` |
+| Tcpfit | `https://raw.githubusercontent.com/Kylin010/tcpfit/main/tcpfit.sh` |
+| 流媒体解锁 | `http://check.unlock.media`（入口会跳转到上游脚本） |
+| IP 质量体检 | `https://IP.Check.Place` |
+
+管理面板会先将脚本下载到临时文件，确认内容非空且通过 Bash 语法检查后再执行，结束后删除临时文件。这些脚本由第三方维护，未固定版本或内容哈希，并会继承当前 root 权限；Tcpfit 等工具还可能修改系统网络参数。运行前应自行确认上游来源和行为。“更新脚本”的仓库身份与哈希校验不适用于这些第三方入口。
 
 ## 分流管理
 
@@ -181,29 +232,30 @@ sbox split-rules
 sbox delete-split-rule
 ```
 
-如需卸载：
-
-```bash
-sbox uninstall
-```
-
 ## 使用流程
 
 1. 执行安装命令，脚本会先打开管理面板。
 2. 选择“安装 / 初始化 sing-box”。
-3. 等待脚本安装依赖和 `sing-box`。
-4. 退出面板后，输入 `sbox` 可再次打开。
+3. 等待脚本安装依赖和官方 `sing-box` 软件包。
+4. 进入“代理节点管理 → 新建节点”，选择协议并确认监听端口、节点地址及协议参数。
+5. 保存后检查脚本输出的订阅链接，并在云厂商安全组或 NAT 面板放行、映射对应端口。
+6. 使用客户端连接并测试；需要增加用户时进入“管理客户端”。
+7. 退出面板后，输入 `sbox` 可随时重新打开。
 
 ## 生成文件位置
 
 - 主配置文件：`/etc/sing-box/config.json`
 - 面板状态文件：`/etc/sing-box-manager/state.json`
+- Realm/WireGuard 状态文件：`/etc/sing-box-manager/realm-state.json`
 - 配置备份目录：`/etc/sing-box-manager/backups/`
 - 客户端导出目录：`/etc/sing-box-manager/clients/`
 - Hysteria2 证书目录：`/etc/sing-box-manager/certs/`
+- 远程规则集缓存：`/etc/sing-box-manager/rule-set-cache/cache.db`
 - Realm 配置目录：`/etc/realm/`
-- 脚本托管 WireGuard 配置：`/etc/wireguard/sbwg*.conf`（不会修改其他 WireGuard 配置）
+- 脚本托管 WireGuard 配置与密钥：`/etc/wireguard/sbwg*.conf`、`sbwg*.key`、`sbwg*.pub`（不会修改其他 WireGuard 配置）
 - 脚本托管防火墙状态：`/etc/sing-box-manager/firewall-managed.tsv`
+- 管理脚本项目目录：`/usr/local/share/sbox/`
+- OpenRC 日志：`/var/log/sing-box.log`、`/var/log/realm.log`
 
 ## 协议说明
 
@@ -263,6 +315,13 @@ sbox uninstall
 - systemd 使用 `sbox-firewall.service` 在 sing-box/Realm 启动前恢复规则；Alpine/OpenRC 在对应 iptables/ip6tables 服务存在时保存规则
 - NAT VPS 的客户端使用商家分配的公网端口；sing-box 监听的是 NAT 映射后的内部端口，两者可能不同
 - 本页面不检测也不修改云厂商安全组、外部防火墙或 NAT 控制面板
+
+## 更新、修复与卸载
+
+- “更新脚本”只更新管理脚本项目。更新成功后会重新打开面板；sing-box、节点和规则不会因此被删除。
+- `sbox repair-install` 使用当前已经安装的管理脚本重新检查依赖，修复 sing-box、运行用户、文件权限、服务与防火墙恢复环境，然后重新应用现有配置。它不会自动获取新版本，也不会删除节点、客户端或分流规则。
+- `sbox uninstall` 会在确认后停止并禁用 sing-box、Realm 和脚本托管的 `sbwg*` WireGuard 隧道，清理托管防火墙规则，卸载 sing-box 软件包，并删除本项目的配置、状态、密钥、客户端导出和管理命令。
+- 完整卸载不会删除非 `sbwg*` 的用户 WireGuard 配置，也不会修改云安全组、外部防火墙或 NAT 映射。卸载前请自行备份需要保留的客户端信息和配置。
 
 ## 故障排查
 
@@ -327,6 +386,7 @@ apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc core
 - 私网、链路本地地址和元数据阻断应用于 Shadowsocks、VLESS 与 Hysteria2 全部代理入站
 - 客户端订阅、状态、备份和私钥使用最小文件权限；sing-box/Realm 使用 `sbox-runtime` 低权限用户运行
 - “更新脚本”无需手动输入哈希：脚本会固定校验 GitHub 仓库数字 ID，将 `main` 解析为不可变 commit，并核对提交身份、Git blob 哈希、SHA-256 与 Bash 语法；任一失败都不会覆盖当前脚本
+- “一键常用脚本”运行的是未固定版本的第三方代码，并以当前 root 权限执行；语法检查不等于代码安全审计，使用前请确认来源可信
 - 自动校验无法抵御 GitHub 所有者账号本身被完全接管；请为仓库所有者账号启用双重验证或 Passkey，并妥善保管访问令牌
 - 本机防火墙放行不能代替云厂商安全组配置，也不能创建或删除 NAT 端口映射
 - 公开仓库时不要提交任何真实节点配置、证书或导出的客户端信息

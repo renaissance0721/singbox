@@ -3863,6 +3863,73 @@ port_management_menu() {
   done
 }
 
+run_common_script() {
+  local script_name=$1
+  local script_url=$2
+  local tmp_script status
+
+  if ! have_cmd curl && ! have_cmd wget; then
+    ui_msg "未检测到 curl 或 wget，无法下载 ${script_name}。"
+    return 1
+  fi
+
+  tmp_script="$(mktemp "$TMP_DIR/sbox-common-script.XXXXXX")" || {
+    ui_msg "无法创建临时文件，${script_name} 未运行。"
+    return 1
+  }
+
+  log "正在下载并运行 ${script_name}..."
+  if ! download_to_file "$tmp_script" "$script_url"; then
+    rm -f -- "$tmp_script"
+    ui_msg "${script_name} 下载失败，请检查网络后重试。"
+    return 1
+  fi
+
+  if [[ ! -s "$tmp_script" ]] || ! bash -n "$tmp_script"; then
+    rm -f -- "$tmp_script"
+    ui_msg "${script_name} 下载内容为空或 Bash 语法检查失败，已拒绝运行。"
+    return 1
+  fi
+
+  if bash "$tmp_script"; then
+    status=0
+    log "${script_name} 已运行完毕。"
+  else
+    status=$?
+    warn "${script_name} 运行失败（退出码：${status}）。"
+  fi
+
+  rm -f -- "$tmp_script"
+  ui_pause
+  return "$status"
+}
+
+common_scripts_menu() {
+  local choice
+
+  while true; do
+    choice="$(ui_menu "一键常用脚本" "请选择要运行的第三方脚本（脚本将以当前 root 权限执行）。" \
+      "1" "NodeQuality" \
+      "2" "TcpQuality" \
+      "3" "Tcpfit" \
+      "4" "流媒体解锁" \
+      "5" "IP 质量体检" \
+      "0" "返回上一级菜单" \
+      "00" "退出脚本")" || continue
+
+    case "$choice" in
+      1) run_common_script "NodeQuality" "https://run.NodeQuality.com" || true ;;
+      2) run_common_script "TcpQuality" "https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh" || true ;;
+      3) run_common_script "Tcpfit" "https://raw.githubusercontent.com/Kylin010/tcpfit/main/tcpfit.sh" || true ;;
+      4) run_common_script "流媒体解锁" "http://check.unlock.media" || true ;;
+      5) run_common_script "IP 质量体检" "https://IP.Check.Place" || true ;;
+      0) return 0 ;;
+      00) exit 0 ;;
+      *) ui_msg "无效选项，请重新选择。" ;;
+    esac
+  done
+}
+
 wireguard_config_file() {
   wireguard_valid_interface "$1" || return 1
   printf '%s/%s.conf\n' "$WIREGUARD_DIR" "$1"
@@ -7124,7 +7191,7 @@ main_menu_text() {
 Sing-box 状态：$(sing_box_install_status)
 管理环境：未初始化
 
-请先选择 1 安装 / 初始化 sing-box
+请先选择 1 安装 / 初始化 sing-box；一键常用脚本无需初始化
 EOF
     return 0
   fi
@@ -7406,11 +7473,12 @@ main_menu() {
       "5" "查看当前概览" \
       "6" "查看服务状态" \
       "7" "端口管理" \
-      "8" "更新脚本" \
-      "9" "卸载" \
+      "8" "一键常用脚本" \
+      "9" "更新脚本" \
+      "10" "卸载" \
       "0" "退出")" || continue
 
-    if ! have_cmd jq && [[ "$choice" != "1" && "$choice" != "0" ]]; then
+    if ! have_cmd jq && [[ "$choice" != "1" && "$choice" != "8" && "$choice" != "0" ]]; then
       ui_msg "管理环境尚未初始化，请先选择 1 安装 / 初始化 sing-box。"
       continue
     fi
@@ -7442,9 +7510,12 @@ main_menu() {
         port_management_menu || true
         ;;
       8)
-        update_manager_script || true
+        common_scripts_menu || true
         ;;
       9)
+        update_manager_script || true
+        ;;
+      10)
         uninstall_sbox || true
         ;;
       0)
@@ -7468,6 +7539,7 @@ usage() {
   $SCRIPT_NAME quick-install  一键安装并初始化
   $SCRIPT_NAME node           打开代理节点管理菜单
   $SCRIPT_NAME ports          打开端口管理菜单
+  $SCRIPT_NAME tools          打开一键常用脚本菜单
   $SCRIPT_NAME change-address 更改节点出口 IP 或域名
   $SCRIPT_NAME delete-node    删除已启用的协议节点
   $SCRIPT_NAME add-client     打开新增客户端流程
@@ -7621,6 +7693,11 @@ main() {
       ensure_dirs
       init_state_file
       port_management_menu
+      ;;
+    tools|tool|common-scripts)
+      require_linux
+      require_root
+      common_scripts_menu
       ;;
     firewall-sync)
       require_linux

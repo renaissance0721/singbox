@@ -406,6 +406,12 @@ grep -Fq '"12" "卸载 Realm"' "$repo_dir/index.sh" || fail "Realm 卸载选项�
 grep -Fq 'realm_install_or_reset || true' "$repo_dir/index.sh" || fail "Realm 菜单未捕获操作失败状态"
 grep -Fq 'quick_install || true' "$repo_dir/index.sh" || fail "主菜单未捕获操作失败状态"
 grep -Fq 'read -r _ || true' "$repo_dir/index.sh" || fail "按回车返回菜单仍可能把读取状态传递为脚本失败"
+grep -Fq '"8" "一键常用脚本"' "$repo_dir/index.sh" || fail "主菜单缺少一键常用脚本入口"
+grep -Fq 'run_common_script "NodeQuality" "https://run.NodeQuality.com"' "$repo_dir/index.sh" || fail "NodeQuality 入口缺失或地址错误"
+grep -Fq 'run_common_script "TcpQuality" "https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh"' "$repo_dir/index.sh" || fail "TcpQuality 入口缺失或地址错误"
+grep -Fq 'run_common_script "Tcpfit" "https://raw.githubusercontent.com/Kylin010/tcpfit/main/tcpfit.sh"' "$repo_dir/index.sh" || fail "Tcpfit 入口缺失或地址错误"
+grep -Fq 'run_common_script "流媒体解锁" "http://check.unlock.media"' "$repo_dir/index.sh" || fail "流媒体解锁入口缺失或地址错误"
+grep -Fq 'run_common_script "IP 质量体检" "https://IP.Check.Place"' "$repo_dir/index.sh" || fail "IP 质量体检入口缺失或地址错误"
 grep -Fq 'if [[ -v BASH_SOURCE ]]; then' "$repo_dir/install.sh" ||
   fail "install.sh 通过标准输入执行时仍可能因 BASH_SOURCE[0] 未定义而退出"
 
@@ -432,6 +438,20 @@ menu_test_status=$?
 set -e
 [[ "$menu_test_status" -eq 0 && "$menu_test_output" == *menu-survived* && "$(cat "$menu_counter_file")" -eq 2 ]] ||
   fail "主菜单操作返回非零状态后仍会退出脚本"
+
+common_script_output="$({
+  have_cmd() { [[ "$1" == "curl" ]]; }
+  download_to_file() {
+    printf '#!/usr/bin/env bash\nprintf "common-script-ran\\n"\n' >"$1"
+  }
+  ui_pause() { :; }
+  run_common_script "测试脚本" "https://example.invalid/test.sh"
+} 2>&1)"
+[[ "$common_script_output" == *common-script-ran* && "$common_script_output" == *"测试脚本 已运行完毕"* ]] ||
+  fail "常用脚本未在下载和语法检查成功后运行"
+if find "$TMP_DIR" -maxdepth 1 -name 'sbox-common-script.*' -print -quit | grep -q .; then
+  fail "常用脚本运行后未清理临时文件"
+fi
 
 printf '0\n' >"$menu_counter_file"
 set +e

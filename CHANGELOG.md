@@ -12,6 +12,7 @@
 
 ### 新增
 
+- 主菜单新增“一键常用脚本”，可直接运行 NodeQuality、TcpQuality、Tcpfit、流媒体解锁和 IP 质量体检
 - Realm 规则支持按规则选择公网直连或点对点 WireGuard 隧道
 - 新增 WireGuard 落地端/中转端双向公钥配对、状态、测试、修改、服务控制、修复和安全删除菜单
 - WireGuard 落地 UDP 监听支持中转来源白名单，Realm 启动前验证关联隧道接口和 `/32` 路由

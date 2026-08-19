@@ -84,6 +84,7 @@ sbox change-address
 sbox node             # 节点管理
 sbox realm            # Realm TCP 中转管理
 sbox ports            # 端口与本机防火墙管理
+sbox tools            # NodeQuality、TcpQuality、Tcpfit、流媒体与 IP 质量检测
 sbox repair-install   # 修复核心、权限、服务和配置，不执行未校验的远程脚本
 sbox status           # 查看 sing-box 服务状态
 ```

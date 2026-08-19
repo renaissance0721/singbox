@@ -40,7 +40,26 @@
 
 ## 快速开始
 
-在 VPS 上下载到本地后执行，避免把可变分支直接通过管道交给 root：
+已经进入 root shell 时，可使用一键安装命令：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | bash
+```
+
+当前用户不是 root 时使用：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | sudo bash
+```
+
+Alpine Linux 请先安装 Bash 和 curl，再使用 root 执行：
+
+```sh
+apk add --no-cache bash curl
+curl -fsSL https://raw.githubusercontent.com/renaissance0721/singbox/main/install.sh | bash
+```
+
+一键命令会直接执行 `main` 分支上的安装器。希望先审查代码或固定安装内容时，建议下载仓库后执行：
 
 ```bash
 git clone https://github.com/renaissance0721/singbox.git
@@ -48,7 +67,7 @@ cd singbox
 sudo bash install.sh
 ```
 
-Alpine Linux 请先安装 Bash 和 curl，并使用 root 执行：
+Alpine 使用本地仓库安装时：
 
 ```sh
 apk add --no-cache bash curl git
@@ -381,6 +400,7 @@ apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc core
 ## 安全提醒
 
 - 请在你拥有管理权限的服务器上使用本脚本
+- 一键安装命令会以 root 权限执行 `main` 分支上的 `install.sh`；安装器会校验随后下载的 `index.sh`，但无法反过来验证自身，安全敏感环境应先克隆仓库并审查安装器
 - 对外分享客户端配置前，请确认端口、域名、证书和密码都已按预期生成
 - 来源白名单只限制 Shadowsocks 入站来源；VLESS 和 Hysteria2 仍依赖各自的认证信息
 - 私网、链路本地地址和元数据阻断应用于 Shadowsocks、VLESS 与 Hysteria2 全部代理入站

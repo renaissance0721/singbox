@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-# shellcheck disable=SC2329
+# Test doubles are invoked indirectly through functions sourced from index.sh.
+# shellcheck disable=SC2317,SC2329
 
 set -Eeuo pipefail
 
@@ -111,6 +112,55 @@ cat >"$STATE_FILE" <<EOF
 }
 EOF
 chmod 0600 "$STATE_FILE"
+
+(
+  curl() {
+    case "$1" in
+      -4) printf '198.51.100.20\n' ;;
+      -6) printf '2001:4860:4860::20\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  hostname() { return 1; }
+
+  [[ "$(detect_public_ipv4)" == "198.51.100.20" ]] || fail "公网 IPv4 未被独立探测"
+  [[ "$(detect_public_ipv6)" == "2001:4860:4860::20" ]] || fail "公网 IPv6 未被独立探测"
+  [[ "$(detect_public_address)" == "198.51.100.20" ]] || fail "兼容地址探测未优先返回 IPv4"
+)
+
+test_build_node_dual_stack() {
+  local STATE_FILE="$test_root/build-node-state.json"
+  install -m 0600 "$test_root/state/state.json" "$STATE_FILE"
+
+  detect_public_ipv4() { printf '198.51.100.21\n'; }
+  detect_public_ipv6() { printf '2001:4860:4860::21\n'; }
+  ui_menu() { printf '1\n'; }
+  ui_yesno() {
+    [[ "$1" == *"是否搭建 IPv4 / IPv6 双栈节点"* ]]
+  }
+  prompt_nonempty() { printf '%s\n' "$3"; }
+  configure_shadowsocks() { normalize_protocol_listen_addresses; }
+
+  build_node || fail "确认双栈后新建节点失败"
+  jq -e '
+    .meta.server_address == "198.51.100.21"
+    and .meta.server_address_ipv6 == "2001:4860:4860::21"
+    and .meta.dual_stack == true
+    and ([.protocols[] | .listen == "::"] | all)
+  ' "$STATE_FILE" >/dev/null || fail "确认双栈后未保存双栈地址或监听配置"
+
+  install -m 0600 "$test_root/state/state.json" "$STATE_FILE"
+  detect_public_ipv6() { return 1; }
+  ui_yesno() { fail "未检测到公网 IPv6 时不应询问双栈"; }
+  build_node || fail "仅检测到 IPv4 时新建节点失败"
+  jq -e '
+    .meta.server_address == "198.51.100.21"
+    and .meta.server_address_ipv6 == ""
+    and .meta.dual_stack == false
+    and ([.protocols[] | .listen == "0.0.0.0"] | all)
+  ' "$STATE_FILE" >/dev/null || fail "未检测到公网 IPv6 时未保持 IPv4 节点"
+}
+(test_build_node_dual_stack)
 
 rendered="$test_root/rendered.json"
 render_config >"$rendered"
@@ -263,6 +313,23 @@ install -m 0600 "$migration_snapshot" "$STATE_FILE"
 rm -f "$migration_snapshot"
 state_jq '.routing.split.outbounds = []'
 
+state_jq '
+  .meta.dual_stack = true |
+  .meta.server_address_ipv6 = "2001:4860:4860::22"
+'
+normalize_protocol_listen_addresses
+[[ "$(default_listen_address)" == "::" ]] || fail "双栈节点未使用 IPv6 通配监听"
+write_client_exports
+grep -Fq '@[2001:4860:4860::22]:24443' "$CLIENT_DIR/direct-links.txt" ||
+  fail "双栈节点未生成合法的 IPv6 订阅链接"
+grep -Fq 'security-test-IPv6' "$CLIENT_DIR/direct-links.txt" ||
+  fail "IPv6 订阅链接缺少可区分的节点名称"
+state_jq '
+  .meta.dual_stack = false |
+  .meta.server_address_ipv6 = ""
+'
+normalize_protocol_listen_addresses
+[[ "$(default_listen_address)" == "0.0.0.0" ]] || fail "关闭双栈后未恢复 IPv4 监听"
 write_client_exports
 if [[ "${SBOX_SECURITY_TEST_PORTABLE:-0}" != "1" ]]; then
   [[ "$(stat -c '%a' "$STATE_FILE")" == "600" ]] || fail "state.json 权限不是 0600"

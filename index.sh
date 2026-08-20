@@ -1438,20 +1438,75 @@ install_realm_binary() {
   rm -rf "$tmp_dir"
 }
 
-detect_public_address() {
-  local addr=""
+detect_public_ipv4() {
+  local addr="" candidate
 
   if have_cmd curl; then
     addr="$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
-    if [[ -z "$addr" ]]; then
-      addr="$(curl -6 -fsS --max-time 5 https://api64.ipify.org 2>/dev/null || true)"
+    addr="${addr//$'\r'/}"
+    addr="${addr//$'\n'/}"
+    if is_ipv4 "$addr"; then
+      printf '%s\n' "$addr"
+      return 0
     fi
   fi
 
-  if [[ -z "$addr" ]] && have_cmd hostname; then
-    addr="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  if have_cmd hostname; then
+    while IFS= read -r candidate; do
+      if is_ipv4 "$candidate"; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done < <(hostname -I 2>/dev/null | tr '[:space:]' '\n')
   fi
 
+  return 1
+}
+
+is_public_ipv6_candidate() {
+  local addr=${1,,}
+  is_valid_ipv6_or_cidr "$addr" || return 1
+  [[ "$addr" != */* ]] || return 1
+
+  case "$addr" in
+    ::|::1|fe8*|fe9*|fea*|feb*|fec*|fed*|fee*|fef*|fc*|fd*|ff*|2001:db8:*)
+      return 1
+      ;;
+  esac
+
+  return 0
+}
+
+detect_public_ipv6() {
+  local addr="" candidate
+
+  if have_cmd curl; then
+    addr="$(curl -6 -fsS --max-time 5 https://api64.ipify.org 2>/dev/null || true)"
+    addr="${addr//$'\r'/}"
+    addr="${addr//$'\n'/}"
+    if is_public_ipv6_candidate "$addr"; then
+      printf '%s\n' "$addr"
+      return 0
+    fi
+  fi
+
+  if have_cmd hostname; then
+    while IFS= read -r candidate; do
+      if is_public_ipv6_candidate "$candidate"; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done < <(hostname -I 2>/dev/null | tr '[:space:]' '\n')
+  fi
+
+  return 1
+}
+
+detect_public_address() {
+  local addr=""
+
+  addr="$(detect_public_ipv4 2>/dev/null || true)"
+  [[ -n "$addr" ]] || addr="$(detect_public_ipv6 2>/dev/null || true)"
   printf '%s\n' "$addr"
 }
 
@@ -1542,6 +1597,8 @@ init_state_file() {
     "version": "$SCRIPT_VERSION",
     "node_name": "",
     "server_address": "",
+    "server_address_ipv6": "",
+    "dual_stack": false,
     "created_at": "$now",
     "updated_at": "$now",
     "log_level": "info"
@@ -1655,6 +1712,9 @@ cleanup_removed_traffic_state() {
     def cleanup_users:
       map(del(.traffic_limit_gb, .traffic_used_bytes, .traffic_last_api_bytes, .expires_at));
     del(.traffic_stats) |
+    .meta = (.meta // {}) |
+    .meta.server_address_ipv6 = (.meta.server_address_ipv6 // "") |
+    .meta.dual_stack = (.meta.dual_stack // false) |
     .protocols.shadowsocks.users = ((.protocols.shadowsocks.users // []) | cleanup_users) |
     .protocols.shadowsocks.allowed_sources = ((.protocols.shadowsocks.allowed_sources // []) | map(select(type == "string")) | unique) |
     .protocols.vless_reality.users = ((.protocols.vless_reality.users // []) | cleanup_users) |
@@ -2072,10 +2132,12 @@ direct_links_file() {
 }
 
 default_listen_address() {
-  local server_address
+  local server_address dual_stack
   server_address="$(state_get '.meta.server_address' 2>/dev/null || true)"
+  dual_stack="$(state_get '.meta.dual_stack // false' 2>/dev/null || true)"
 
-  if [[ -n "$server_address" && "$server_address" != "null" ]] && is_ipv6 "$server_address"; then
+  if [[ "$dual_stack" == "true" ]] ||
+    { [[ -n "$server_address" && "$server_address" != "null" ]] && is_ipv6 "$server_address"; }; then
     printf '::\n'
   else
     printf '0.0.0.0\n'
@@ -2436,15 +2498,20 @@ EOF
 validate_state() {
   local errors=""
   local ss_enabled vless_enabled hy2_enabled
-  local server_address vless_server_name handshake_server
+  local server_address server_address_ipv6 dual_stack vless_server_name handshake_server
   local split_name split_enabled split_type split_server split_port split_username split_password split_method split_rule_count split_rule ss_source
 
   ss_enabled="$(state_get '.protocols.shadowsocks.enabled')"
   vless_enabled="$(state_get '.protocols.vless_reality.enabled')"
   hy2_enabled="$(state_get '.protocols.hysteria2.enabled')"
   server_address="$(state_get '.meta.server_address')"
+  server_address_ipv6="$(state_get '.meta.server_address_ipv6 // ""')"
+  dual_stack="$(state_get '.meta.dual_stack // false')"
 
   [[ -n "$server_address" && "$server_address" != "null" ]] || errors+=$'节点对外地址不能为空。\n'
+  if [[ "$dual_stack" == "true" ]] && ! is_public_ipv6_candidate "$server_address_ipv6"; then
+    errors+=$'双栈节点缺少有效的公网 IPv6 地址。\n'
+  fi
 
   if [[ "$ss_enabled" == "true" ]]; then
     [[ "$(state_get '.protocols.shadowsocks.users | length')" -gt 0 ]] || errors+=$'Shadowsocks 至少需要一个客户端。\n'
@@ -5238,13 +5305,20 @@ apply_current_realm_state() {
 }
 
 write_client_exports() {
-  local all_file server_address host links_file node_name link display_name
+  local all_file server_address server_address_ipv6 host ipv6_host links_file node_name link display_name ipv6_display_name
   all_file="$CLIENT_DIR/all-clients.txt"
   server_address="$(state_get '.meta.server_address')"
   host="$(format_uri_host "$server_address")"
+  server_address_ipv6="$(state_get '.meta.server_address_ipv6 // ""')"
+  ipv6_host=""
+  if [[ "$(state_get '.meta.dual_stack // false')" == "true" ]] &&
+    is_public_ipv6_candidate "$server_address_ipv6"; then
+    ipv6_host="$(format_uri_host "$server_address_ipv6")"
+  fi
   node_name="$(state_get '.meta.node_name')"
   links_file="$(direct_links_file)"
   display_name="${node_name:-我的节点}"
+  ipv6_display_name="${display_name}-IPv6"
 
   : >"$all_file"
   : >"$links_file"
@@ -5272,6 +5346,10 @@ EOF
       # Shadowrocket compatibility: encode method:password as one Base64URL userinfo token.
       link="ss://$(base64_urlsafe "${ss_method}:${ss_share_password}")@${host}:${ss_port}#$(uri_encode "$display_name")"
       printf '%s（%s）的订阅链接是：%s\n' "$display_name" "$name" "$link" >>"$links_file"
+      if [[ -n "$ipv6_host" ]]; then
+        link="ss://$(base64_urlsafe "${ss_method}:${ss_share_password}")@${ipv6_host}:${ss_port}#$(uri_encode "$ipv6_display_name")"
+        printf '%s（%s）的订阅链接是：%s\n' "$ipv6_display_name" "$name" "$link" >>"$links_file"
+      fi
       cat "$CLIENT_DIR/shadowsocks/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
     done < <(jq -r '.protocols.shadowsocks.users[]? | [.name, .password] | @tsv' "$STATE_FILE")
@@ -5300,6 +5378,10 @@ transport = tcp
 EOF
       link="vless://${uuid}@${host}:${vless_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(uri_encode "$vless_server_name")&fp=chrome&pbk=$(uri_encode "$vless_public_key")&sid=$(uri_encode "$vless_short_id")&alpn=$(uri_encode "h2,http/1.1")&type=tcp&headerType=none#$(uri_encode "$display_name")"
       printf '%s（%s）的订阅链接是：%s\n' "$display_name" "$name" "$link" >>"$links_file"
+      if [[ -n "$ipv6_host" ]]; then
+        link="vless://${uuid}@${ipv6_host}:${vless_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(uri_encode "$vless_server_name")&fp=chrome&pbk=$(uri_encode "$vless_public_key")&sid=$(uri_encode "$vless_short_id")&alpn=$(uri_encode "h2,http/1.1")&type=tcp&headerType=none#$(uri_encode "$ipv6_display_name")"
+        printf '%s（%s）的订阅链接是：%s\n' "$ipv6_display_name" "$name" "$link" >>"$links_file"
+      fi
       cat "$CLIENT_DIR/vless-reality/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
     done < <(jq -r '.protocols.vless_reality.users[]? | [.name, .uuid] | @tsv' "$STATE_FILE")
@@ -5326,6 +5408,10 @@ obfs_password = $hy2_obfs
 EOF
       link="hysteria2://$(uri_encode "$password")@${host}:${hy2_port}?sni=$(uri_encode "$hy2_sni")&insecure=1&obfs=salamander&obfs-password=$(uri_encode "$hy2_obfs")#$(uri_encode "$display_name")"
       printf '%s（%s）的订阅链接是：%s\n' "$display_name" "$name" "$link" >>"$links_file"
+      if [[ -n "$ipv6_host" ]]; then
+        link="hysteria2://$(uri_encode "$password")@${ipv6_host}:${hy2_port}?sni=$(uri_encode "$hy2_sni")&insecure=1&obfs=salamander&obfs-password=$(uri_encode "$hy2_obfs")#$(uri_encode "$ipv6_display_name")"
+        printf '%s（%s）的订阅链接是：%s\n' "$ipv6_display_name" "$name" "$link" >>"$links_file"
+      fi
       cat "$CLIENT_DIR/hysteria2/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
     done < <(jq -r '.protocols.hysteria2.users[]? | [.name, .password] | @tsv' "$STATE_FILE")
@@ -5609,6 +5695,8 @@ configure_hysteria2() {
 node_menu_text() {
   cat <<EOF
 节点地址：$(state_get '.meta.server_address // "-"')
+IPv6 地址：$(state_get 'if (.meta.dual_stack // false) then (.meta.server_address_ipv6 // "-") else "未启用" end')
+网络模式：$(state_get 'if (.meta.dual_stack // false) then "IPv4 / IPv6 双栈" elif ((.meta.server_address // "") | contains(":")) then "IPv6" else "IPv4" end')
 Shadowsocks：$(state_get '.protocols.shadowsocks.enabled')
 VLESS + Reality：$(state_get '.protocols.vless_reality.enabled')
 Hysteria2：$(state_get '.protocols.hysteria2.enabled')
@@ -5618,7 +5706,8 @@ EOF
 }
 
 build_node() {
-  local protocol_choice detected_address server_address
+  local protocol_choice detected_ipv4 detected_ipv6 detected_address server_address
+  local dual_stack=false yesno_status=0
 
   protocol_choice="$(ui_menu "搭建节点" "请选择要搭建的节点协议" \
     "1" "Shadowsocks" \
@@ -5638,10 +5727,26 @@ build_node() {
       ;;
   esac
 
-  detected_address="$(detect_public_address)"
+  detected_ipv4="$(detect_public_ipv4 2>/dev/null || true)"
+  detected_ipv6="$(detect_public_ipv6 2>/dev/null || true)"
+  detected_address="${detected_ipv4:-$detected_ipv6}"
+
+  if [[ -n "$detected_ipv4" && -n "$detected_ipv6" ]]; then
+    if ui_yesno "检测到公网 IPv6：${detected_ipv6}。是否搭建 IPv4 / IPv6 双栈节点？"; then
+      dual_stack=true
+    else
+      yesno_status=$?
+      (( yesno_status == 1 )) || return 1
+    fi
+  fi
+
   server_address="$(prompt_nonempty "节点出口地址" "请输入节点出口 IP 或域名(留空默认使用本机 IP)" "$detected_address")" || return 1
-  state_jq --arg addr "$server_address" --arg ts "$(utc_now)" \
-    '.meta.server_address = $addr | .meta.updated_at = $ts'
+  state_jq --arg addr "$server_address" --arg ipv6 "$detected_ipv6" --argjson dual_stack "$dual_stack" --arg ts "$(utc_now)" '
+    .meta.server_address = $addr |
+    .meta.server_address_ipv6 = (if $dual_stack then $ipv6 else "" end) |
+    .meta.dual_stack = $dual_stack |
+    .meta.updated_at = $ts
+  '
 
   case "$protocol_choice" in
     1)
@@ -5657,13 +5762,23 @@ build_node() {
 }
 
 change_node_address() {
-  local current_address new_address
+  local current_address new_address current_ipv6 new_ipv6 dual_stack
   local vless_server_name handshake_server
 
   current_address="$(state_get '.meta.server_address // ""')"
+  current_ipv6="$(state_get '.meta.server_address_ipv6 // ""')"
+  dual_stack="$(state_get '.meta.dual_stack // false')"
   new_address="$(prompt_nonempty "更改节点地址" "请输入新的节点出口 IP 或域名" "$current_address")" || return 1
+  new_ipv6="$current_ipv6"
+  if [[ "$dual_stack" == "true" ]]; then
+    new_ipv6="$(prompt_nonempty "更改 IPv6 地址" "请输入新的公网 IPv6 地址" "$current_ipv6")" || return 1
+    if ! is_public_ipv6_candidate "$new_ipv6"; then
+      ui_msg "请输入有效的公网 IPv6 地址。"
+      return 1
+    fi
+  fi
 
-  if [[ "$new_address" == "$current_address" ]]; then
+  if [[ "$new_address" == "$current_address" && "$new_ipv6" == "$current_ipv6" ]]; then
     ui_msg "节点地址未发生变化。"
     return 0
   fi
@@ -5671,14 +5786,18 @@ change_node_address() {
   if [[ "$(state_get '.protocols.vless_reality.enabled')" == "true" ]]; then
     vless_server_name="$(state_get '.protocols.vless_reality.server_name')"
     handshake_server="$(state_get '.protocols.vless_reality.handshake_server')"
-    if [[ "$new_address" == "$vless_server_name" || "$new_address" == "$handshake_server" ]]; then
+    if [[ "$new_address" == "$vless_server_name" || "$new_address" == "$handshake_server" ||
+      "$new_ipv6" == "$vless_server_name" || "$new_ipv6" == "$handshake_server" ]]; then
       ui_msg "新的节点地址不能与 VLESS + Reality 的伪装域名相同。"
       return 1
     fi
   fi
 
-  state_jq --arg addr "$new_address" --arg ts "$(utc_now)" \
-    '.meta.server_address = $addr | .meta.updated_at = $ts'
+  state_jq --arg addr "$new_address" --arg ipv6 "$new_ipv6" --arg ts "$(utc_now)" '
+    .meta.server_address = $addr |
+    .meta.server_address_ipv6 = $ipv6 |
+    .meta.updated_at = $ts
+  '
 
   apply_config
 }
@@ -7300,6 +7419,8 @@ show_overview() {
 脚本版本: $SCRIPT_VERSION
 节点名称: ${node_name:-未设置}
 节点地址: ${server_address:-未设置}
+网络模式: $(state_get 'if (.meta.dual_stack // false) then "IPv4 / IPv6 双栈" elif ((.meta.server_address // "") | contains(":")) then "IPv6" else "IPv4" end' 2>/dev/null || printf '未知')
+IPv6 地址: $(state_get 'if (.meta.dual_stack // false) then (.meta.server_address_ipv6 // "未设置") else "未启用" end' 2>/dev/null || printf '未知')
 sing-box 状态: $service_status
 配置文件: $CONFIG_FILE
 客户端导出目录: $CLIENT_DIR

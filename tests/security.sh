@@ -113,6 +113,25 @@ cat >"$STATE_FILE" <<EOF
 EOF
 chmod 0600 "$STATE_FILE"
 
+existing_sources='["198.51.100.10/32","2001:db8::10/128"]'
+added_sources="$(build_allowed_sources_json '198.51.100.20/32, 2001:db8::10/128')"
+merged_sources="$(merge_allowed_sources_json "$existing_sources" "$added_sources")"
+jq -e '
+  length == 3
+  and index("198.51.100.10/32") != null
+  and index("198.51.100.20/32") != null
+  and index("2001:db8::10/128") != null
+' <<<"$merged_sources" >/dev/null || fail "新增 Shadowsocks 白名单来源时覆盖了旧条目或未正确去重"
+remaining_sources="$(remove_allowed_source_json "$merged_sources" '198.51.100.20/32')"
+jq -e '
+  length == 2
+  and index("198.51.100.20/32") == null
+  and index("198.51.100.10/32") != null
+  and index("2001:db8::10/128") != null
+' <<<"$remaining_sources" >/dev/null || fail "删除 Shadowsocks 白名单来源时影响了未选中的条目"
+grep -Fq '管理 Shadowsocks 来源白名单（新增 / 删除）' "$repo_dir/index.sh" ||
+  fail "节点管理未明确区分 Shadowsocks 白名单新增与删除"
+
 (
   curl() {
     case "$1" in

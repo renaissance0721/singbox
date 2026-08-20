@@ -2303,6 +2303,18 @@ build_allowed_sources_json() {
   printf '%s\n' "$sources_json"
 }
 
+merge_allowed_sources_json() {
+  local current_sources=$1 added_sources=$2
+  jq -cn --argjson current "$current_sources" --argjson added "$added_sources" \
+    '$current + $added | unique'
+}
+
+remove_allowed_source_json() {
+  local current_sources=$1 removed_source=$2
+  jq -cn --argjson current "$current_sources" --arg removed "$removed_source" \
+    '$current | map(select(. != $removed))'
+}
+
 realm_prompt_nonempty_limited() {
   local counter_var=$1
   local title=$2
@@ -5585,20 +5597,8 @@ configure_shadowsocks() {
   apply_config
 }
 
-configure_shadowsocks_allowed_sources() {
-  local current_sources sources_input sources_json
-
-  if [[ "$(state_get '.protocols.shadowsocks.enabled')" != "true" ]]; then
-    ui_msg "Shadowsocks 当前未启用。"
-    return 0
-  fi
-
-  current_sources="$(state_get '(.protocols.shadowsocks.allowed_sources // []) | join(",")')"
-  sources_input="$(prompt_nonempty "Shadowsocks 来源白名单" "请输入允许连接此 SS 节点的来源公网 IP。中转场景请填写中转 VPS 的出口 IP，不要填写端口。多个 IP 使用英文逗号分隔。单个 IPv4 地址与 /32 写法效果相同。公网直连需明确填写 0.0.0.0/0 和/或 ::/0。" "$current_sources")" || return 1
-  sources_json="$(build_allowed_sources_json "$sources_input")" || {
-    ui_msg "来源白名单格式无效，请填写 IP 或 CIDR。"
-    return 1
-  }
+apply_shadowsocks_allowed_sources() {
+  local sources_json=$1 success_message=${2:-Shadowsocks 来源白名单已更新并同步到防火墙。}
 
   state_jq --argjson allowed_sources "$sources_json" --arg ts "$(utc_now)" '
     .protocols.shadowsocks.allowed_sources = $allowed_sources |
@@ -5614,7 +5614,91 @@ configure_shadowsocks_allowed_sources() {
     return 1
   fi
   restart_sing_box || return 1
-  ui_msg "Shadowsocks 来源白名单已更新并同步到防火墙。"
+  ui_msg "$success_message"
+}
+
+add_shadowsocks_allowed_sources() {
+  local current_json sources_input added_json merged_json added_display
+
+  if [[ "$(state_get '.protocols.shadowsocks.enabled')" != "true" ]]; then
+    ui_msg "Shadowsocks 当前未启用。"
+    return 0
+  fi
+
+  sources_input="$(prompt_nonempty "新增 Shadowsocks 白名单来源" "请输入要新增的来源公网 IP/CIDR。中转场景请填写中转 VPS 的出口 IP，不要填写端口；多个来源使用英文逗号分隔。此操作只会新增，不会覆盖已有来源。" "")" || return 1
+  added_json="$(build_allowed_sources_json "$sources_input")" || {
+    ui_msg "来源白名单格式无效，请填写 IP 或 CIDR。"
+    return 1
+  }
+  current_json="$(state_get -c '(.protocols.shadowsocks.allowed_sources // [])')"
+  merged_json="$(merge_allowed_sources_json "$current_json" "$added_json")"
+
+  if [[ "$merged_json" == "$current_json" ]]; then
+    ui_msg "输入的来源已在白名单中，未做修改。"
+    return 0
+  fi
+
+  added_display="$(jq -nr --argjson current "$current_json" --argjson added "$added_json" \
+    '$added - $current | join(", ")')"
+  apply_shadowsocks_allowed_sources "$merged_json" "已新增 Shadowsocks 白名单来源：${added_display}。原有来源已保留。"
+}
+
+delete_shadowsocks_allowed_source() {
+  local current_json source_count choice selected_source updated_json
+  local -a sources=()
+  local -a options=()
+  local index
+
+  if [[ "$(state_get '.protocols.shadowsocks.enabled')" != "true" ]]; then
+    ui_msg "Shadowsocks 当前未启用。"
+    return 0
+  fi
+
+  current_json="$(state_get -c '(.protocols.shadowsocks.allowed_sources // [])')"
+  source_count="$(jq -r 'length' <<<"$current_json")"
+  if (( source_count == 0 )); then
+    ui_msg "当前没有显式白名单来源（旧配置为全网放行），没有可删除的条目。请先新增来源以启用限制。"
+    return 0
+  fi
+  if (( source_count == 1 )); then
+    ui_msg "白名单仅剩一条：$(jq -r '.[0]' <<<"$current_json")。为避免删除后变成全网放行，已禁止删除最后一条来源；请先新增替代来源。"
+    return 0
+  fi
+
+  mapfile -t sources < <(jq -r '.[]' <<<"$current_json")
+  for index in "${!sources[@]}"; do
+    options+=("$((index + 1))" "${sources[$index]}")
+  done
+  options+=("0" "返回白名单管理")
+  choice="$(ui_menu "删除 Shadowsocks 白名单来源" "请选择要删除的来源；未选中的来源都会保留。" "${options[@]}")" || return 1
+  [[ "$choice" == "0" ]] && return 0
+
+  selected_source="${sources[$((10#$choice - 1))]}"
+  ui_yesno "确认从 Shadowsocks 白名单删除 ${selected_source}？" || return 0
+  updated_json="$(remove_allowed_source_json "$current_json" "$selected_source")"
+  apply_shadowsocks_allowed_sources "$updated_json" "已删除 Shadowsocks 白名单来源：${selected_source}。其余来源已保留。"
+}
+
+configure_shadowsocks_allowed_sources() {
+  local choice current_sources
+
+  if [[ "$(state_get '.protocols.shadowsocks.enabled')" != "true" ]]; then
+    ui_msg "Shadowsocks 当前未启用。"
+    return 0
+  fi
+
+  while true; do
+    current_sources="$(state_get 'if ((.protocols.shadowsocks.allowed_sources // []) | length) == 0 then "*（旧配置：全网放行）" else (.protocols.shadowsocks.allowed_sources | join(", ")) end')"
+    choice="$(ui_menu "Shadowsocks 来源白名单管理" "当前允许来源：${current_sources}" \
+      "1" "新增来源（保留已有来源）" \
+      "2" "删除来源（逐项选择）" \
+      "0" "返回节点管理")" || return 1
+    case "$choice" in
+      1) add_shadowsocks_allowed_sources || true ;;
+      2) delete_shadowsocks_allowed_source || true ;;
+      0) return 0 ;;
+    esac
+  done
 }
 
 configure_vless_reality() {
@@ -5866,7 +5950,7 @@ node_submenu() {
       "4" "查看订阅链接" \
       "5" "重新生成配置并重载服务" \
       "6" "更改节点地址" \
-      "7" "设置 Shadowsocks 来源白名单" \
+      "7" "管理 Shadowsocks 来源白名单（新增 / 删除）" \
       "8" "设置出站 IPv4 / IPv6 策略" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || continue

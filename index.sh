@@ -1599,6 +1599,7 @@ init_state_file() {
     "server_address": "",
     "server_address_ipv6": "",
     "dual_stack": false,
+    "outbound_ip_preference": "auto",
     "created_at": "$now",
     "updated_at": "$now",
     "log_level": "info"
@@ -1715,6 +1716,7 @@ cleanup_removed_traffic_state() {
     .meta = (.meta // {}) |
     .meta.server_address_ipv6 = (.meta.server_address_ipv6 // "") |
     .meta.dual_stack = (.meta.dual_stack // false) |
+    .meta.outbound_ip_preference = (.meta.outbound_ip_preference // "auto") |
     .protocols.shadowsocks.users = ((.protocols.shadowsocks.users // []) | cleanup_users) |
     .protocols.shadowsocks.allowed_sources = ((.protocols.shadowsocks.allowed_sources // []) | map(select(type == "string")) | unique) |
     .protocols.vless_reality.users = ((.protocols.vless_reality.users // []) | cleanup_users) |
@@ -2498,7 +2500,7 @@ EOF
 validate_state() {
   local errors=""
   local ss_enabled vless_enabled hy2_enabled
-  local server_address server_address_ipv6 dual_stack vless_server_name handshake_server
+  local server_address server_address_ipv6 dual_stack outbound_ip_preference vless_server_name handshake_server
   local split_name split_enabled split_type split_server split_port split_username split_password split_method split_rule_count split_rule ss_source
 
   ss_enabled="$(state_get '.protocols.shadowsocks.enabled')"
@@ -2507,11 +2509,19 @@ validate_state() {
   server_address="$(state_get '.meta.server_address')"
   server_address_ipv6="$(state_get '.meta.server_address_ipv6 // ""')"
   dual_stack="$(state_get '.meta.dual_stack // false')"
+  outbound_ip_preference="$(state_get '.meta.outbound_ip_preference // "auto"')"
 
   [[ -n "$server_address" && "$server_address" != "null" ]] || errors+=$'节点对外地址不能为空。\n'
   if [[ "$dual_stack" == "true" ]] && ! is_public_ipv6_candidate "$server_address_ipv6"; then
     errors+=$'双栈节点缺少有效的公网 IPv6 地址。\n'
   fi
+  case "$outbound_ip_preference" in
+    auto|prefer_ipv4|prefer_ipv6)
+      ;;
+    *)
+      errors+=$'出站 IP 优先级设置无效。\n'
+      ;;
+  esac
 
   if [[ "$ss_enabled" == "true" ]]; then
     [[ "$(state_get '.protocols.shadowsocks.users | length')" -gt 0 ]] || errors+=$'Shadowsocks 至少需要一个客户端。\n'
@@ -2873,7 +2883,7 @@ render_config() {
         (
           if (.protocols.shadowsocks.enabled or .protocols.vless_reality.enabled or .protocols.hysteria2.enabled) then
             [
-              {
+              ({
                 inbound: [
                   if .protocols.shadowsocks.enabled then "ss-in" else empty end,
                   if .protocols.vless_reality.enabled then "vless-reality-in" else empty end,
@@ -2881,7 +2891,13 @@ render_config() {
                 ],
                 action: "resolve",
                 server: "local"
-              },
+              } + (
+                if (.meta.outbound_ip_preference // "auto") == "auto" then
+                  {}
+                else
+                  { strategy: .meta.outbound_ip_preference }
+                end
+              )),
               {
                 inbound: [
                   if .protocols.shadowsocks.enabled then "ss-in" else empty end,
@@ -5692,11 +5708,63 @@ configure_hysteria2() {
   apply_config
 }
 
+outbound_ip_preference_label() {
+  case "$(state_get '.meta.outbound_ip_preference // "auto"' 2>/dev/null || true)" in
+    prefer_ipv4)
+      printf 'IPv4 优先\n'
+      ;;
+    prefer_ipv6)
+      printf 'IPv6 优先\n'
+      ;;
+    *)
+      printf '跟随系统\n'
+      ;;
+  esac
+}
+
+configure_outbound_ip_preference() {
+  local current choice desired previous_state_file
+  current="$(state_get '.meta.outbound_ip_preference // "auto"')"
+
+  choice="$(ui_menu "出站 IP 优先级" "当前设置：$(outbound_ip_preference_label)。该设置只影响 VPS 访问目标域名时的 IPv4 / IPv6 选择，不影响客户端连接节点所用的地址。" \
+    "1" "IPv4 优先（目标无 IPv4 时使用 IPv6）" \
+    "2" "IPv6 优先（目标无 IPv6 时使用 IPv4）" \
+    "3" "跟随系统默认顺序" \
+    "0" "返回")" || return 1
+
+  case "$choice" in
+    1) desired="prefer_ipv4" ;;
+    2) desired="prefer_ipv6" ;;
+    3) desired="auto" ;;
+    0) return 0 ;;
+    *)
+      ui_msg "无效选项，请重新选择。"
+      return 1
+      ;;
+  esac
+
+  if [[ "$desired" == "$current" ]]; then
+    ui_msg "出站 IP 优先级未发生变化。"
+    return 0
+  fi
+
+  previous_state_file="$(snapshot_sing_box_state_file)" || {
+    ui_msg "无法创建节点状态快照，未修改出站 IP 优先级。"
+    return 1
+  }
+  state_jq --arg preference "$desired" --arg ts "$(utc_now)" '
+    .meta.outbound_ip_preference = $preference |
+    .meta.updated_at = $ts
+  '
+  apply_sing_box_state_transaction "$previous_state_file" "出站 IP 优先级变更"
+}
+
 node_menu_text() {
   cat <<EOF
 节点地址：$(state_get '.meta.server_address // "-"')
 IPv6 地址：$(state_get 'if (.meta.dual_stack // false) then (.meta.server_address_ipv6 // "-") else "未启用" end')
 网络模式：$(state_get 'if (.meta.dual_stack // false) then "IPv4 / IPv6 双栈" elif ((.meta.server_address // "") | contains(":")) then "IPv6" else "IPv4" end')
+出站访问：$(outbound_ip_preference_label)
 Shadowsocks：$(state_get '.protocols.shadowsocks.enabled')
 VLESS + Reality：$(state_get '.protocols.vless_reality.enabled')
 Hysteria2：$(state_get '.protocols.hysteria2.enabled')
@@ -5815,6 +5883,7 @@ node_submenu() {
       "5" "重新生成配置并重载服务" \
       "6" "更改节点地址" \
       "7" "设置 Shadowsocks 来源白名单" \
+      "8" "设置出站 IPv4 / IPv6 优先级" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || continue
 
@@ -5839,6 +5908,9 @@ node_submenu() {
         ;;
       7)
         configure_shadowsocks_allowed_sources || true
+        ;;
+      8)
+        configure_outbound_ip_preference || true
         ;;
       0)
         return 0
@@ -7421,6 +7493,7 @@ show_overview() {
 节点地址: ${server_address:-未设置}
 网络模式: $(state_get 'if (.meta.dual_stack // false) then "IPv4 / IPv6 双栈" elif ((.meta.server_address // "") | contains(":")) then "IPv6" else "IPv4" end' 2>/dev/null || printf '未知')
 IPv6 地址: $(state_get 'if (.meta.dual_stack // false) then (.meta.server_address_ipv6 // "未设置") else "未启用" end' 2>/dev/null || printf '未知')
+出站访问: $(outbound_ip_preference_label 2>/dev/null || printf '未知')
 sing-box 状态: $service_status
 配置文件: $CONFIG_FILE
 客户端导出目录: $CLIENT_DIR

@@ -162,6 +162,22 @@ test_build_node_dual_stack() {
 }
 (test_build_node_dual_stack)
 
+test_configure_outbound_ip_preference() {
+  local STATE_FILE="$test_root/outbound-preference-state.json"
+  install -m 0600 "$test_root/state/state.json" "$STATE_FILE"
+
+  ui_menu() {
+    [[ "$*" == *"IPv6 优先"* ]] || fail "节点管理缺少 IPv6 优先选项"
+    printf '2\n'
+  }
+  apply_sing_box_state_transaction() { rm -f "$1"; return 0; }
+
+  configure_outbound_ip_preference || fail "节点管理无法设置 IPv6 优先"
+  [[ "$(state_get '.meta.outbound_ip_preference')" == "prefer_ipv6" ]] ||
+    fail "节点管理未保存 IPv6 优先设置"
+}
+(test_configure_outbound_ip_preference)
+
 rendered="$test_root/rendered.json"
 render_config >"$rendered"
 if [[ -n "${SBOX_TEST_RENDERED_CONFIG:-}" ]]; then
@@ -172,8 +188,22 @@ jq -e '
   and ([.route.rules[] | select(.action == "reject" and ((.inbound // []) | index("vless-reality-in")) and .ip_is_private == true)] | length) == 2
   and ([.route.rules[] | select(.action == "reject" and ((.inbound // []) | index("vless-reality-in")) and ((.ip_cidr // []) | index("169.254.169.254/32")))] | length) == 2
   and ([.route.rules[] | select(.action == "resolve" and ((.inbound // []) | index("vless-reality-in")))] | length) == 1
+  and ([.route.rules[] | select(.action == "resolve") | has("strategy")] == [false])
   and .route.final == "direct"
 ' "$rendered" >/dev/null || fail "VLESS 私网/元数据两阶段阻断规则缺失"
+
+preference_rendered="$test_root/preference-rendered.json"
+state_jq '.meta.outbound_ip_preference = "prefer_ipv6"'
+render_config >"$preference_rendered"
+jq -e '
+  [.route.rules[] | select(.action == "resolve") | .strategy] == ["prefer_ipv6"]
+' "$preference_rendered" >/dev/null || fail "IPv6 优先设置未写入域名解析规则"
+state_jq '.meta.outbound_ip_preference = "prefer_ipv4"'
+render_config >"$preference_rendered"
+jq -e '
+  [.route.rules[] | select(.action == "resolve") | .strategy] == ["prefer_ipv4"]
+' "$preference_rendered" >/dev/null || fail "IPv4 优先设置未写入域名解析规则"
+state_jq '.meta.outbound_ip_preference = "auto"'
 
 state_jq '
   .routing.split.outbounds = [

@@ -2516,10 +2516,10 @@ validate_state() {
     errors+=$'双栈节点缺少有效的公网 IPv6 地址。\n'
   fi
   case "$outbound_ip_preference" in
-    auto|prefer_ipv4|prefer_ipv6)
+    auto|prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only)
       ;;
     *)
-      errors+=$'出站 IP 优先级设置无效。\n'
+      errors+=$'出站 IPv4 / IPv6 策略设置无效。\n'
       ;;
   esac
 
@@ -5321,20 +5321,13 @@ apply_current_realm_state() {
 }
 
 write_client_exports() {
-  local all_file server_address server_address_ipv6 host ipv6_host links_file node_name link display_name ipv6_display_name
+  local all_file server_address host links_file node_name link display_name
   all_file="$CLIENT_DIR/all-clients.txt"
   server_address="$(state_get '.meta.server_address')"
   host="$(format_uri_host "$server_address")"
-  server_address_ipv6="$(state_get '.meta.server_address_ipv6 // ""')"
-  ipv6_host=""
-  if [[ "$(state_get '.meta.dual_stack // false')" == "true" ]] &&
-    is_public_ipv6_candidate "$server_address_ipv6"; then
-    ipv6_host="$(format_uri_host "$server_address_ipv6")"
-  fi
   node_name="$(state_get '.meta.node_name')"
   links_file="$(direct_links_file)"
   display_name="${node_name:-我的节点}"
-  ipv6_display_name="${display_name}-IPv6"
 
   : >"$all_file"
   : >"$links_file"
@@ -5362,10 +5355,6 @@ EOF
       # Shadowrocket compatibility: encode method:password as one Base64URL userinfo token.
       link="ss://$(base64_urlsafe "${ss_method}:${ss_share_password}")@${host}:${ss_port}#$(uri_encode "$display_name")"
       printf '%s（%s）的订阅链接是：%s\n' "$display_name" "$name" "$link" >>"$links_file"
-      if [[ -n "$ipv6_host" ]]; then
-        link="ss://$(base64_urlsafe "${ss_method}:${ss_share_password}")@${ipv6_host}:${ss_port}#$(uri_encode "$ipv6_display_name")"
-        printf '%s（%s）的订阅链接是：%s\n' "$ipv6_display_name" "$name" "$link" >>"$links_file"
-      fi
       cat "$CLIENT_DIR/shadowsocks/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
     done < <(jq -r '.protocols.shadowsocks.users[]? | [.name, .password] | @tsv' "$STATE_FILE")
@@ -5394,10 +5383,6 @@ transport = tcp
 EOF
       link="vless://${uuid}@${host}:${vless_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(uri_encode "$vless_server_name")&fp=chrome&pbk=$(uri_encode "$vless_public_key")&sid=$(uri_encode "$vless_short_id")&alpn=$(uri_encode "h2,http/1.1")&type=tcp&headerType=none#$(uri_encode "$display_name")"
       printf '%s（%s）的订阅链接是：%s\n' "$display_name" "$name" "$link" >>"$links_file"
-      if [[ -n "$ipv6_host" ]]; then
-        link="vless://${uuid}@${ipv6_host}:${vless_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(uri_encode "$vless_server_name")&fp=chrome&pbk=$(uri_encode "$vless_public_key")&sid=$(uri_encode "$vless_short_id")&alpn=$(uri_encode "h2,http/1.1")&type=tcp&headerType=none#$(uri_encode "$ipv6_display_name")"
-        printf '%s（%s）的订阅链接是：%s\n' "$ipv6_display_name" "$name" "$link" >>"$links_file"
-      fi
       cat "$CLIENT_DIR/vless-reality/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
     done < <(jq -r '.protocols.vless_reality.users[]? | [.name, .uuid] | @tsv' "$STATE_FILE")
@@ -5424,10 +5409,6 @@ obfs_password = $hy2_obfs
 EOF
       link="hysteria2://$(uri_encode "$password")@${host}:${hy2_port}?sni=$(uri_encode "$hy2_sni")&insecure=1&obfs=salamander&obfs-password=$(uri_encode "$hy2_obfs")#$(uri_encode "$display_name")"
       printf '%s（%s）的订阅链接是：%s\n' "$display_name" "$name" "$link" >>"$links_file"
-      if [[ -n "$ipv6_host" ]]; then
-        link="hysteria2://$(uri_encode "$password")@${ipv6_host}:${hy2_port}?sni=$(uri_encode "$hy2_sni")&insecure=1&obfs=salamander&obfs-password=$(uri_encode "$hy2_obfs")#$(uri_encode "$ipv6_display_name")"
-        printf '%s（%s）的订阅链接是：%s\n' "$ipv6_display_name" "$name" "$link" >>"$links_file"
-      fi
       cat "$CLIENT_DIR/hysteria2/${name}.txt" >>"$all_file"
       printf '\n' >>"$all_file"
     done < <(jq -r '.protocols.hysteria2.users[]? | [.name, .password] | @tsv' "$STATE_FILE")
@@ -5716,6 +5697,12 @@ outbound_ip_preference_label() {
     prefer_ipv6)
       printf 'IPv6 优先\n'
       ;;
+    ipv4_only)
+      printf '禁用 IPv6（仅 IPv4）\n'
+      ;;
+    ipv6_only)
+      printf '禁用 IPv4（仅 IPv6）\n'
+      ;;
     *)
       printf '跟随系统\n'
       ;;
@@ -5726,16 +5713,20 @@ configure_outbound_ip_preference() {
   local current choice desired previous_state_file
   current="$(state_get '.meta.outbound_ip_preference // "auto"')"
 
-  choice="$(ui_menu "出站 IP 优先级" "当前设置：$(outbound_ip_preference_label)。该设置只影响 VPS 访问目标域名时的 IPv4 / IPv6 选择，不影响客户端连接节点所用的地址。" \
+  choice="$(ui_menu "出站 IPv4 / IPv6 策略" "当前设置：$(outbound_ip_preference_label)。该设置只影响 VPS 访问目标域名时的 IPv4 / IPv6 选择，不影响客户端连接节点所用的地址。" \
     "1" "IPv4 优先（目标无 IPv4 时使用 IPv6）" \
     "2" "IPv6 优先（目标无 IPv6 时使用 IPv4）" \
-    "3" "跟随系统默认顺序" \
+    "3" "禁用 IPv4（仅使用 IPv6）" \
+    "4" "禁用 IPv6（仅使用 IPv4）" \
+    "5" "跟随系统默认顺序" \
     "0" "返回")" || return 1
 
   case "$choice" in
     1) desired="prefer_ipv4" ;;
     2) desired="prefer_ipv6" ;;
-    3) desired="auto" ;;
+    3) desired="ipv6_only" ;;
+    4) desired="ipv4_only" ;;
+    5) desired="auto" ;;
     0) return 0 ;;
     *)
       ui_msg "无效选项，请重新选择。"
@@ -5744,19 +5735,19 @@ configure_outbound_ip_preference() {
   esac
 
   if [[ "$desired" == "$current" ]]; then
-    ui_msg "出站 IP 优先级未发生变化。"
+    ui_msg "出站 IPv4 / IPv6 策略未发生变化。"
     return 0
   fi
 
   previous_state_file="$(snapshot_sing_box_state_file)" || {
-    ui_msg "无法创建节点状态快照，未修改出站 IP 优先级。"
+    ui_msg "无法创建节点状态快照，未修改出站 IPv4 / IPv6 策略。"
     return 1
   }
   state_jq --arg preference "$desired" --arg ts "$(utc_now)" '
     .meta.outbound_ip_preference = $preference |
     .meta.updated_at = $ts
   '
-  apply_sing_box_state_transaction "$previous_state_file" "出站 IP 优先级变更"
+  apply_sing_box_state_transaction "$previous_state_file" "出站 IPv4 / IPv6 策略变更"
 }
 
 node_menu_text() {
@@ -5775,7 +5766,7 @@ EOF
 
 build_node() {
   local protocol_choice detected_ipv4 detected_ipv6 detected_address server_address
-  local dual_stack=false yesno_status=0
+  local dual_stack=false
 
   protocol_choice="$(ui_menu "搭建节点" "请选择要搭建的节点协议" \
     "1" "Shadowsocks" \
@@ -5799,14 +5790,7 @@ build_node() {
   detected_ipv6="$(detect_public_ipv6 2>/dev/null || true)"
   detected_address="${detected_ipv4:-$detected_ipv6}"
 
-  if [[ -n "$detected_ipv4" && -n "$detected_ipv6" ]]; then
-    if ui_yesno "检测到公网 IPv6：${detected_ipv6}。是否搭建 IPv4 / IPv6 双栈节点？"; then
-      dual_stack=true
-    else
-      yesno_status=$?
-      (( yesno_status == 1 )) || return 1
-    fi
-  fi
+  [[ -n "$detected_ipv4" && -n "$detected_ipv6" ]] && dual_stack=true
 
   server_address="$(prompt_nonempty "节点出口地址" "请输入节点出口 IP 或域名(留空默认使用本机 IP)" "$detected_address")" || return 1
   state_jq --arg addr "$server_address" --arg ipv6 "$detected_ipv6" --argjson dual_stack "$dual_stack" --arg ts "$(utc_now)" '
@@ -5883,7 +5867,7 @@ node_submenu() {
       "5" "重新生成配置并重载服务" \
       "6" "更改节点地址" \
       "7" "设置 Shadowsocks 来源白名单" \
-      "8" "设置出站 IPv4 / IPv6 优先级" \
+      "8" "设置出站 IPv4 / IPv6 策略" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || continue
 

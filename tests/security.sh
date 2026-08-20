@@ -135,23 +135,20 @@ test_build_node_dual_stack() {
   detect_public_ipv4() { printf '198.51.100.21\n'; }
   detect_public_ipv6() { printf '2001:4860:4860::21\n'; }
   ui_menu() { printf '1\n'; }
-  ui_yesno() {
-    [[ "$1" == *"是否搭建 IPv4 / IPv6 双栈节点"* ]]
-  }
+  ui_yesno() { fail "检测到双栈时不应再询问是否启用"; }
   prompt_nonempty() { printf '%s\n' "$3"; }
   configure_shadowsocks() { normalize_protocol_listen_addresses; }
 
-  build_node || fail "确认双栈后新建节点失败"
+  build_node || fail "自动搭建双栈节点失败"
   jq -e '
     .meta.server_address == "198.51.100.21"
     and .meta.server_address_ipv6 == "2001:4860:4860::21"
     and .meta.dual_stack == true
     and ([.protocols[] | .listen == "::"] | all)
-  ' "$STATE_FILE" >/dev/null || fail "确认双栈后未保存双栈地址或监听配置"
+  ' "$STATE_FILE" >/dev/null || fail "检测到双栈后未自动保存双栈地址或监听配置"
 
   install -m 0600 "$test_root/state/state.json" "$STATE_FILE"
   detect_public_ipv6() { return 1; }
-  ui_yesno() { fail "未检测到公网 IPv6 时不应询问双栈"; }
   build_node || fail "仅检测到 IPv4 时新建节点失败"
   jq -e '
     .meta.server_address == "198.51.100.21"
@@ -167,7 +164,8 @@ test_configure_outbound_ip_preference() {
   install -m 0600 "$test_root/state/state.json" "$STATE_FILE"
 
   ui_menu() {
-    [[ "$*" == *"IPv6 优先"* ]] || fail "节点管理缺少 IPv6 优先选项"
+    [[ "$*" == *"IPv6 优先"* && "$*" == *"禁用 IPv4"* && "$*" == *"禁用 IPv6"* ]] ||
+      fail "节点管理缺少 IPv4/IPv6 优先或禁用选项"
     printf '2\n'
   }
   apply_sing_box_state_transaction() { rm -f "$1"; return 0; }
@@ -203,6 +201,16 @@ render_config >"$preference_rendered"
 jq -e '
   [.route.rules[] | select(.action == "resolve") | .strategy] == ["prefer_ipv4"]
 ' "$preference_rendered" >/dev/null || fail "IPv4 优先设置未写入域名解析规则"
+state_jq '.meta.outbound_ip_preference = "ipv6_only"'
+render_config >"$preference_rendered"
+jq -e '
+  [.route.rules[] | select(.action == "resolve") | .strategy] == ["ipv6_only"]
+' "$preference_rendered" >/dev/null || fail "禁用 IPv4 设置未写入域名解析规则"
+state_jq '.meta.outbound_ip_preference = "ipv4_only"'
+render_config >"$preference_rendered"
+jq -e '
+  [.route.rules[] | select(.action == "resolve") | .strategy] == ["ipv4_only"]
+' "$preference_rendered" >/dev/null || fail "禁用 IPv6 设置未写入域名解析规则"
 state_jq '.meta.outbound_ip_preference = "auto"'
 
 state_jq '
@@ -350,10 +358,12 @@ state_jq '
 normalize_protocol_listen_addresses
 [[ "$(default_listen_address)" == "::" ]] || fail "双栈节点未使用 IPv6 通配监听"
 write_client_exports
-grep -Fq '@[2001:4860:4860::22]:24443' "$CLIENT_DIR/direct-links.txt" ||
-  fail "双栈节点未生成合法的 IPv6 订阅链接"
-grep -Fq 'security-test-IPv6' "$CLIENT_DIR/direct-links.txt" ||
-  fail "IPv6 订阅链接缺少可区分的节点名称"
+grep -Fq '@203.0.113.10:24443' "$CLIENT_DIR/direct-links.txt" ||
+  fail "双栈节点缺少主地址订阅链接"
+if grep -Fq '2001:4860:4860::22' "$CLIENT_DIR/direct-links.txt" ||
+  grep -Fq 'security-test-IPv6' "$CLIENT_DIR/direct-links.txt"; then
+  fail "双栈节点仍生成了额外的 IPv6 订阅链接"
+fi
 state_jq '
   .meta.dual_stack = false |
   .meta.server_address_ipv6 = ""

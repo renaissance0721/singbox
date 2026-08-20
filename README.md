@@ -404,7 +404,7 @@ apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc core
 ## 安全提醒
 
 - 请在你拥有管理权限的服务器上使用本脚本
-- 一键安装命令会以 root 权限执行 `main` 分支上的 `install.sh`；安装器会校验随后下载的 `index.sh`，但无法反过来验证自身，安全敏感环境应先克隆仓库并审查安装器
+- 一键安装命令会以 root 权限执行 `main` 分支上的 `install.sh`；安装器会拒绝空文件和 Bash 语法错误，但不再绑定 `index.sh` 固定哈希，安全敏感环境应先克隆仓库并审查代码
 - 对外分享客户端配置前，请确认端口、域名、证书和密码都已按预期生成
 - 来源白名单只限制 Shadowsocks 入站来源；VLESS 和 Hysteria2 仍依赖各自的认证信息
 - 私网、链路本地地址和元数据阻断应用于 Shadowsocks、VLESS 与 Hysteria2 全部代理入站

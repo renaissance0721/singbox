@@ -9,7 +9,6 @@ REPO_BRANCH="${REPO_BRANCH:-main}"
 TARGET_PATH="${TARGET_PATH:-/usr/local/bin/sbox}"
 LEGACY_PATH="/usr/local/bin/singbox-manager"
 INDEX_URL="${INDEX_URL:-https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/index.sh}"
-EXPECTED_INDEX_SHA256="b8a0727d0ad4094d8f9230fe8e95b9a00bc826b38149dcaef526d80334663114"
 INSTALL_COMMAND=""
 SCRIPT_DIR=""
 INSTALLER_SOURCE=""
@@ -45,17 +44,6 @@ download_script() {
     wget -qO "$destination" "$INDEX_URL"
   else
     die "未检测到 curl 或 wget，无法下载 index.sh。"
-  fi
-}
-
-sha256_file() {
-  local file=$1
-  if have_cmd sha256sum; then
-    sha256sum "$file" | awk '{print tolower($1)}'
-  elif have_cmd openssl; then
-    openssl dgst -sha256 "$file" | awk '{print tolower($NF)}'
-  else
-    die "缺少 sha256sum 或 openssl，无法验证管理脚本完整性。"
   fi
 }
 
@@ -129,10 +117,7 @@ else
   download_script "$DOWNLOAD_TMP"
 fi
 
-actual_sha256="$(sha256_file "$DOWNLOAD_TMP")"
-[[ "$EXPECTED_INDEX_SHA256" =~ ^[A-Fa-f0-9]{64}$ ]] || die "安装器内置的 index.sh 哈希无效。"
-[[ "$actual_sha256" == "${EXPECTED_INDEX_SHA256,,}" ]] ||
-  die "index.sh 完整性校验失败；期望 ${EXPECTED_INDEX_SHA256,,}，实际 ${actual_sha256}。"
+[[ -s "$DOWNLOAD_TMP" ]] || die "下载的 index.sh 为空，已拒绝安装。"
 bash -n "$DOWNLOAD_TMP" || die "index.sh Bash 语法检查失败，已拒绝安装。"
 
 install -d -m 0755 "$(dirname "$TARGET_PATH")"

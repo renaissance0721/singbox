@@ -1186,8 +1186,10 @@ if [[ "${SBOX_TEST_REMOTE_UPDATE:-0}" == "1" ]]; then
   rm -rf -- "$(dirname "$remote_project")"
 fi
 
-expected_hash="$(sed -n 's/^EXPECTED_INDEX_SHA256="\([A-Fa-f0-9]\{64\}\)"$/\1/p' "$repo_dir/install.sh")"
-actual_hash="$(sha256sum "$repo_dir/index.sh" | awk '{print tolower($1)}')"
-[[ -n "$expected_hash" && "${expected_hash,,}" == "$actual_hash" ]] || fail "install.sh 内置 index.sh 哈希不匹配"
+if grep -q 'EXPECTED_INDEX_SHA256\|index.sh 完整性校验失败' "$repo_dir/install.sh"; then
+  fail "install.sh 仍使用需要手动同步的固定 index.sh 哈希"
+fi
+grep -Fq '[[ -s "$DOWNLOAD_TMP" ]]' "$repo_dir/install.sh" || fail "install.sh 未拒绝空的 index.sh"
+grep -Fq 'bash -n "$DOWNLOAD_TMP"' "$repo_dir/install.sh" || fail "install.sh 未检查 index.sh Bash 语法"
 
 printf '[security-test] all checks passed\n'

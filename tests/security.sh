@@ -767,7 +767,9 @@ test_dpkg_lock_wait_timeout ||
   fail "dpkg 软件包锁等待超时未安全退出"
 
 test_wireguard_dpkg_repair_failure() (
-  local apt_calls=0
+  local wireguard_apt_call_count=0
+  # PKG_MANAGER is consumed indirectly by install_wireguard_tools.
+  # shellcheck disable=SC2034
   detect_pkg_manager() { PKG_MANAGER="apt"; }
   have_cmd() {
     case "$1" in
@@ -777,12 +779,12 @@ test_wireguard_dpkg_repair_failure() (
     esac
   }
   dpkg() { return 1; }
-  apt-get() { apt_calls=$((apt_calls + 1)); }
+  apt-get() { wireguard_apt_call_count=$((wireguard_apt_call_count + 1)); }
 
   if install_wireguard_tools >/dev/null 2>&1; then
     return 1
   fi
-  (( apt_calls == 0 ))
+  (( wireguard_apt_call_count == 0 ))
 )
 test_wireguard_dpkg_repair_failure ||
   fail "dpkg 状态恢复失败后仍继续调用 APT"
@@ -1191,5 +1193,137 @@ if grep -q 'EXPECTED_INDEX_SHA256\|index.sh 完整性校验失败' "$repo_dir/in
 fi
 grep -Fq '[[ -s "$DOWNLOAD_TMP" ]]' "$repo_dir/install.sh" || fail "install.sh 未拒绝空的 index.sh"
 grep -Fq 'bash -n "$DOWNLOAD_TMP"' "$repo_dir/install.sh" || fail "install.sh 未检查 index.sh Bash 语法"
+
+(
+  STATE_FILE="$test_root/xray-render-state.json"
+  jq --arg private_key "$reality_private_key" '
+    .protocols.shadowsocks.enabled = false |
+    .protocols.hysteria2.enabled = false |
+    .protocols.vless_reality.enabled = true |
+    .protocols.vless_reality.core = "xray" |
+    .protocols.vless_reality.port = 24443 |
+    .protocols.vless_reality.server_name = "www.example.com" |
+    .protocols.vless_reality.handshake_server = "www.example.com" |
+    .protocols.vless_reality.handshake_port = 443 |
+    .protocols.vless_reality.private_key = $private_key |
+    .protocols.vless_reality.public_key = "test-public-key" |
+    .protocols.vless_reality.short_id = "0123456789abcdef" |
+    .protocols.vless_reality.users = [{name:"vless-client-1", uuid:"00000000-0000-4000-8000-000000000001"}] |
+    .meta.outbound_ip_preference = "prefer_ipv4" |
+    .routing.split.outbounds = []
+  ' "$test_root/state/state.json" >"$STATE_FILE"
+
+  sing_rendered="$test_root/xray-sing-box-rendered.json"
+  xray_rendered="$test_root/xray-rendered.json"
+  render_config >"$sing_rendered"
+  render_xray_config >"$xray_rendered"
+  if [[ -n "${SBOX_TEST_XRAY_RENDERED_CONFIG:-}" ]]; then
+    cp "$xray_rendered" "$SBOX_TEST_XRAY_RENDERED_CONFIG"
+  fi
+
+  jq -e '
+    [.inbounds[]? | select(.tag == "vless-reality-in")] | length == 0
+  ' "$sing_rendered" >/dev/null || fail "Xray 模式仍把 VLESS 写入 sing-box，可能导致双内核抢占端口"
+  jq -e '
+    .inbounds[0].protocol == "vless"
+    and .inbounds[0].settings.decryption == "none"
+    and .inbounds[0].settings.clients[0].flow == "xtls-rprx-vision"
+    and .inbounds[0].streamSettings.network == "raw"
+    and .inbounds[0].streamSettings.security == "reality"
+    and .inbounds[0].streamSettings.realitySettings.target == "www.example.com:443"
+    and .inbounds[0].streamSettings.realitySettings.shortIds == ["0123456789abcdef"]
+    and .outbounds[0].settings.domainStrategy == "UseIPv4v6"
+    and ([.routing.rules[] | select(.outboundTag == "block") | .ip[]] | index("10.0.0.0/8")) != null
+    and ([.routing.rules[] | select(.outboundTag == "block") | .ip[]] | index("fc00::/7")) != null
+    and ([.routing.rules[] | select(.outboundTag == "block") | .ip[]] | index("100.100.100.200/32")) != null
+  ' "$xray_rendered" >/dev/null || fail "Xray VLESS + Reality 配置缺少必要字段、出站策略或私网/元数据阻断"
+  [[ "$(sing_box_protocol_count)" == "0" ]] || fail "Xray-only VLESS 被错误计入 sing-box 协议数"
+  xray_protocol_enabled || fail "Xray VLESS 状态未被识别"
+  [[ "$(desired_xray_listeners)" == $'tcp\t24443\tVLESS + Reality (Xray)' ]] || fail "Xray 监听端口未进入统一端口管理"
+)
+
+(
+  STATE_FILE="$test_root/xray-migration-state.json"
+  jq 'del(.protocols.vless_reality.core, .runtime)' "$test_root/state/state.json" >"$STATE_FILE"
+  migrate_state_schema
+  jq -e '
+    .protocols.vless_reality.core == "sing-box"
+    and .runtime.xray.managed == false
+    and .runtime.xray.version == ""
+    and .runtime.xray.binary_sha256 == ""
+  ' "$STATE_FILE" >/dev/null || fail "旧状态未安全迁移到 sing-box 默认内核或缺少 Xray 安装记录"
+)
+
+(
+  XRAY_BIN="$test_root/fake-xray"
+  printf '#!/usr/bin/env sh\nexit 0\n' >"$XRAY_BIN"
+  chmod 0755 "$XRAY_BIN"
+  run_as_runtime() {
+    printf 'PrivateKey: test-private\nPassword: test-public\nHash32: ignored\n'
+  }
+  [[ "$(generate_reality_keypair xray)" == $'test-private\ttest-public' ]] ||
+    fail "Xray 新版 x25519 Password 公钥输出未被兼容解析"
+  run_as_runtime() {
+    printf 'PrivateKey: legacy-private\nPublicKey: legacy-public\n'
+  }
+  [[ "$(generate_reality_keypair xray)" == $'legacy-private\tlegacy-public' ]] ||
+    fail "Xray 旧版 x25519 PublicKey 输出未被兼容解析"
+)
+
+grep -Fq 'https://api.github.com/repos/XTLS/Xray-core/releases/latest' "$repo_dir/index.sh" ||
+  fail "Xray 安装未限定官方 latest stable API"
+grep -Fq 'select(.draft == false and .prerelease == false)' "$repo_dir/index.sh" ||
+  fail "Xray 安装未拒绝 draft/prerelease"
+grep -Fq 'Xray 发布包 SHA-256 校验失败' "$repo_dir/index.sh" ||
+  fail "Xray 安装缺少失败关闭的 SHA-256 校验"
+grep -Fq 'run -test -config "$tmp_xray_config"' "$repo_dir/index.sh" ||
+  fail "替换 Xray 配置前未调用内核预检"
+grep -Fq 'XRAY_BIN="${XRAY_BIN:-$XRAY_INSTALL_DIR/xray}"' "$repo_dir/index.sh" ||
+  fail "Xray 未使用隔离的脚本托管路径"
+if grep -Eq 'curl[^\n|]*\|[[:space:]]*(ba)?sh' "$repo_dir/index.sh"; then
+  fail "Xray 或其他安装流程仍会把远程内容直接传给 shell"
+fi
+
+(
+  XRAY_BIN="$test_root/service-xray"
+  XRAY_CONFIG_FILE="$test_root/service-xray-config.json"
+  XRAY_ASSET_DIR="$test_root/service-xray-assets"
+  XRAY_OPENRC_SERVICE_FILE="$test_root/sbox-xray.init"
+  # Consumed indirectly while ensure_xray_service renders the init script.
+  # shellcheck disable=SC2034
+  XRAY_OPENRC_LOG_FILE="$test_root/sbox-xray.log"
+  printf '#!/usr/bin/env sh\nexit 0\n' >"$XRAY_BIN"
+  chmod 0755 "$XRAY_BIN"
+  sing_box_service_manager() { printf 'openrc\n'; }
+  ensure_runtime_account() { :; }
+  ensure_dirs() { mkdir -p "$XRAY_ASSET_DIR"; }
+  ensure_openrc_low_port_capability() { :; }
+  ensure_xray_service || fail "无法生成 Xray OpenRC 服务"
+  bash -n "$XRAY_OPENRC_SERVICE_FILE" || fail "Xray OpenRC 服务脚本语法无效"
+  grep -Fq 'command_user="sbox-runtime:sbox-runtime"' "$XRAY_OPENRC_SERVICE_FILE" ||
+    fail "Xray OpenRC 服务未使用低权限账户"
+  grep -Fq 'export XRAY_LOCATION_ASSET=' "$XRAY_OPENRC_SERVICE_FILE" ||
+    fail "Xray OpenRC 服务未固定资源目录"
+)
+
+(
+  XRAY_BIN="$test_root/service-xray"
+  # Consumed indirectly while ensure_xray_service renders the unit.
+  # shellcheck disable=SC2034
+  XRAY_CONFIG_FILE="$test_root/service-xray-config.json"
+  XRAY_ASSET_DIR="$test_root/service-xray-assets"
+  XRAY_SYSTEMD_SERVICE_FILE="$test_root/sbox-xray.service"
+  sing_box_service_manager() { printf 'systemd\n'; }
+  ensure_runtime_account() { :; }
+  ensure_dirs() { :; }
+  systemctl() { :; }
+  ensure_xray_service || fail "无法生成 Xray systemd 服务"
+  grep -Fq 'User=sbox-runtime' "$XRAY_SYSTEMD_SERVICE_FILE" || fail "Xray systemd 服务未使用低权限账户"
+  grep -Fq 'NoNewPrivileges=true' "$XRAY_SYSTEMD_SERVICE_FILE" || fail "Xray systemd 服务缺少 NoNewPrivileges"
+  grep -Fq 'CapabilityBoundingSet=CAP_NET_BIND_SERVICE' "$XRAY_SYSTEMD_SERVICE_FILE" ||
+    fail "Xray systemd 服务权限范围过宽或缺少低端口能力"
+  grep -Fq 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6' "$XRAY_SYSTEMD_SERVICE_FILE" ||
+    fail "Xray systemd 服务未限制地址族"
+)
 
 printf '[security-test] all checks passed\n'

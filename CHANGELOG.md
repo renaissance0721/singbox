@@ -12,6 +12,8 @@
 
 ### 新增
 
+- VLESS + Reality 新增 Xray-core / sing-box 内核选择；Xray 首次选用时按架构下载官方最新稳定版，两个内核共用端口、用户、Reality 参数和分享链接
+- 新增脚本隔离的 `sbox-xray` systemd/OpenRC 服务、Xray 配置渲染、日志/状态展示及旧 VLESS 状态自动迁移
 - 节点管理新增出站 IPv4 / IPv6 策略设置，支持 IPv4 优先、IPv6 优先、禁用 IPv4、禁用 IPv6 及跟随系统，并在应用失败时自动恢复原设置
 - 新建节点时分别探测公网 IPv4 与 IPv6；检测到双栈网络后自动启用双栈监听，客户端仅生成一个主地址链接，不再额外生成 IPv6 节点
 - 主菜单新增“一键常用脚本”，可直接运行 NodeQuality、TcpQuality、Tcpfit、流媒体解锁和 IP 质量体检
@@ -21,6 +23,9 @@
 
 ### 变更
 
+- Xray 只承载选择 Xray 内核的 VLESS；Shadowsocks/Hysteria2 仍由 sing-box 承载，两个服务可在不同端口共存
+- 配置应用改为分别预检 sing-box/Xray，统一停止托管服务检查端口，任一核心启动失败时恢复两份原配置和原服务状态
+- 管理脚本更新、客户端增删和配置重载不会隐式升级 Xray；已安装版本及二进制 SHA-256 会写入状态并在后续使用前核对
 - Shadowsocks 来源白名单改为独立的新增与删除操作；新增来源不再覆盖原列表，删除时逐项选择，并禁止删除最后一条以避免意外全网放行
 - 旧 Realm 规则自动迁移为 `direct`，不会因升级改变原转发路径
 - WireGuard 与 Realm 安装生命周期解耦；落地端进入隧道菜单不会被强制安装 Realm
@@ -40,6 +45,8 @@
 
 ### 安全
 
+- Xray 下载仅接受 XTLS 官方 `releases/latest` 的非 draft/非 prerelease 固定命名资产，要求官方 `.dgst` SHA-256 校验通过，并在隔离目录安装，绝不执行远程安装脚本或覆盖系统已有 Xray
+- Xray 以 `sbox-runtime` 低权限用户和最小 systemd/OpenRC 权限运行；完整卸载只删除脚本托管的 `sbox-xray` 组件，不触碰 `/usr/local/bin/xray` 或用户已有 `xray.service`
 - VLESS、Hysteria2 与 Shadowsocks 统一阻断本机、私网、链路本地和云元数据目标，并在域名解析后再次检查
 - sing-box 与 Realm 改由无登录权限的 `sbox-runtime` 用户运行，systemd 服务增加最小权限沙箱，OpenRC 使用最小文件能力兼容低端口
 - 状态、客户端订阅、备份和密钥目录强制使用最小权限

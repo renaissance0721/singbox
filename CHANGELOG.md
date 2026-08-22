@@ -33,6 +33,7 @@
 
 ### 修复
 
+- Xray 配置预检改用私有临时目录中的 `config.json`，修复 Xray 26.3.27 无法从无扩展名临时文件识别配置格式的问题
 - Debian/Ubuntu 与 RHEL 系列显式安装提供 `runuser` 的 `util-linux`；节点配置检查会自动补装缺失的低权限执行工具，并能识别不在原始 `PATH` 中的 `/usr/sbin/runuser` 或 `/sbin/su-exec`
 - OpenRC 服务准备阶段自动补装并定位 `setcap`，不再因绕过初始化安装流程而阻止新建 sing-box 节点
 - Alpine 初始化依赖补充 `iptables-openrc`；节点应用时会自动补装缺失的 iptables/OpenRC 持久化组件和 `ss` 端口检查工具，不再要求先手动执行 `repair-install`

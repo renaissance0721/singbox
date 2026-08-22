@@ -1278,6 +1278,8 @@ grep -Fq 'Xray 发布包 SHA-256 校验失败' "$repo_dir/index.sh" ||
   fail "Xray 安装缺少失败关闭的 SHA-256 校验"
 grep -Fq 'run -test -config "$tmp_xray_config"' "$repo_dir/index.sh" ||
   fail "替换 Xray 配置前未调用内核预检"
+grep -Fq 'tmp_xray_config="$tmp_xray_dir/config.json"' "$repo_dir/index.sh" ||
+  fail "Xray 临时配置没有使用可识别的 .json 扩展名"
 grep -Fq 'XRAY_BIN="${XRAY_BIN:-$XRAY_INSTALL_DIR/xray}"' "$repo_dir/index.sh" ||
   fail "Xray 未使用隔离的脚本托管路径"
 if grep -Eq 'curl[^\n|]*\|[[:space:]]*(ba)?sh' "$repo_dir/index.sh"; then

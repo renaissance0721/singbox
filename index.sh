@@ -5982,8 +5982,15 @@ restore_managed_runtime_configs() {
   fi
 }
 
+cleanup_apply_temp_configs() {
+  local sing_config=${1:-} xray_config=${2:-} xray_dir=${3:-}
+  [[ -z "$sing_config" ]] || rm -f "$sing_config"
+  [[ -z "$xray_config" ]] || rm -f "$xray_config"
+  [[ -z "$xray_dir" ]] || cleanup_xray_work_dir "$xray_dir"
+}
+
 apply_config() {
-  local enabled_count sing_count tmp_config="" tmp_xray_config="" check_output success_text links_file check_bin port_error
+  local enabled_count sing_count tmp_config="" tmp_xray_config="" tmp_xray_dir="" check_output success_text links_file check_bin port_error
   local sing_snapshot xray_snapshot
   local service_was_active=false xray_was_active=false sing_config_existed=false xray_config_existed=false
 
@@ -6050,27 +6057,31 @@ apply_config() {
   fi
 
   if xray_protocol_enabled; then
-    tmp_xray_config="$(mktemp "$TMP_DIR/xray-config.XXXXXX")" || {
+    tmp_xray_dir="$(mktemp -d "$TMP_DIR/sbox-xray.XXXXXX")" || {
       rm -f "$tmp_config"
-      ui_msg "无法创建 Xray 临时配置文件。"
+      ui_msg "无法创建 Xray 临时配置目录。"
       return 1
     }
+    tmp_xray_config="$tmp_xray_dir/config.json"
     render_xray_config >"$tmp_xray_config"
+    chown root:"$RUNTIME_GROUP" "$tmp_xray_dir"
+    chmod 0750 "$tmp_xray_dir"
     chown root:"$RUNTIME_GROUP" "$tmp_xray_config"
     chmod 0640 "$tmp_xray_config"
     if ! check_output="$(run_as_runtime env XRAY_LOCATION_ASSET="$XRAY_ASSET_DIR" "$XRAY_BIN" run -test -config "$tmp_xray_config" 2>&1)"; then
-      rm -f "$tmp_config" "$tmp_xray_config"
+      cleanup_apply_temp_configs "$tmp_config" "$tmp_xray_config" "$tmp_xray_dir"
       ui_show_text "Xray 配置检查失败" "$check_output"
       return 1
     fi
   fi
 
   sing_snapshot="$(mktemp "$TMP_DIR/singbox-config-backup.XXXXXX")" || {
-    rm -f "$tmp_config" "$tmp_xray_config"
+    cleanup_apply_temp_configs "$tmp_config" "$tmp_xray_config" "$tmp_xray_dir"
     return 1
   }
   xray_snapshot="$(mktemp "$TMP_DIR/xray-config-backup.XXXXXX")" || {
-    rm -f "$tmp_config" "$tmp_xray_config" "$sing_snapshot"
+    cleanup_apply_temp_configs "$tmp_config" "$tmp_xray_config" "$tmp_xray_dir"
+    rm -f "$sing_snapshot"
     return 1
   }
   if [[ -f "$CONFIG_FILE" ]]; then
@@ -6091,14 +6102,14 @@ apply_config() {
   stop_sing_box
   stop_xray
   if ! port_error="$(validate_sing_box_listener_ports_available)"; then
-    rm -f "$tmp_config" "$tmp_xray_config"
+    cleanup_apply_temp_configs "$tmp_config" "$tmp_xray_config" "$tmp_xray_dir"
     restore_managed_runtime_configs "$sing_snapshot" "$sing_config_existed" "$xray_snapshot" "$xray_config_existed" "$service_was_active" "$xray_was_active"
     rm -f "$sing_snapshot" "$xray_snapshot"
     ui_msg "配置未应用，防火墙未修改。${port_error}"
     return 1
   fi
   if ! apply_firewall_rules; then
-    rm -f "$tmp_config" "$tmp_xray_config"
+    cleanup_apply_temp_configs "$tmp_config" "$tmp_xray_config" "$tmp_xray_dir"
     restore_managed_runtime_configs "$sing_snapshot" "$sing_config_existed" "$xray_snapshot" "$xray_config_existed" "$service_was_active" "$xray_was_active"
     rm -f "$sing_snapshot" "$xray_snapshot"
     ui_msg "防火墙规则同步失败；原配置和原服务状态已恢复。"
@@ -6115,7 +6126,7 @@ apply_config() {
     fi
     install -o root -g "$RUNTIME_GROUP" -m 0640 "$tmp_xray_config" "$XRAY_CONFIG_FILE"
   fi
-  rm -f "$tmp_config" "$tmp_xray_config"
+  cleanup_apply_temp_configs "$tmp_config" "$tmp_xray_config" "$tmp_xray_dir"
 
   if [[ "$sing_count" -gt 0 ]]; then
     if ! restart_sing_box || ! verify_sing_box_service_ready; then

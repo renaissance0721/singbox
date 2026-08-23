@@ -25,7 +25,7 @@
 - Realm 仅启用 TCP 转发；升级时会迁移旧配置并清理脚本管理的 Realm UDP 放行规则
 - Realm 每条规则可选择直接转发或通过脚本托管的点对点 WireGuard 隧道转发
 - 支持 WireGuard 落地端/中转端公钥配对、状态检查、目标端口测试、修改、修复和依赖保护
-- 支持查看监听端口和占用进程，并管理本脚本托管的防火墙端口
+- 支持按用途查看监听端口、已监听未开放端口和已开放未监听端口，并持久开放或关闭指定端口
 - 支持 UFW、firewalld、iptables/ip6tables，并为托管规则提供 systemd/OpenRC 重启恢复
 - iptables/ip6tables 托管规则保留既有拒绝、限速和 Fail2ban 的优先级，并兼容链末端默认拒绝规则
 - 支持零预置的自定义分流规则集，可随时新增、查看和删除
@@ -280,6 +280,7 @@ sbox delete-split-rule
 - Realm 配置目录：`/etc/realm/`
 - 脚本托管 WireGuard 配置与密钥：`/etc/wireguard/sbwg*.conf`、`sbwg*.key`、`sbwg*.pub`（不会修改其他 WireGuard 配置）
 - 脚本托管防火墙状态：`/etc/sing-box-manager/firewall-managed.tsv`
+- 手动端口开放/关闭策略：`/etc/sing-box-manager/firewall-port-policy.tsv`
 - 管理脚本项目目录：`/usr/local/share/sbox/`
 - OpenRC 日志：`/var/log/sing-box.log`、`/var/log/realm.log`
 
@@ -329,14 +330,18 @@ sbox delete-split-rule
 
 执行 `sbox ports` 可以：
 
-- 查看全部 TCP/UDP 监听端口及占用进程
-- 查看 Shadowsocks、VLESS、Hysteria2 和 Realm 的脚本托管端口状态
-- 关闭当前未监听端口对应的脚本托管放行规则
-- 开启当前正在监听端口对应的脚本托管放行规则
+- 查看全部 TCP/UDP 监听端口，并标注 Shadowsocks、VLESS、Hysteria2、Realm、WireGuard、SSH、HTTP/HTTPS 或实际占用进程
+- 分别查看“已监听未开放”和“已开放未监听”的端口
+- 一键开放当前全部监听端口
+- 手动开放或关闭 `1-65535` 范围内的 TCP、UDP 或 TCP+UDP 端口
+- 一键开放默认 TCP 端口：SSH 当前配置/监听端口以及固定的 `22`、`80`、`443`
 
 注意事项：
 
 - 应用配置前会停止旧服务并检查目标端口；端口被其他进程占用时不会修改防火墙
+- 手动开放/关闭状态会持久保存；手动关闭会创建明确的拒绝规则，并覆盖节点自动放行，直至再次手动开放
+- 修改 SSH 端口后，“开放默认端口”会同时开放新 SSH 端口与固定的 `22`；未再监听的 `22` 会显示在“已开放未监听”列表
+- “一键开放所有正在监听端口”可能同时开放系统中的其他服务，执行前会显示确认提示
 - iptables/ip6tables 规则带有 `sbox-managed` 标记并追加到现有策略之后，不会插到 Fail2ban、限速或人工拒绝规则之前
 - UFW/firewalld 自动开关按脚本状态文件处理托管端口；相同端口/协议的同形人工规则仍可能受到同步影响
 - 不要把节点或 Realm 监听端口设置成 SSH、Web 服务或其他程序已经占用的端口

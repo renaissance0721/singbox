@@ -24,7 +24,9 @@ export REALM_DIR="$test_root/realm"
 export REALM_CONFIG_FILE="$REALM_DIR/config.toml"
 export REALM_STATE_FILE="$STATE_DIR/realm-state.json"
 export FIREWALL_STATE_FILE="$STATE_DIR/firewall-managed.tsv"
+export FIREWALL_PORT_POLICY_FILE="$STATE_DIR/firewall-port-policy.tsv"
 export IPTABLES_MIGRATION_MARKER="$STATE_DIR/iptables-comment-rules.migrated"
+export SSHD_CONFIG_FILE="$test_root/sshd_config"
 export TMP_DIR="$test_root/tmp"
 mkdir -p "$TMP_DIR"
 
@@ -135,6 +137,115 @@ chmod 0600 "$STATE_FILE"
 if grep -Fq 'Shadowsocks 来源白名单' "$repo_dir/index.sh"; then
   fail "搭建或管理 Shadowsocks 节点时仍保留来源 IP 限制入口"
 fi
+
+(
+  STATE_FILE="$test_root/firewall-policy-state.json"
+  REALM_STATE_FILE="$test_root/no-firewall-policy-realm.json"
+  FIREWALL_PORT_POLICY_FILE="$test_root/firewall-port-policy.tsv"
+  jq '
+    .protocols.shadowsocks.enabled = true |
+    .protocols.shadowsocks.port = 24442 |
+    .protocols.vless_reality.enabled = false
+  ' "$test_root/state/state.json" >"$STATE_FILE"
+  printf 'tcp\t24442\tclosed\ntcp\t18080\topen\n' >"$FIREWALL_PORT_POLICY_FILE"
+
+  policy_rules="$(desired_managed_firewall_rules)"
+  if grep -Fq $'shadowsocks\ttcp\t24442\t*' <<<"$policy_rules"; then
+    fail "手动关闭策略未覆盖 Shadowsocks 自动放行规则"
+  fi
+  grep -Fqx $'manual_closed\ttcp\t24442\t!closed' <<<"$policy_rules" ||
+    fail "手动关闭端口未生成持久化拒绝规则"
+  grep -Fqx $'manual\ttcp\t18080\t*' <<<"$policy_rules" ||
+    fail "手动开放端口未加入持久化防火墙规则"
+  if ! is_valid_service_port 1 || ! is_valid_service_port 65535; then
+    fail "合法端口边界被拒绝"
+  fi
+  if is_valid_service_port 0 || is_valid_service_port 65536; then
+    fail "手动端口输入未限制在 1-65535"
+  fi
+)
+
+(
+  STATE_FILE="$test_root/firewall-close-sync-state.json"
+  REALM_STATE_FILE="$test_root/no-firewall-close-sync-realm.json"
+  FIREWALL_STATE_FILE="$test_root/firewall-close-sync-managed.tsv"
+  FIREWALL_PORT_POLICY_FILE="$test_root/firewall-close-sync-policy.tsv"
+  close_sync_log="$test_root/firewall-close-sync.log"
+  jq '
+    .protocols.shadowsocks.enabled = true |
+    .protocols.shadowsocks.port = 24442 |
+    .protocols.vless_reality.enabled = false
+  ' "$test_root/state/state.json" >"$STATE_FILE"
+  printf 'shadowsocks\ttcp\t24442\t*\n' >"$FIREWALL_STATE_FILE"
+  printf 'tcp\t24442\tclosed\n' >"$FIREWALL_PORT_POLICY_FILE"
+  active_firewall_backend() { printf 'iptables\n'; }
+  migrate_legacy_iptables_rules() { :; }
+  remove_firewall_rule() { printf 'remove-allow %s %s %s\n' "$1" "$2" "$3" >>"$close_sync_log"; }
+  remove_firewall_restriction() { printf 'remove-deny %s %s\n' "$1" "$2" >>"$close_sync_log"; }
+  add_firewall_rule() { printf 'add-allow %s %s %s %s\n' "$1" "$2" "$3" "$4" >>"$close_sync_log"; }
+  add_firewall_restriction() { printf 'add-deny %s %s %s\n' "$1" "$2" "$3" >>"$close_sync_log"; }
+  firewall_allow_rule_exists() { return 1; }
+  firewall_restriction_exists() { grep -Fq "add-deny iptables $2 $3" "$close_sync_log"; }
+  persist_openrc_firewall_rules() { :; }
+
+  sync_managed_firewall_rules || fail "手动关闭端口未能同步明确拒绝规则"
+  grep -Fq 'add-deny iptables tcp 24442' "$close_sync_log" || fail "手动关闭端口未添加 DROP/拒绝规则"
+  if grep -Fq 'add-allow' "$close_sync_log"; then
+    fail "手动关闭端口时仍添加了放行规则"
+  fi
+  grep -Fqx $'manual_closed\ttcp\t24442\t!closed' "$FIREWALL_STATE_FILE" ||
+    fail "手动关闭状态未写入防火墙恢复清单"
+)
+
+(
+  have_cmd() { [[ "$1" == "ss" ]]; }
+  ss() {
+    cat <<'EOF'
+tcp LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=10,fd=3))
+tcp LISTEN 0 128 [::]:2222 [::]:* users:(("sshd",pid=10,fd=4))
+udp UNCONN 0 0 0.0.0.0:51820 0.0.0.0:*
+EOF
+  }
+  listener_rows="$(listening_port_rows)"
+  grep -Fqx $'tcp\t2222\tsshd' <<<"$listener_rows" || fail "监听端口未识别 SSH 用途或未合并双栈监听"
+  grep -Fqx $'udp\t51820\t-' <<<"$listener_rows" || fail "监听端口未识别 UDP 端口"
+)
+
+(
+  detected_ssh_ports() { printf '2222\n'; }
+  [[ "$(default_firewall_tcp_ports | paste -sd, -)" == "22,80,443,2222" ]] ||
+    fail "默认端口未同时包含 SSH 当前端口与固定的 22、80、443"
+)
+
+(
+  STATE_FILE="$test_root/firewall-status-state.json"
+  REALM_STATE_FILE="$test_root/no-firewall-status-realm.json"
+  FIREWALL_STATE_FILE="$test_root/firewall-status-managed.tsv"
+  FIREWALL_PORT_POLICY_FILE="$test_root/firewall-status-policy.tsv"
+  jq '
+    .protocols.shadowsocks.enabled = false |
+    .protocols.vless_reality.enabled = false |
+    .protocols.hysteria2.enabled = false
+  ' "$test_root/state/state.json" >"$STATE_FILE"
+  printf 'tcp\t22\topen\ntcp\t80\topen\ntcp\t443\topen\ntcp\t2222\topen\n' >"$FIREWALL_PORT_POLICY_FILE"
+  listening_port_rows() { printf 'tcp\t2222\tsshd\ntcp\t9000\tcustom-service\n'; }
+  detected_ssh_ports() { printf '2222\n'; }
+  ensure_socket_inspection_command() { :; }
+  active_firewall_backend() { printf 'iptables\n'; }
+  firewall_allow_rule_exists() {
+    [[ "$4" == "*" ]] || return 1
+    case "$3" in 22|80|443|2222) return 0 ;; *) return 1 ;; esac
+  }
+  ui_show_text() { printf '%s\n' "$2"; }
+
+  port_status_output="$(show_listening_port_status)"
+  grep -Fq 'TCP/2222  用途=SSH' <<<"$port_status_output" || fail "自定义 SSH 监听端口未标注用途"
+  grep -Fq 'TCP/9000  用途=进程 custom-service' <<<"$port_status_output" || fail "普通监听端口未显示进程用途"
+  grep -Fq 'TCP/9000  用途=进程 custom-service  进程=custom-service' <<<"$port_status_output" ||
+    fail "已监听未开放端口未进入分类列表"
+  grep -Fq 'TCP/22  用途=SSH 默认端口' <<<"$port_status_output" ||
+    fail "SSH 修改端口后，仍开放的旧 22 端口未进入已开放未监听列表"
+)
 
 (
   curl() {
@@ -889,14 +1000,20 @@ EOF
   mkdir -p "$firewall_root"
   STATE_FILE="$firewall_root/state.json"
   REALM_STATE_FILE="$firewall_root/realm-state.json"
+  FIREWALL_PORT_POLICY_FILE="$firewall_root/port-policy.tsv"
   cat >"$STATE_FILE" <<'EOF'
 {"protocols":{"shadowsocks":{"enabled":false},"vless_reality":{"enabled":false},"hysteria2":{"enabled":false}}}
 EOF
   cat >"$REALM_STATE_FILE" <<'EOF'
 {"wireguard":{"profiles":[{"role":"landing","enabled":true,"listen_port":51820,"allowed_source":"198.51.100.9/32"}]},"rules":[]}
 EOF
-  desired_managed_firewall_rules | grep -Fq $'wireguard\tudp\t51820\t198.51.100.9/32' ||
+  printf 'udp\t51820\topen\n' >"$FIREWALL_PORT_POLICY_FILE"
+  wireguard_firewall_rules="$(desired_managed_firewall_rules)"
+  grep -Fq $'wireguard\tudp\t51820\t198.51.100.9/32' <<<"$wireguard_firewall_rules" ||
     fail "WireGuard 落地端 UDP 端口未限制为中转来源"
+  if grep -Fq $'manual\tudp\t51820\t*' <<<"$wireguard_firewall_rules"; then
+    fail "手动开放 WireGuard 托管端口时意外改成全网放行"
+  fi
 )
 
 grep -Fq '.global.use_udp = false' "$repo_dir/index.sh" || fail "Realm TCP-only 约束被 WireGuard 功能意外移除"

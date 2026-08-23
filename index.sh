@@ -58,6 +58,7 @@ WIREGUARD_DIR="${WIREGUARD_DIR:-/etc/wireguard}"
 WIREGUARD_INTERFACE_PREFIX="sbwg"
 WIREGUARD_OPENRC_SERVICE_PREFIX="sbox-wg"
 FIREWALL_STATE_FILE="${FIREWALL_STATE_FILE:-$STATE_DIR/firewall-managed.tsv}"
+FIREWALL_PORT_POLICY_FILE="${FIREWALL_PORT_POLICY_FILE:-$STATE_DIR/firewall-port-policy.tsv}"
 IPTABLES_MIGRATION_MARKER="${IPTABLES_MIGRATION_MARKER:-$STATE_DIR/iptables-comment-rules.migrated}"
 IPTABLES_RULE_COMMENT="${IPTABLES_RULE_COMMENT:-sbox-managed}"
 FIREWALL_SYSTEMD_SERVICE_FILE="${FIREWALL_SYSTEMD_SERVICE_FILE:-/etc/systemd/system/sbox-firewall.service}"
@@ -76,6 +77,7 @@ SCRIPT_REPO_BRANCH="main"
 SCRIPT_REPO_ID="1210354428"
 SCRIPT_REPO_OWNER_ID="197479185"
 TMP_DIR="${TMP_DIR:-/tmp}"
+SSHD_CONFIG_FILE="${SSHD_CONFIG_FILE:-/etc/ssh/sshd_config}"
 
 PKG_MANAGER=""
 
@@ -3878,7 +3880,7 @@ firewall_restriction_exists() {
   esac
 }
 
-desired_managed_firewall_rules() {
+automatic_managed_firewall_rules() {
   if [[ -s "$STATE_FILE" ]]; then
     jq -e . "$STATE_FILE" >/dev/null 2>&1 || return 1
     jq -r '
@@ -3908,6 +3910,69 @@ desired_managed_firewall_rules() {
         | ["wireguard", "udp", (.listen_port | tostring), .allowed_source] | @tsv)
     ' "$REALM_STATE_FILE" 2>/dev/null || return 1
   fi
+}
+
+is_valid_service_port() {
+  local port=$1
+  [[ "$port" =~ ^[0-9]+$ && ${#port} -le 5 ]] && (( 10#$port >= 1 && 10#$port <= 65535 ))
+}
+
+is_valid_firewall_protocol() {
+  [[ "$1" == "tcp" || "$1" == "udp" ]]
+}
+
+firewall_port_policy_rows() {
+  [[ -s "$FIREWALL_PORT_POLICY_FILE" ]] || return 0
+  awk -F '\t' '
+    ($1 == "tcp" || $1 == "udp") && $2 ~ /^[0-9]+$/ && $2 >= 1 && $2 <= 65535 && ($3 == "open" || $3 == "closed") {
+        key = $1 FS ($2 + 0)
+        action[key] = $3
+      }
+    END {
+      for (key in action) print key FS action[key]
+    }
+  ' "$FIREWALL_PORT_POLICY_FILE" | sort -t $'\t' -k1,1 -k2,2n
+}
+
+firewall_port_policy_action() {
+  local protocol=$1 port=$2
+  firewall_port_policy_rows | awk -F '\t' -v protocol="$protocol" -v port="$port" '
+    $1 == protocol && $2 == port {action=$3}
+    END {if (action != "") print action}
+  '
+}
+
+desired_managed_firewall_rules() {
+  local automatic_file owner protocol port source action
+  automatic_file="$(mktemp "$TMP_DIR/firewall-automatic.XXXXXX")" || return 1
+  if ! automatic_managed_firewall_rules | sort -u >"$automatic_file"; then
+    rm -f "$automatic_file"
+    return 1
+  fi
+
+  while IFS=$'\t' read -r owner protocol port source; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    action="$(firewall_port_policy_action "$protocol" "$port")"
+    [[ "$action" == "closed" ]] || printf '%s\t%s\t%s\t%s\n' "$owner" "$protocol" "$port" "${source:-*}"
+  done <"$automatic_file"
+
+  while IFS=$'\t' read -r protocol port action; do
+    case "$action" in
+      open)
+        if ! awk -F '\t' -v protocol="$protocol" -v port="$port" '
+          $2 == protocol && $3 == port {found=1}
+          END {exit !found}
+        ' "$automatic_file"; then
+          printf 'manual\t%s\t%s\t*\n' "$protocol" "$port"
+        fi
+        ;;
+      closed)
+        printf 'manual_closed\t%s\t%s\t!closed\n' "$protocol" "$port"
+        ;;
+    esac
+  done < <(firewall_port_policy_rows)
+
+  rm -f "$automatic_file"
 }
 
 sync_managed_firewall_rules() {
@@ -3943,7 +4008,9 @@ sync_managed_firewall_rules() {
 
   while IFS=$'\t' read -r owner protocol port source; do
     [[ -n "$protocol" && -n "$port" ]] || continue
-    remove_firewall_rule "$protocol" "$port" "${source:-*}"
+    if [[ "${source:-*}" != "!closed" ]]; then
+      remove_firewall_rule "$protocol" "$port" "${source:-*}"
+    fi
     remove_firewall_restriction "$protocol" "$port"
   done <"$old_rules"
 
@@ -3962,7 +4029,9 @@ sync_managed_firewall_rules() {
   fi
   while IFS=$'\t' read -r owner protocol port source; do
     [[ -n "$protocol" && -n "$port" ]] || continue
-    add_firewall_rule "$backend" "$protocol" "$port" "${source:-*}" || failed=true
+    if [[ "${source:-*}" != "!closed" ]]; then
+      add_firewall_rule "$backend" "$protocol" "$port" "${source:-*}" || failed=true
+    fi
   done <"$desired_rules"
 
   if [[ "$backend" == "iptables" ]]; then
@@ -3986,12 +4055,37 @@ sync_managed_firewall_rules() {
 
   while IFS=$'\t' read -r owner protocol port source; do
     [[ -n "$protocol" && -n "$port" ]] || continue
-    firewall_allow_rule_exists "$backend" "$protocol" "$port" "${source:-*}" || failed=true
+    if [[ "${source:-*}" != "!closed" ]]; then
+      firewall_allow_rule_exists "$backend" "$protocol" "$port" "${source:-*}" || failed=true
+    else
+      firewall_allow_rule_exists "$backend" "$protocol" "$port" "*" && failed=true
+    fi
   done <"$desired_rules"
   while IFS=$'\t' read -r protocol port; do
     [[ -n "$protocol" && -n "$port" ]] || continue
     firewall_restriction_exists "$backend" "$protocol" "$port" || failed=true
   done < <(awk -F '\t' '$4 != "*" {print $2 "\t" $3}' "$desired_rules" | sort -u)
+
+  while IFS=$'\t' read -r owner protocol port source; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    if ! awk -F '\t' -v protocol="$protocol" -v port="$port" -v source="${source:-*}" '
+      $2 == protocol && $3 == port && $4 == source {found=1}
+      END {exit !found}
+    ' "$desired_rules"; then
+      if [[ "${source:-*}" != "!closed" ]]; then
+        firewall_allow_rule_exists "$backend" "$protocol" "$port" "${source:-*}" && failed=true
+      fi
+    fi
+  done <"$old_rules"
+  while IFS=$'\t' read -r protocol port; do
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    if ! awk -F '\t' -v protocol="$protocol" -v port="$port" '
+      $2 == protocol && $3 == port && $4 != "*" {found=1}
+      END {exit !found}
+    ' "$desired_rules"; then
+      firewall_restriction_exists "$backend" "$protocol" "$port" && failed=true
+    fi
+  done < <(awk -F '\t' '{print $2 "\t" $3}' "$old_rules" | sort -u)
 
   if [[ "$failed" == "true" ]]; then
     warn "部分防火墙规则应用失败，未更新托管状态；请修复防火墙后重试。"
@@ -4025,7 +4119,9 @@ remove_all_managed_firewall_rules() {
 
   while IFS=$'\t' read -r owner protocol port source; do
     [[ -n "$protocol" && -n "$port" ]] || continue
-    remove_firewall_rule "$protocol" "$port" "${source:-*}"
+    if [[ "${source:-*}" != "!closed" ]]; then
+      remove_firewall_rule "$protocol" "$port" "${source:-*}"
+    fi
     remove_firewall_restriction "$protocol" "$port"
     firewalld_changed=true
   done <"$rules_file"
@@ -4036,7 +4132,9 @@ remove_all_managed_firewall_rules() {
 
   while IFS=$'\t' read -r owner protocol port source; do
     [[ -n "$protocol" && -n "$port" ]] || continue
-    firewall_allow_rule_exists "$backend" "$protocol" "$port" "${source:-*}" && failed=true
+    if [[ "${source:-*}" != "!closed" ]]; then
+      firewall_allow_rule_exists "$backend" "$protocol" "$port" "${source:-*}" && failed=true
+    fi
     firewall_restriction_exists "$backend" "$protocol" "$port" && failed=true
   done <"$rules_file"
   rm -f "$rules_file"
@@ -4185,256 +4283,392 @@ validate_realm_listener_ports_available() {
   done < <(realm_managed_ports)
 }
 
-save_desired_firewall_state() {
-  local tmp_file
-  tmp_file="$(mktemp "$TMP_DIR/firewall-state.XXXXXX")" || return 1
-  if ! desired_managed_firewall_rules | sort -u >"$tmp_file"; then
-    rm -f "$tmp_file"
-    return 1
-  fi
-  install -m 600 "$tmp_file" "$FIREWALL_STATE_FILE"
-  rm -f "$tmp_file"
+listening_port_rows() {
+  have_cmd ss || return 1
+  ss -H -lntup 2>/dev/null | awk '
+    $1 ~ /^(tcp|udp)[0-9]*$/ {
+      protocol = $1
+      sub(/[0-9]+$/, "", protocol)
+      port = $5
+      sub(/^.*:/, "", port)
+      if (port !~ /^[0-9]+$/ || port < 1 || port > 65535) next
+      process = "-"
+      details = $0
+      if (details ~ /users:\(\(["]/) {
+        sub(/^.*users:\(\(["]/, "", details)
+        sub(/["].*$/, "", details)
+        if (details != "") process = details
+      }
+      print protocol "\t" port "\t" process
+    }
+  ' | sort -t $'\t' -k1,1 -k2,2n -k3,3 | awk -F '\t' '
+    {
+      key = $1 FS $2
+      if (!(key in seen)) {
+        order[++count] = key
+        protocol[key] = $1
+        port[key] = $2
+      }
+      if ($3 != "-" && index("," processes[key] ",", "," $3 ",") == 0) {
+        processes[key] = processes[key] (processes[key] == "" ? "" : ",") $3
+      }
+      seen[key] = 1
+    }
+    END {
+      for (i = 1; i <= count; i++) {
+        key = order[i]
+        print protocol[key] FS port[key] FS (processes[key] == "" ? "-" : processes[key])
+      }
+    }
+  '
 }
 
-show_all_listening_ports() {
-  local output
-  if ! have_cmd ss; then
-    ui_msg "未检测到 ss 命令，无法查看端口占用。"
-    return 1
-  fi
-  output="$(ss -lntup 2>&1)"
-  ui_show_text "全部监听端口与占用进程" "$output"
+detected_ssh_ports() {
+  {
+    { listening_port_rows 2>/dev/null || true; } | awk -F '\t' '$1 == "tcp" && ("," $3 ",") ~ /,sshd,/ {print $2}'
+    if have_cmd sshd; then
+      sshd -T 2>/dev/null | awk '$1 == "port" && $2 ~ /^[0-9]+$/ {print $2}' || true
+    fi
+    if [[ -r "$SSHD_CONFIG_FILE" ]]; then
+      awk '
+        {
+          sub(/[[:space:]]*#.*/, "")
+          if (tolower($1) == "port" && $2 ~ /^[0-9]+$/) print $2
+        }
+      ' "$SSHD_CONFIG_FILE"
+    fi
+  } | awk '$1 ~ /^[0-9]+$/ && $1 >= 1 && $1 <= 65535' | sort -nu
 }
 
-show_managed_port_status() {
-  local owner protocol port source listen_status firewall_status output="" backend rules_file
-  local sources_display restricted complete wildcard_present
-  rules_file="$(mktemp "$TMP_DIR/firewall-status.XXXXXX")" || return 1
-  if ! desired_managed_firewall_rules | sort -u >"$rules_file"; then
-    rm -f "$rules_file"
-    ui_msg "节点或 Realm 状态文件无效，无法读取托管端口。"
+firewall_owner_label() {
+  case "$1" in
+    shadowsocks) printf 'Shadowsocks (SS)\n' ;;
+    vless_reality) printf 'VLESS + Reality\n' ;;
+    hysteria2) printf 'Hysteria2\n' ;;
+    realm) printf 'Realm\n' ;;
+    wireguard) printf 'WireGuard\n' ;;
+    manual) printf '手动开放\n' ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+firewall_port_usage() {
+  local protocol=$1 port=$2 process=${3:--} automatic_file=$4 ssh_ports_file=$5 owner
+  {
+    while IFS= read -r owner; do
+      [[ -n "$owner" ]] && firewall_owner_label "$owner"
+    done < <(awk -F '\t' -v protocol="$protocol" -v port="$port" \
+      '$2 == protocol && $3 == port {print $1}' "$automatic_file" | sort -u)
+
+    if [[ "$protocol" == "tcp" ]] && awk -v port="$port" '$1 == port {found=1} END {exit !found}' "$ssh_ports_file"; then
+      printf 'SSH\n'
+    fi
+    if [[ "$protocol" == "tcp" ]]; then
+      case "$port" in
+        22) printf 'SSH 默认端口\n' ;;
+        80) printf 'HTTP\n' ;;
+        443) printf 'HTTPS\n' ;;
+      esac
+    fi
+
+    if [[ "$process" != "-" ]]; then
+      tr ',' '\n' <<<"$process" | while IFS= read -r owner; do
+        case "$owner" in
+          sshd) printf 'SSH\n' ;;
+          sing-box) printf 'sing-box\n' ;;
+          xray) printf 'Xray\n' ;;
+          realm) printf 'Realm\n' ;;
+          *) printf '进程 %s\n' "$owner" ;;
+        esac
+      done
+    fi
+  } | awk 'NF && !seen[$0]++' | paste -sd '、' -
+}
+
+managed_firewall_port_is_open() {
+  local backend=$1 protocol=$2 port=$3 rules_file=$4 source found=false
+  [[ "$backend" != "none" ]] || return 1
+
+  if firewall_allow_rule_exists "$backend" "$protocol" "$port" "*"; then
+    return 0
+  fi
+  while IFS= read -r source; do
+    [[ -n "$source" && "$source" != "*" && "$source" != "!closed" ]] || continue
+    found=true
+    firewall_allow_rule_exists "$backend" "$protocol" "$port" "$source" && return 0
+  done < <(awk -F '\t' -v protocol="$protocol" -v port="$port" \
+    '$2 == protocol && $3 == port {print $4}' "$rules_file" | sort -u)
+  [[ "$found" == "false" ]] && return 1
+  return 1
+}
+
+show_listening_port_status() {
+  local listening_file automatic_file desired_file known_rules_file ssh_ports_file
+  local backend output="" unopened="" stale="" protocol port process usage status owner source
+  ensure_socket_inspection_command
+  listening_file="$(mktemp "$TMP_DIR/firewall-listening.XXXXXX")" || return 1
+  automatic_file="$(mktemp "$TMP_DIR/firewall-automatic-status.XXXXXX")" || { rm -f "$listening_file"; return 1; }
+  desired_file="$(mktemp "$TMP_DIR/firewall-desired-status.XXXXXX")" || { rm -f "$listening_file" "$automatic_file"; return 1; }
+  known_rules_file="$(mktemp "$TMP_DIR/firewall-known-status.XXXXXX")" || { rm -f "$listening_file" "$automatic_file" "$desired_file"; return 1; }
+  ssh_ports_file="$(mktemp "$TMP_DIR/firewall-ssh-ports.XXXXXX")" || { rm -f "$listening_file" "$automatic_file" "$desired_file" "$known_rules_file"; return 1; }
+
+  if ! listening_port_rows >"$listening_file" ||
+    ! automatic_managed_firewall_rules | sort -u >"$automatic_file" ||
+    ! desired_managed_firewall_rules | sort -u >"$desired_file"; then
+    rm -f "$listening_file" "$automatic_file" "$desired_file" "$known_rules_file" "$ssh_ports_file"
+    ui_msg "无法读取监听端口或节点状态。"
     return 1
   fi
+  detected_ssh_ports >"$ssh_ports_file"
+  {
+    [[ -s "$FIREWALL_STATE_FILE" ]] && cat "$FIREWALL_STATE_FILE"
+    cat "$desired_file"
+  } | awk -F '\t' 'NF >= 4' | sort -u >"$known_rules_file"
   backend="$(active_firewall_backend)"
 
-  while IFS=$'\t' read -r owner protocol port; do
+  output+=$'[正在监听的端口]\n'
+  while IFS=$'\t' read -r protocol port process; do
     [[ -n "$protocol" && -n "$port" ]] || continue
-    if port_is_listening "$protocol" "$port"; then
-      listen_status="监听中"
+    usage="$(firewall_port_usage "$protocol" "$port" "$process" "$automatic_file" "$ssh_ports_file")"
+    if managed_firewall_port_is_open "$backend" "$protocol" "$port" "$known_rules_file"; then
+      status="已开放"
     else
-      listen_status="未监听"
+      status="未开放"
+      unopened+="${protocol^^}/${port}  用途=${usage:-未知}  进程=${process}"$'\n'
     fi
+    output+="${protocol^^}/${port}  用途=${usage:-未知}  进程=${process}  防火墙=${status}"$'\n'
+  done <"$listening_file"
+  [[ -s "$listening_file" ]] || output+="无"$'\n'
 
-    sources_display=""
-    restricted=false
-    complete=true
-    wildcard_present=false
-    while IFS= read -r source; do
-      [[ -n "$source" ]] || continue
-      if [[ "$source" == "*" ]]; then
-        sources_display="全网（高风险）"
-      else
-        restricted=true
-        sources_display+="${sources_display:+, }${source}"
-      fi
-      if [[ "$backend" == "none" ]] || ! firewall_allow_rule_exists "$backend" "$protocol" "$port" "$source"; then
-        complete=false
-      fi
-    done < <(awk -F '\t' -v owner="$owner" -v protocol="$protocol" -v port="$port" \
-      '$1 == owner && $2 == protocol && $3 == port {print $4}' "$rules_file")
-
-    if [[ "$backend" == "none" ]]; then
-      firewall_status="不可用（未检测到本地防火墙）"
-    elif [[ "$restricted" == "true" ]]; then
-      firewall_allow_rule_exists "$backend" "$protocol" "$port" "*" && wildcard_present=true
-      firewall_restriction_exists "$backend" "$protocol" "$port" || complete=false
-      if [[ "$wildcard_present" == "true" ]]; then
-        firewall_status="危险：仍存在全网放行规则"
-      elif [[ "$complete" == "true" ]]; then
-        firewall_status="已限制来源"
-      else
-        firewall_status="规则不完整"
-      fi
-    elif [[ "$complete" == "true" ]]; then
-      firewall_status="已放行"
-    else
-      firewall_status="未放行或规则缺失"
-    fi
-
-    output+="${owner}  ${protocol}/${port}  ${listen_status}  防火墙=${firewall_status}  来源=${sources_display:-未知}"$'\n'
-  done < <(awk -F '\t' '{print $1 "\t" $2 "\t" $3}' "$rules_file" | sort -u)
-
-  rm -f "$rules_file"
-  [[ -n "$output" ]] || output="当前没有脚本托管端口。"$'\n'
-  output+="\n当前本地防火墙后端：${backend}"
-  output+=$'\n说明：云厂商安全组不在本页检测范围内。'
-  ui_show_text "脚本托管端口状态" "$output"
-}
-
-close_inactive_managed_ports() {
-  local owner protocol port source backend rules_file inactive_file closed=0 failed=0 operation_failed=false reload_failed=false
-  prepare_managed_firewall || {
-    ui_msg "防火墙环境不可用，未执行清理。请执行 sbox repair-install 后重试。"
-    return 1
-  }
-  backend="$(active_firewall_backend)"
-  rules_file="$(mktemp "$TMP_DIR/firewall-close-rules.XXXXXX")" || return 1
-  inactive_file="$(mktemp "$TMP_DIR/firewall-close-ports.XXXXXX")" || {
-    rm -f "$rules_file"
-    return 1
-  }
-  if ! desired_managed_firewall_rules | sort -u >"$rules_file"; then
-    rm -f "$rules_file" "$inactive_file"
-    ui_msg "节点或 Realm 状态文件无效，未修改防火墙。"
-    return 1
-  fi
-
-  while IFS=$'\t' read -r owner protocol port; do
-    [[ -n "$protocol" && -n "$port" ]] || continue
-    if ! port_is_listening "$protocol" "$port"; then
-      printf '%s\t%s\t%s\n' "$owner" "$protocol" "$port" >>"$inactive_file"
-      remove_firewall_rule "$protocol" "$port" "*"
-      while IFS= read -r source; do
-        [[ -n "$source" && "$source" != "*" ]] || continue
-        remove_firewall_rule "$protocol" "$port" "$source"
-      done < <(awk -F '\t' -v owner="$owner" -v protocol="$protocol" -v port="$port" \
-        '$1 == owner && $2 == protocol && $3 == port {print $4}' "$rules_file")
-      remove_firewall_restriction "$protocol" "$port"
-    fi
-  done < <(awk -F '\t' '{print $1 "\t" $2 "\t" $3}' "$rules_file" | sort -u)
-
-  if [[ -s "$inactive_file" && "$backend" == "firewalld" ]] && ! firewall-cmd --reload >/dev/null 2>&1; then
-    reload_failed=true
-  fi
-  persist_openrc_firewall_rules
-
-  while IFS=$'\t' read -r owner protocol port; do
-    [[ -n "$protocol" && -n "$port" ]] || continue
-    operation_failed="$reload_failed"
-    firewall_allow_rule_exists "$backend" "$protocol" "$port" "*" && operation_failed=true
-    while IFS= read -r source; do
-      [[ -n "$source" && "$source" != "*" ]] || continue
-      firewall_allow_rule_exists "$backend" "$protocol" "$port" "$source" && operation_failed=true
-    done < <(awk -F '\t' -v owner="$owner" -v protocol="$protocol" -v port="$port" \
-      '$1 == owner && $2 == protocol && $3 == port {print $4}' "$rules_file")
-    firewall_restriction_exists "$backend" "$protocol" "$port" && operation_failed=true
-    if [[ "$operation_failed" == "true" ]]; then
-      failed=$((failed + 1))
-    else
-      closed=$((closed + 1))
-    fi
-  done <"$inactive_file"
-
-  if ! save_desired_firewall_state; then
-    failed=$((failed + 1))
-  fi
-  rm -f "$rules_file" "$inactive_file"
-  if (( failed > 0 )); then
-    ui_msg "已清理 ${closed} 个未监听端口，但有 ${failed} 个端口清理或验证失败。"
-    return 1
-  fi
-  ui_msg "已清理 ${closed} 个当前未监听端口的脚本放行规则。"
-}
-
-open_active_managed_ports() {
-  local backend owner protocol port source opened=0 active_rules desired_rules failed=false restricted
-  prepare_managed_firewall || {
-    ui_msg "防火墙环境不可用，未开启托管端口。请执行 sbox repair-install 后重试。"
-    return 1
-  }
-  active_rules="$(mktemp "$TMP_DIR/firewall-active.XXXXXX")" || return 1
-  desired_rules="$(mktemp "$TMP_DIR/firewall-open-desired.XXXXXX")" || {
-    rm -f "$active_rules"
-    return 1
-  }
-  if ! desired_managed_firewall_rules | sort -u >"$desired_rules"; then
-    rm -f "$active_rules" "$desired_rules"
-    ui_msg "节点或 Realm 状态文件无效，未修改防火墙。"
-    return 1
-  fi
-  backend="$(active_firewall_backend)"
-
-  while IFS=$'\t' read -r owner protocol port source; do
-    [[ -n "$protocol" && -n "$port" ]] || continue
-    if port_is_listening "$protocol" "$port"; then
-      printf '%s\t%s\t%s\t%s\n' "$owner" "$protocol" "$port" "${source:-*}" >>"$active_rules"
-    fi
-  done <"$desired_rules"
-
-  if [[ "$backend" == "none" && -s "$active_rules" ]]; then
-    rm -f "$active_rules" "$desired_rules"
-    ui_msg "未检测到可用的 UFW、firewalld 或 iptables，无法开启托管端口。"
-    return 1
-  fi
+  output+=$'\n[已监听未开放的端口]\n'
+  output+="${unopened:-无$'\n'}"
 
   while IFS=$'\t' read -r protocol port; do
-    remove_firewall_rule "$protocol" "$port" "*"
-    remove_firewall_restriction "$protocol" "$port"
-  done < <(awk -F '\t' '{print $2 "\t" $3}' "$active_rules" | sort -u)
-
-  while IFS=$'\t' read -r owner protocol port source; do
-    if ! add_firewall_rule "$backend" "$protocol" "$port" "${source:-*}"; then
-      failed=true
+    [[ -n "$protocol" && -n "$port" ]] || continue
+    if ! awk -F '\t' -v protocol="$protocol" -v port="$port" \
+      '$1 == protocol && $2 == port {found=1} END {exit !found}' "$listening_file" &&
+      managed_firewall_port_is_open "$backend" "$protocol" "$port" "$known_rules_file"; then
+      owner="$(awk -F '\t' -v protocol="$protocol" -v port="$port" '$2 == protocol && $3 == port {print $1; exit}' "$known_rules_file")"
+      source="$(firewall_port_usage "$protocol" "$port" "-" "$automatic_file" "$ssh_ports_file")"
+      [[ -n "$source" ]] || source="$(firewall_owner_label "${owner:-manual}")"
+      stale+="${protocol^^}/${port}  用途=${source}"$'\n'
     fi
-  done <"$active_rules"
+  done < <(awk -F '\t' 'NF >= 4 {print $2 "\t" $3}' "$known_rules_file" | sort -u)
+  output+=$'\n[已开放未监听的端口]\n'
+  output+="${stale:-无$'\n'}"
+  output+="\n本地防火墙后端：${backend}\n仅统计和操作本脚本托管的放行规则；云安全组与 NAT 不在检测范围内。"
 
-  if [[ "$backend" == "iptables" ]]; then
-    while IFS=$'\t' read -r protocol port; do
-      add_firewall_restriction "$backend" "$protocol" "$port" || failed=true
-    done < <(awk -F '\t' '$4 != "*" {print $2 "\t" $3}' "$active_rules" | sort -u)
-  fi
+  rm -f "$listening_file" "$automatic_file" "$desired_file" "$known_rules_file" "$ssh_ports_file"
+  ui_show_text "正在监听的端口" "$output"
+}
 
-  if [[ "$backend" == "ufw" || "$backend" == "firewalld" ]]; then
-    while IFS=$'\t' read -r protocol port; do
-      add_firewall_restriction "$backend" "$protocol" "$port" || failed=true
-    done < <(awk -F '\t' '$4 != "*" {print $2 "\t" $3}' "$active_rules" | sort -u)
-  fi
+write_updated_firewall_port_policy() {
+  local changes_file=$1 output_file=$2 protocol port action tmp_file
+  firewall_port_policy_rows >"$output_file"
+  tmp_file="$(mktemp "$TMP_DIR/firewall-policy-update.XXXXXX")" || return 1
 
-  if [[ "$backend" == "firewalld" ]] && ! firewall-cmd --reload >/dev/null 2>&1; then
-    failed=true
-  fi
-  persist_openrc_firewall_rules
-
-  while IFS=$'\t' read -r owner protocol port source; do
-    [[ -n "$protocol" && -n "$port" ]] || continue
-    firewall_allow_rule_exists "$backend" "$protocol" "$port" "${source:-*}" || failed=true
-  done <"$active_rules"
-  while IFS=$'\t' read -r protocol port; do
-    [[ -n "$protocol" && -n "$port" ]] || continue
-    restricted=false
+  while IFS=$'\t' read -r protocol port action; do
+    if ! is_valid_firewall_protocol "$protocol" || ! is_valid_service_port "$port"; then
+      continue
+    fi
+    port=$((10#$port))
+    [[ "$action" == "open" || "$action" == "closed" || "$action" == "clear" ]] || continue
     awk -F '\t' -v protocol="$protocol" -v port="$port" \
-      '$2 == protocol && $3 == port && $4 != "*" {found=1} END {exit !found}' "$active_rules" && restricted=true
-    if [[ "$restricted" == "true" ]]; then
-      firewall_restriction_exists "$backend" "$protocol" "$port" || failed=true
-      firewall_allow_rule_exists "$backend" "$protocol" "$port" "*" && failed=true
+      '!($1 == protocol && $2 == port)' "$output_file" >"$tmp_file"
+    mv "$tmp_file" "$output_file"
+    tmp_file="$(mktemp "$TMP_DIR/firewall-policy-update.XXXXXX")" || return 1
+    if [[ "$action" != "clear" ]]; then
+      printf '%s\t%s\t%s\n' "$protocol" "$port" "$action" >>"$output_file"
     fi
-  done < <(awk -F '\t' '{print $2 "\t" $3}' "$active_rules" | sort -u)
+  done <"$changes_file"
+  rm -f "$tmp_file"
+  sort -t $'\t' -k1,1 -k2,2n -u -o "$output_file" "$output_file"
+}
 
-  if [[ "$failed" == "true" ]] || ! save_desired_firewall_state; then
-    rm -f "$active_rules" "$desired_rules"
-    ui_msg "部分托管端口开启失败，请检查防火墙状态后重试。"
+apply_firewall_port_policy_changes() {
+  local changes_file=$1 success_message=$2 previous_policy updated_policy restored=true
+  previous_policy="$(mktemp "$TMP_DIR/firewall-policy-backup.XXXXXX")" || return 1
+  updated_policy="$(mktemp "$TMP_DIR/firewall-policy-new.XXXXXX")" || { rm -f "$previous_policy"; return 1; }
+  firewall_port_policy_rows >"$previous_policy"
+  if ! write_updated_firewall_port_policy "$changes_file" "$updated_policy" ||
+    ! install -m 0600 "$updated_policy" "$FIREWALL_PORT_POLICY_FILE"; then
+    rm -f "$previous_policy" "$updated_policy"
+    ui_msg "无法保存端口策略，防火墙未修改。"
     return 1
   fi
-  opened="$(awk -F '\t' '{print $2 "\t" $3}' "$active_rules" | sort -u | awk 'NF {count++} END {print count+0}')"
-  rm -f "$active_rules" "$desired_rules"
-  ui_msg "已开启并验证 ${opened} 个当前正在监听的脚本托管端口。"
+
+  if prepare_managed_firewall && sync_managed_firewall_rules; then
+    rm -f "$previous_policy" "$updated_policy"
+    ui_msg "$success_message"
+    return 0
+  fi
+
+  install -m 0600 "$previous_policy" "$FIREWALL_PORT_POLICY_FILE" || restored=false
+  if [[ "$restored" == "true" ]]; then
+    prepare_managed_firewall >/dev/null 2>&1 || true
+    sync_managed_firewall_rules >/dev/null 2>&1 || restored=false
+  fi
+  rm -f "$previous_policy" "$updated_policy"
+  if [[ "$restored" == "true" ]]; then
+    ui_msg "端口策略应用失败，已恢复原防火墙策略。"
+  else
+    ui_msg "端口策略应用失败且未能完整恢复，请立即检查本机防火墙。"
+  fi
+  return 1
+}
+
+append_open_firewall_policy_change() {
+  local changes_file=$1 automatic_file=$2 protocol=$3 port=$4
+  if awk -F '\t' -v protocol="$protocol" -v port="$port" \
+    '$2 == protocol && $3 == port {found=1} END {exit !found}' "$automatic_file"; then
+    printf '%s\t%s\tclear\n' "$protocol" "$port" >>"$changes_file"
+  else
+    printf '%s\t%s\topen\n' "$protocol" "$port" >>"$changes_file"
+  fi
+}
+
+select_firewall_protocols() {
+  local choice
+  choice="$(ui_menu "端口协议" "请选择要操作的协议" \
+    "1" "TCP" \
+    "2" "UDP" \
+    "3" "TCP + UDP" \
+    "0" "返回")" || return 1
+  case "$choice" in
+    1) printf 'tcp\n' ;;
+    2) printf 'udp\n' ;;
+    3) printf 'tcp\nudp\n' ;;
+    0) return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+open_all_listening_ports() {
+  local listening_file automatic_file changes_file protocol port process count result
+  ensure_socket_inspection_command
+  listening_file="$(mktemp "$TMP_DIR/firewall-open-listening.XXXXXX")" || return 1
+  automatic_file="$(mktemp "$TMP_DIR/firewall-open-automatic.XXXXXX")" || { rm -f "$listening_file"; return 1; }
+  changes_file="$(mktemp "$TMP_DIR/firewall-open-changes.XXXXXX")" || { rm -f "$listening_file" "$automatic_file"; return 1; }
+  listening_port_rows >"$listening_file"
+  automatic_managed_firewall_rules | sort -u >"$automatic_file"
+  count="$(awk -F '\t' 'NF >= 2 {count++} END {print count+0}' "$listening_file")"
+  if (( count == 0 )); then
+    rm -f "$listening_file" "$automatic_file" "$changes_file"
+    ui_msg "当前没有检测到正在监听的 TCP/UDP 端口。"
+    return 0
+  fi
+  ui_yesno "将为当前检测到的 ${count} 个监听端口创建脚本托管放行规则，是否继续？" || {
+    rm -f "$listening_file" "$automatic_file" "$changes_file"
+    return 0
+  }
+  while IFS=$'\t' read -r protocol port process; do
+    append_open_firewall_policy_change "$changes_file" "$automatic_file" "$protocol" "$port"
+  done <"$listening_file"
+  sort -u -o "$changes_file" "$changes_file"
+  apply_firewall_port_policy_changes "$changes_file" "已开放并验证 ${count} 个正在监听的端口。"
+  result=$?
+  rm -f "$listening_file" "$automatic_file" "$changes_file"
+  return "$result"
+}
+
+default_firewall_tcp_ports() {
+  {
+    printf '22\n80\n443\n'
+    detected_ssh_ports
+  } | awk '$1 ~ /^[0-9]+$/ && $1 >= 1 && $1 <= 65535' | sort -nu
+}
+
+manual_firewall_port_action() {
+  local action=$1 protocols port automatic_file changes_file protocol protocol_display result
+  protocols="$(select_firewall_protocols)" || return 0
+  port="$(prompt_number "${action}指定端口" "请输入要${action}的端口（1-65535）" "" 1 65535)" || return 1
+  port=$((10#$port))
+  automatic_file="$(mktemp "$TMP_DIR/firewall-manual-automatic.XXXXXX")" || return 1
+  changes_file="$(mktemp "$TMP_DIR/firewall-manual-changes.XXXXXX")" || { rm -f "$automatic_file"; return 1; }
+  automatic_managed_firewall_rules | sort -u >"$automatic_file"
+  protocol_display="$(paste -sd '+' <<<"${protocols^^}")"
+
+  if [[ "$action" == "开放" ]]; then
+    while IFS= read -r protocol; do
+      append_open_firewall_policy_change "$changes_file" "$automatic_file" "$protocol" "$port"
+    done <<<"$protocols"
+  else
+    while IFS= read -r protocol; do
+      printf '%s\t%s\tclosed\n' "$protocol" "$port" >>"$changes_file"
+    done <<<"$protocols"
+    if grep -Fxq tcp <<<"$protocols" && grep -Fxq "$port" < <(detected_ssh_ports); then
+      ui_yesno "警告：${protocol_display}/${port} 是当前 SSH 端口，关闭后可能立即中断远程连接。确认继续？" || {
+        rm -f "$automatic_file" "$changes_file"
+        return 0
+      }
+    else
+      ui_yesno "确认关闭 ${protocol_display}/${port} 的脚本托管放行规则？" || {
+        rm -f "$automatic_file" "$changes_file"
+        return 0
+      }
+    fi
+  fi
+
+  apply_firewall_port_policy_changes "$changes_file" "已${action}并验证 ${protocol_display}/${port}。"
+  result=$?
+  rm -f "$automatic_file" "$changes_file"
+  return "$result"
+}
+
+open_default_firewall_ports() {
+  local automatic_file changes_file ports_file port display result
+  automatic_file="$(mktemp "$TMP_DIR/firewall-default-automatic.XXXXXX")" || return 1
+  changes_file="$(mktemp "$TMP_DIR/firewall-default-changes.XXXXXX")" || { rm -f "$automatic_file"; return 1; }
+  ports_file="$(mktemp "$TMP_DIR/firewall-default-ports.XXXXXX")" || { rm -f "$automatic_file" "$changes_file"; return 1; }
+  automatic_managed_firewall_rules | sort -u >"$automatic_file"
+  default_firewall_tcp_ports >"$ports_file"
+  display="$(paste -sd, "$ports_file" | sed 's/,/, /g')"
+  ui_yesno "将开放 TCP/${display}。其中包含 SSH 当前端口以及固定端口 22、80、443，是否继续？" || {
+    rm -f "$automatic_file" "$changes_file" "$ports_file"
+    return 0
+  }
+  while IFS= read -r port; do
+    append_open_firewall_policy_change "$changes_file" "$automatic_file" tcp "$port"
+  done <"$ports_file"
+  apply_firewall_port_policy_changes "$changes_file" "已开放默认 TCP 端口：${display}。"
+  result=$?
+  rm -f "$automatic_file" "$changes_file" "$ports_file"
+  return "$result"
+}
+
+firewall_port_action_menu() {
+  local choice
+  while true; do
+    choice="$(ui_menu "开放 / 关闭指定端口" "手动策略会持久保存，配置重载和服务器重启后仍然生效。" \
+      "1" "一键开放所有正在监听的端口" \
+      "2" "手动开放指定端口" \
+      "3" "手动关闭指定端口" \
+      "0" "返回端口管理" \
+      "00" "退出脚本")" || continue
+    case "$choice" in
+      1) open_all_listening_ports || true ;;
+      2) manual_firewall_port_action "开放" || true ;;
+      3) manual_firewall_port_action "关闭" || true ;;
+      0) return 0 ;;
+      00) exit 0 ;;
+      *) ui_msg "无效选项，请重新选择。" ;;
+    esac
+  done
 }
 
 port_management_menu() {
   local choice
   while true; do
-    choice="$(ui_menu "端口管理" "查看全部监听端口；自动开关仅作用于本脚本托管端口。" \
-      "1" "查看全部监听端口及占用进程" \
-      "2" "查看脚本托管端口状态" \
-      "3" "一键关闭未监听的托管端口" \
-      "4" "一键开启正在监听的托管端口" \
+    choice="$(ui_menu "端口管理" "管理本脚本托管的本机防火墙端口；云安全组和 NAT 需在服务商控制台管理。" \
+      "1" "正在监听的端口" \
+      "2" "开放 / 关闭指定端口" \
+      "3" "开放默认端口（SSH、22、80、443）" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || continue
     case "$choice" in
-      1) show_all_listening_ports || true ;;
-      2) show_managed_port_status || true ;;
-      3) close_inactive_managed_ports || true ;;
-      4) open_active_managed_ports || true ;;
+      1) show_listening_port_status || true ;;
+      2) firewall_port_action_menu || true ;;
+      3) open_default_firewall_ports || true ;;
       0) return 0 ;;
       00) exit 0 ;;
       *) ui_msg "无效选项，请重新选择。" ;;

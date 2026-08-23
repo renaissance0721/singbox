@@ -79,7 +79,6 @@ cat >"$STATE_FILE" <<EOF
       "method": "2022-blake3-aes-128-gcm",
       "server_password": "",
       "multiplex": true,
-      "allowed_sources": [],
       "users": []
     },
     "vless_reality": {
@@ -113,24 +112,29 @@ cat >"$STATE_FILE" <<EOF
 EOF
 chmod 0600 "$STATE_FILE"
 
-existing_sources='["198.51.100.10/32","2001:db8::10/128"]'
-added_sources="$(build_allowed_sources_json '198.51.100.20/32, 2001:db8::10/128')"
-merged_sources="$(merge_allowed_sources_json "$existing_sources" "$added_sources")"
-jq -e '
-  length == 3
-  and index("198.51.100.10/32") != null
-  and index("198.51.100.20/32") != null
-  and index("2001:db8::10/128") != null
-' <<<"$merged_sources" >/dev/null || fail "新增 Shadowsocks 白名单来源时覆盖了旧条目或未正确去重"
-remaining_sources="$(remove_allowed_source_json "$merged_sources" '198.51.100.20/32')"
-jq -e '
-  length == 2
-  and index("198.51.100.20/32") == null
-  and index("198.51.100.10/32") != null
-  and index("2001:db8::10/128") != null
-' <<<"$remaining_sources" >/dev/null || fail "删除 Shadowsocks 白名单来源时影响了未选中的条目"
-grep -Fq '管理 Shadowsocks 来源白名单（新增 / 删除）' "$repo_dir/index.sh" ||
-  fail "节点管理未明确区分 Shadowsocks 白名单新增与删除"
+(
+  STATE_FILE="$test_root/legacy-shadowsocks-state.json"
+  REALM_STATE_FILE="$test_root/no-realm-state.json"
+  jq '
+    .protocols.shadowsocks.enabled = true |
+    .protocols.shadowsocks.port = 24442 |
+    .protocols.shadowsocks.allowed_sources = ["198.51.100.10/32", "2001:db8::10/128"]
+  ' "$test_root/state/state.json" >"$STATE_FILE"
+
+  firewall_rules="$(desired_managed_firewall_rules)"
+  grep -Fqx $'shadowsocks\ttcp\t24442\t*' <<<"$firewall_rules" ||
+    fail "Shadowsocks 仍按来源 IP 限制托管端口"
+  if grep -Fq '198.51.100.10/32' <<<"$firewall_rules" || grep -Fq '2001:db8::10/128' <<<"$firewall_rules"; then
+    fail "Shadowsocks 旧来源白名单仍被渲染为防火墙规则"
+  fi
+
+  cleanup_removed_traffic_state
+  jq -e '.protocols.shadowsocks | has("allowed_sources") | not' "$STATE_FILE" >/dev/null ||
+    fail "Shadowsocks 旧来源白名单未从状态文件清理"
+)
+if grep -Fq 'Shadowsocks 来源白名单' "$repo_dir/index.sh"; then
+  fail "搭建或管理 Shadowsocks 节点时仍保留来源 IP 限制入口"
+fi
 
 (
   curl() {

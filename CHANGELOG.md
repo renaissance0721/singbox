@@ -26,7 +26,7 @@
 - Xray 只承载选择 Xray 内核的 VLESS；Shadowsocks/Hysteria2 仍由 sing-box 承载，两个服务可在不同端口共存
 - 配置应用改为分别预检 sing-box/Xray，统一停止托管服务检查端口，任一核心启动失败时恢复两份原配置和原服务状态
 - 管理脚本更新、客户端增删和配置重载不会隐式升级 Xray；已安装版本及二进制 SHA-256 会写入状态并在后续使用前核对
-- Shadowsocks 来源白名单改为独立的新增与删除操作；新增来源不再覆盖原列表，删除时逐项选择，并禁止删除最后一条以避免意外全网放行
+- 移除 Shadowsocks 来源 IP/CIDR 白名单及 WireGuard 配对联动；新建和已有 SS 节点均改为由端口管理统一控制防火墙放行
 - 旧 Realm 规则自动迁移为 `direct`，不会因升级改变原转发路径
 - WireGuard 与 Realm 安装生命周期解耦；落地端进入隧道菜单不会被强制安装 Realm
 - Realm 卸载时保留独立 WireGuard 隧道；完整卸载仅删除脚本托管的 `sbwg*` 配置和密钥

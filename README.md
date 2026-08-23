@@ -20,7 +20,7 @@
 - Xray 使用隔离的脚本托管路径和独立 `sbox-xray` 服务，不覆盖系统已有 Xray；管理脚本更新和配置重载不会隐式升级核心
 - 支持客户端新增、删除、导出
 - 自动生成 Reality 密钥、随机密码和 Hysteria2 自签名证书
-- 新建 Shadowsocks 主节点与分流仅提供 SS2022；主节点支持来源 IP/CIDR 白名单
+- 新建 Shadowsocks 主节点与分流仅提供 SS2022；主节点的监听端口由端口与防火墙管理统一控制
 - 经 Shadowsocks、VLESS 或 Hysteria2 入站转发的流量都会拒绝访问本机、私网、链路本地地址和常见云元数据地址
 - Realm 仅启用 TCP 转发；升级时会迁移旧配置并清理脚本管理的 Realm UDP 放行规则
 - Realm 每条规则可选择直接转发或通过脚本托管的点对点 WireGuard 隧道转发
@@ -290,10 +290,7 @@ sbox delete-split-rule
 - 默认使用 `2022-blake3-aes-128-gcm`
 - 默认端口在 `10000-60000` 范围内随机生成
 - 新建节点可选择三种 SS2022 加密方式，并分别生成服务端主密码和用户密码
-- 创建节点时必须填写来源 IP/CIDR 白名单；中转场景应填写中转 VPS 的出口 IP，不要填写端口；多个 IP 使用英文逗号分隔
-- 节点管理中的来源白名单分为“新增”和“删除”：新增只合并去重、不覆盖已有来源；删除按条目选择，并禁止删除最后一条以避免意外恢复全网放行
-- 公网直连需要明确填写 `0.0.0.0/0` 和/或 `::/0`，这等同于相应地址族全网可访问
-- 旧状态文件没有来源白名单时保持全网放行，升级后应在“节点管理”中手动设置
+- Shadowsocks 不再设置来源 IP/CIDR 白名单；启用时与其他协议一样创建普通的托管端口放行规则
 - SS 入站会在域名解析前后拒绝私网、链路本地地址和常见云元数据地址
 
 ### VLESS + Reality
@@ -387,7 +384,7 @@ sudo journalctl -u wg-quick@sbwg0 -n 50 --no-pager
 
 - 确认落地云安全组已放行 WireGuard UDP 端口，且来源是中转公网 IP
 - 确认中转 Endpoint 填写的是落地公网地址和公网映射端口
-- 接口和握手正常但目标 TCP 端口不通时，检查落地节点监听及来源白名单
+- 接口和握手正常但目标 TCP 端口不通时，检查落地节点监听及端口/防火墙放行状态
 - 线路不支持 UDP 时 WireGuard 无法工作，应将 Realm 规则切回直接转发
 
 ### 防火墙同步失败
@@ -422,7 +419,7 @@ apk add --no-cache bash curl jq openssl ca-certificates git tar gzip unzip openr
 - 请在你拥有管理权限的服务器上使用本脚本
 - 一键安装命令会以 root 权限执行 `main` 分支上的 `install.sh`；安装器会拒绝空文件和 Bash 语法错误，但不再绑定 `index.sh` 固定哈希，安全敏感环境应先克隆仓库并审查代码
 - 对外分享客户端配置前，请确认端口、域名、证书和密码都已按预期生成
-- 来源白名单只限制 Shadowsocks 入站来源；VLESS 和 Hysteria2 仍依赖各自的认证信息
+- Shadowsocks、VLESS 和 Hysteria2 入站都依赖各自的认证信息，请妥善保管客户端配置
 - 私网、链路本地地址和元数据阻断应用于 Shadowsocks、VLESS 与 Hysteria2 全部代理入站
 - 客户端订阅、状态、备份和私钥使用最小文件权限；sing-box、脚本托管的 Xray 与 Realm 使用 `sbox-runtime` 低权限用户运行
 - “更新脚本”无需手动输入哈希：脚本会固定校验 GitHub 仓库数字 ID，将 `main` 解析为不可变 commit，并核对提交身份、Git blob 哈希、SHA-256 与 Bash 语法；任一失败都不会覆盖当前脚本

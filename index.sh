@@ -1975,7 +1975,6 @@ init_state_file() {
     "method": "2022-blake3-aes-128-gcm",
     "server_password": "",
     "multiplex": true,
-    "allowed_sources": [],
     "users": []
     },
     "vless_reality": {
@@ -2095,8 +2094,8 @@ cleanup_removed_traffic_state() {
     .runtime.xray.version = (.runtime.xray.version // "") |
     .runtime.xray.binary_sha256 = (.runtime.xray.binary_sha256 // "") |
     .runtime.xray.installed_at = (.runtime.xray.installed_at // "") |
+    del(.protocols.shadowsocks.allowed_sources) |
     .protocols.shadowsocks.users = ((.protocols.shadowsocks.users // []) | cleanup_users) |
-    .protocols.shadowsocks.allowed_sources = ((.protocols.shadowsocks.allowed_sources // []) | map(select(type == "string")) | unique) |
     .protocols.vless_reality.users = ((.protocols.vless_reality.users // []) | cleanup_users) |
     .protocols.hysteria2.users = ((.protocols.hysteria2.users // []) | cleanup_users) |
     .meta.version = $version |
@@ -2663,36 +2662,6 @@ is_valid_ip_or_cidr() {
   is_valid_ipv4_or_cidr "$1" || is_valid_ipv6_or_cidr "$1"
 }
 
-build_allowed_sources_json() {
-  local input=$1 source sources_json='[]'
-
-  while IFS= read -r source; do
-    [[ -n "$source" ]] || continue
-    if ! is_valid_ip_or_cidr "$source"; then
-      printf '无效的来源 IP/CIDR：%s\n' "$source" >&2
-      return 1
-    fi
-    sources_json="$(jq -c --arg source "$source" '. + [$source] | unique' <<<"$sources_json")"
-  done < <(jq -rn --arg input "$input" '
-    $input | gsub("[,;[:space:]]+"; "\n") | split("\n")[] | select(length > 0)
-  ')
-
-  [[ "$(jq -r 'length' <<<"$sources_json")" -gt 0 ]] || return 1
-  printf '%s\n' "$sources_json"
-}
-
-merge_allowed_sources_json() {
-  local current_sources=$1 added_sources=$2
-  jq -cn --argjson current "$current_sources" --argjson added "$added_sources" \
-    '$current + $added | unique'
-}
-
-remove_allowed_source_json() {
-  local current_sources=$1 removed_source=$2
-  jq -cn --argjson current "$current_sources" --arg removed "$removed_source" \
-    '$current | map(select(. != $removed))'
-}
-
 realm_prompt_nonempty_limited() {
   local counter_var=$1
   local title=$2
@@ -2891,7 +2860,7 @@ validate_state() {
   local errors=""
   local ss_enabled vless_enabled hy2_enabled
   local server_address server_address_ipv6 dual_stack outbound_ip_preference vless_server_name handshake_server vless_core
-  local split_name split_enabled split_type split_server split_port split_username split_password split_method split_rule_count split_rule ss_source vless_short_id
+  local split_name split_enabled split_type split_server split_port split_username split_password split_method split_rule_count split_rule vless_short_id
 
   ss_enabled="$(state_get '.protocols.shadowsocks.enabled')"
   vless_enabled="$(state_get '.protocols.vless_reality.enabled')"
@@ -2916,10 +2885,6 @@ validate_state() {
   if [[ "$ss_enabled" == "true" ]]; then
     [[ "$(state_get '.protocols.shadowsocks.users | length')" -gt 0 ]] || errors+=$'Shadowsocks 至少需要一个客户端。\n'
     [[ -n "$(state_get '.protocols.shadowsocks.server_password')" ]] || errors+=$'Shadowsocks 服务端密码不能为空。\n'
-    while IFS= read -r ss_source; do
-      [[ -n "$ss_source" ]] || continue
-      is_valid_ip_or_cidr "$ss_source" || errors+="Shadowsocks 来源白名单无效：${ss_source}"$'\n'
-    done < <(state_get '.protocols.shadowsocks.allowed_sources[]?')
   fi
 
   if [[ "$vless_enabled" == "true" ]]; then
@@ -3921,13 +3886,7 @@ desired_managed_firewall_rules() {
         [$owner, $protocol, ($port | tostring), $source] | @tsv;
       . as $root |
       (if $root.protocols.shadowsocks.enabled then
-        ($root.protocols.shadowsocks.allowed_sources // []) as $sources |
-        if ($sources | length) == 0 then
-          row("shadowsocks"; "tcp"; $root.protocols.shadowsocks.port; "*")
-        else
-          $sources[] as $source |
-          row("shadowsocks"; "tcp"; $root.protocols.shadowsocks.port; $source)
-        end
+        row("shadowsocks"; "tcp"; $root.protocols.shadowsocks.port; "*")
       else empty end),
       (if $root.protocols.vless_reality.enabled then
         row("vless_reality"; "tcp"; $root.protocols.vless_reality.port; "*")
@@ -5032,34 +4991,6 @@ ${invitation}
 配对信息仅包含公钥、Endpoint 和私网地址，不包含私钥。"
 }
 
-offer_wireguard_peer_for_shadowsocks() {
-  local peer_address=$1 source current_sources previous_state
-  [[ -s "$STATE_FILE" ]] && jq -e '.protocols.shadowsocks.enabled == true' "$STATE_FILE" >/dev/null 2>&1 || return 0
-  source="${peer_address}/32"
-  if jq -e --arg source "$source" '.protocols.shadowsocks.allowed_sources[]? | select(. == $source)' "$STATE_FILE" >/dev/null 2>&1; then
-    return 0
-  fi
-  current_sources="$(state_get '(.protocols.shadowsocks.allowed_sources // []) | join(", ")')"
-  if [[ -z "$current_sources" ]]; then
-    ui_yesno "检测到本机 Shadowsocks 当前对全网开放。是否改为只允许 WireGuard 中转来源 ${source}？这会关闭原有公网直连。" || return 0
-  else
-    ui_yesno "是否将 WireGuard 中转来源 ${source} 加入 Shadowsocks 白名单？当前来源：${current_sources}" || return 0
-  fi
-  previous_state="$(mktemp "$TMP_DIR/singbox-state-backup.XXXXXX")" || return 1
-  install -m 0600 "$STATE_FILE" "$previous_state" || { rm -f "$previous_state"; return 1; }
-  if ! state_jq --arg source "$source" --arg ts "$(utc_now)" '
-    .protocols.shadowsocks.allowed_sources = ((.protocols.shadowsocks.allowed_sources // []) + [$source] | unique) |
-    .meta.updated_at = $ts
-  ' || ! apply_config; then
-    install -m 0600 "$previous_state" "$STATE_FILE" || true
-    apply_config || true
-    rm -f "$previous_state"
-    ui_msg "Shadowsocks 来源白名单更新失败，已恢复原配置。"
-    return 1
-  fi
-  rm -f "$previous_state"
-}
-
 create_wireguard_landing_profile() {
   local name endpoint_host endpoint_port listen_port allowed_source interface id addresses relay_address landing_address public_key invitation
   local error_count=0
@@ -5242,8 +5173,7 @@ complete_wireguard_landing_pairing() {
     return 1
   fi
   rm -f "$previous_state"
-  offer_wireguard_peer_for_shadowsocks "$relay_address" || true
-  ui_msg "WireGuard 配对已完成。接口 ${interface} 已启动${address_notice}；请在中转端执行隧道测试，确认最近握手和目标端口均正常。落地节点防火墙应允许来源 ${relay_address}/32。"
+  ui_msg "WireGuard 配对已完成。接口 ${interface} 已启动${address_notice}；请在中转端执行隧道测试，确认最近握手和目标端口均正常。Shadowsocks 等落地服务端口请在端口管理中统一管理。"
 }
 
 show_wireguard_profiles() {
@@ -6221,23 +6151,17 @@ repair_install() {
 }
 
 configure_shadowsocks() {
-  local vless_port port server_password listen_addr method sources_input sources_json current_sources
+  local vless_port port server_password listen_addr method
 
   prompt_node_name_for_protocol || return 1
 
   vless_port="$(state_get '.protocols.vless_reality.port')"
   port="$(prompt_number "Shadowsocks 端口" "请输入 Shadowsocks 监听端口" "$(generate_random_service_port_excluding "$vless_port")" 1 65535)" || return 1
   method="$(select_shadowsocks_method "$(state_get '.protocols.shadowsocks.method // "2022-blake3-aes-128-gcm"')")" || return 1
-  current_sources="$(state_get '(.protocols.shadowsocks.allowed_sources // []) | join(",")')"
-  sources_input="$(prompt_nonempty "Shadowsocks 来源白名单" "请输入允许连接此 SS 节点的来源公网 IP。中转场景请填写中转 VPS 的出口 IP，不要填写端口。多个 IP 使用英文逗号分隔。单个 IPv4 地址与 /32 写法效果相同。公网直连需明确填写 0.0.0.0/0 和/或 ::/0。" "$current_sources")" || return 1
-  sources_json="$(build_allowed_sources_json "$sources_input")" || {
-    ui_msg "来源白名单格式无效，请填写 IP 或 CIDR。"
-    return 1
-  }
   server_password="$(generate_shadowsocks_password "$method")"
   listen_addr="$(default_listen_address)"
 
-  state_jq --argjson port "$port" --arg method "$method" --arg server_password "$server_password" --arg listen_addr "$listen_addr" --argjson allowed_sources "$sources_json" --arg ts "$(utc_now)" '
+  state_jq --argjson port "$port" --arg method "$method" --arg server_password "$server_password" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
     .protocols.shadowsocks.enabled = true |
     .protocols.shadowsocks.listen = $listen_addr |
     .protocols.shadowsocks.port = $port |
@@ -6245,7 +6169,7 @@ configure_shadowsocks() {
     .protocols.shadowsocks.method = $method |
     .protocols.shadowsocks.server_password = $server_password |
     .protocols.shadowsocks.multiplex = true |
-    .protocols.shadowsocks.allowed_sources = $allowed_sources |
+    del(.protocols.shadowsocks.allowed_sources) |
     .meta.updated_at = $ts
   '
 
@@ -6256,110 +6180,6 @@ configure_shadowsocks() {
   fi
 
   apply_config
-}
-
-apply_shadowsocks_allowed_sources() {
-  local sources_json=$1 success_message=${2:-Shadowsocks 来源白名单已更新并同步到防火墙。}
-
-  state_jq --argjson allowed_sources "$sources_json" --arg ts "$(utc_now)" '
-    .protocols.shadowsocks.allowed_sources = $allowed_sources |
-    .meta.updated_at = $ts
-  '
-  if ! prepare_managed_firewall; then
-    ui_msg "防火墙环境不可用，来源白名单已保存但尚未应用；现有服务未停止。请执行 sbox repair-install 后重试。"
-    return 1
-  fi
-  stop_sing_box
-  if ! sync_managed_firewall_rules; then
-    ui_msg "来源白名单已保存，但防火墙同步失败；sing-box 已保持停止，请修复防火墙后重试。"
-    return 1
-  fi
-  restart_sing_box || return 1
-  ui_msg "$success_message"
-}
-
-add_shadowsocks_allowed_sources() {
-  local current_json sources_input added_json merged_json added_display
-
-  if [[ "$(state_get '.protocols.shadowsocks.enabled')" != "true" ]]; then
-    ui_msg "Shadowsocks 当前未启用。"
-    return 0
-  fi
-
-  sources_input="$(prompt_nonempty "新增 Shadowsocks 白名单来源" "请输入要新增的来源公网 IP/CIDR。中转场景请填写中转 VPS 的出口 IP，不要填写端口；多个来源使用英文逗号分隔。此操作只会新增，不会覆盖已有来源。" "")" || return 1
-  added_json="$(build_allowed_sources_json "$sources_input")" || {
-    ui_msg "来源白名单格式无效，请填写 IP 或 CIDR。"
-    return 1
-  }
-  current_json="$(state_get -c '(.protocols.shadowsocks.allowed_sources // [])')"
-  merged_json="$(merge_allowed_sources_json "$current_json" "$added_json")"
-
-  if [[ "$merged_json" == "$current_json" ]]; then
-    ui_msg "输入的来源已在白名单中，未做修改。"
-    return 0
-  fi
-
-  added_display="$(jq -nr --argjson current "$current_json" --argjson added "$added_json" \
-    '$added - $current | join(", ")')"
-  apply_shadowsocks_allowed_sources "$merged_json" "已新增 Shadowsocks 白名单来源：${added_display}。原有来源已保留。"
-}
-
-delete_shadowsocks_allowed_source() {
-  local current_json source_count choice selected_source updated_json
-  local -a sources=()
-  local -a options=()
-  local index
-
-  if [[ "$(state_get '.protocols.shadowsocks.enabled')" != "true" ]]; then
-    ui_msg "Shadowsocks 当前未启用。"
-    return 0
-  fi
-
-  current_json="$(state_get -c '(.protocols.shadowsocks.allowed_sources // [])')"
-  source_count="$(jq -r 'length' <<<"$current_json")"
-  if (( source_count == 0 )); then
-    ui_msg "当前没有显式白名单来源（旧配置为全网放行），没有可删除的条目。请先新增来源以启用限制。"
-    return 0
-  fi
-  if (( source_count == 1 )); then
-    ui_msg "白名单仅剩一条：$(jq -r '.[0]' <<<"$current_json")。为避免删除后变成全网放行，已禁止删除最后一条来源；请先新增替代来源。"
-    return 0
-  fi
-
-  mapfile -t sources < <(jq -r '.[]' <<<"$current_json")
-  for index in "${!sources[@]}"; do
-    options+=("$((index + 1))" "${sources[$index]}")
-  done
-  options+=("0" "返回白名单管理")
-  choice="$(ui_menu "删除 Shadowsocks 白名单来源" "请选择要删除的来源；未选中的来源都会保留。" "${options[@]}")" || return 1
-  [[ "$choice" == "0" ]] && return 0
-
-  selected_source="${sources[$((10#$choice - 1))]}"
-  ui_yesno "确认从 Shadowsocks 白名单删除 ${selected_source}？" || return 0
-  updated_json="$(remove_allowed_source_json "$current_json" "$selected_source")"
-  apply_shadowsocks_allowed_sources "$updated_json" "已删除 Shadowsocks 白名单来源：${selected_source}。其余来源已保留。"
-}
-
-configure_shadowsocks_allowed_sources() {
-  local choice current_sources
-
-  if [[ "$(state_get '.protocols.shadowsocks.enabled')" != "true" ]]; then
-    ui_msg "Shadowsocks 当前未启用。"
-    return 0
-  fi
-
-  while true; do
-    current_sources="$(state_get 'if ((.protocols.shadowsocks.allowed_sources // []) | length) == 0 then "*（旧配置：全网放行）" else (.protocols.shadowsocks.allowed_sources | join(", ")) end')"
-    choice="$(ui_menu "Shadowsocks 来源白名单管理" "当前允许来源：${current_sources}" \
-      "1" "新增来源（保留已有来源）" \
-      "2" "删除来源（逐项选择）" \
-      "0" "返回节点管理")" || return 1
-    case "$choice" in
-      1) add_shadowsocks_allowed_sources || true ;;
-      2) delete_shadowsocks_allowed_source || true ;;
-      0) return 0 ;;
-    esac
-  done
 }
 
 configure_vless_reality() {
@@ -6669,8 +6489,7 @@ node_submenu() {
       "4" "查看订阅链接" \
       "5" "重新生成配置并重载服务" \
       "6" "更改节点地址" \
-      "7" "管理 Shadowsocks 来源白名单（新增 / 删除）" \
-      "8" "设置出站 IPv4 / IPv6 策略" \
+      "7" "设置出站 IPv4 / IPv6 策略" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || continue
 
@@ -6694,9 +6513,6 @@ node_submenu() {
         change_node_address || true
         ;;
       7)
-        configure_shadowsocks_allowed_sources || true
-        ;;
-      8)
         configure_outbound_ip_preference || true
         ;;
       0)
@@ -8311,7 +8127,6 @@ Xray 状态: $xray_status
 [Shadowsocks]
 enabled = $(state_get '.protocols.shadowsocks.enabled')
 port = $(state_get '.protocols.shadowsocks.port')
-allowed_sources = $(state_get 'if ((.protocols.shadowsocks.allowed_sources // []) | length) == 0 then "*（旧配置：全网）" else (.protocols.shadowsocks.allowed_sources | join(", ")) end')
 users = $ss_users
 
 [VLESS + Reality]
@@ -8609,7 +8424,7 @@ usage() {
   2. Hysteria2 默认使用自签名证书。
   3. 一键安装使用官方原生 sing-box 软件包；选择 Xray VLESS 时按需下载经 SHA-256 校验的官方稳定版。
   4. 支持添加多个 SOCKS5 / Shadowsocks 分流落地，每个落地独立绑定规则集。
-  5. 新建 Shadowsocks 节点与分流仅提供 SS2022，并支持来源 IP/CIDR 白名单。
+  5. 新建 Shadowsocks 节点与分流仅提供 SS2022，节点端口由端口管理统一控制。
   6. repair-install 会修复 sing-box、已选用的 Xray、权限和服务，但不会删除状态文件、客户端或分流规则，也不会隐式升级 Xray。
   7. 一键安装只安装环境；节点名称和出口地址在新建节点时填写。
 EOF

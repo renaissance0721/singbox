@@ -7540,7 +7540,7 @@ add_realm_forward_rule() {
     return 1
   }
 
-  listen_port="$(realm_prompt_number_limited error_count "本地端口" "请输入需要监听的本地端口" "$(generate_random_service_port)" 10000 60000)" || return 1
+  listen_port="$(realm_prompt_number_limited error_count "本地端口" "请输入需要监听的本地端口" "$(generate_random_service_port)" 1 65535)" || return 1
   mode_choice="$(select_realm_forward_mode)" || return 1
   case "$mode_choice" in
     1)
@@ -7609,8 +7609,8 @@ add_realm_range_rule() {
   }
 
   while true; do
-    listen_start="$(realm_prompt_number_limited error_count "起始端口" "请输入本地起始端口" "$(generate_random_service_port)" 10000 60000)" || return 1
-    listen_end="$(realm_prompt_number_limited error_count "结束端口" "请输入本地结束端口" "$listen_start" 10000 60000)" || return 1
+    listen_start="$(realm_prompt_number_limited error_count "起始端口" "请输入本地起始端口" "$(generate_random_service_port)" 1 65535)" || return 1
+    listen_end="$(realm_prompt_number_limited error_count "结束端口" "请输入本地结束端口" "$listen_start" 1 65535)" || return 1
     if (( listen_end >= listen_start )); then
       break
     fi

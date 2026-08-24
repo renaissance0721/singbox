@@ -562,6 +562,12 @@ grep -Fq 'repair_sing_box_netlink_hardening' "$repo_dir/index.sh" ||
   fail "Existing sing-box installations do not auto-repair missing AF_NETLINK access"
 grep -Fq 'Restart=always' "$repo_dir/index.sh" || fail "Realm systemd service does not restart after every unexpected exit"
 grep -Fq "'cap_net_bind_service=+ep'" "$repo_dir/index.sh" || fail "OpenRC 低权限服务无法兼容低端口监听"
+grep -Fq '"本地端口" "请输入需要监听的本地端口" "$(generate_random_service_port)" 1 65535' "$repo_dir/index.sh" ||
+  fail "Realm 单端口转发未允许监听 TCP/443 等低端口"
+grep -Fq '"起始端口" "请输入本地起始端口" "$(generate_random_service_port)" 1 65535' "$repo_dir/index.sh" ||
+  fail "Realm 端口段转发起始端口未允许低端口"
+grep -Fq '"结束端口" "请输入本地结束端口" "$listen_start" 1 65535' "$repo_dir/index.sh" ||
+  fail "Realm 端口段转发结束端口未覆盖完整端口范围"
 grep -Fq 'ensure_setcap_command' "$repo_dir/index.sh" || fail "OpenRC 节点流程不会自动修复缺失的 setcap"
 grep -Eq 'apk add .*libcap-setcap' "$repo_dir/index.sh" || fail "APK 无法自动安装 setcap"
 grep -Eq 'apk add .*iptables-openrc' "$repo_dir/index.sh" || fail "APK 依赖未安装 OpenRC 防火墙持久化组件"

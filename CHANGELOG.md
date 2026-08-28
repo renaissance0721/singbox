@@ -4,6 +4,7 @@
 
 ## [Unreleased]
 
+- VLESS + Reality 创建流程新增地区化 SNI 预设：美西、香港、日本使用对应候选域名，其他地区继续默认 `www.tesla.com`；日本提供两个候选项，已有节点可保持当前 SNI，选定后仍允许手动修改。
 - 检测到 APT/dpkg 软件包锁被其他进程持有时，安全等待其正常结束后自动重试 `dpkg --configure -a`；等待超时会报告持锁 PID，且绝不删除锁文件。
 - 将 VLESS Reality 的默认 SNI 与握手站点恢复为 `www.tesla.com`，避免未经跨线路验证的目标站点导致握手兼容性问题。
 - 修复未启用 `systemd-resolved` 的 Linux 上 sing-box 本地 DNS 解析失败：启用 Go 解析器，避免 VLESS Reality 握手站域名解析报错。

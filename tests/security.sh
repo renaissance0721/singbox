@@ -310,6 +310,70 @@ test_configure_outbound_ip_preference() {
 }
 (test_configure_outbound_ip_preference)
 
+(
+  ui_menu() {
+    [[ "$*" == *"美西（www.cartoonbrew.com）"* && "$*" == *"香港（ani-com.hk）"* && "$*" == *"其他地区（www.tesla.com）"* ]] ||
+      fail "Reality SNI 地区菜单缺少预设域名"
+    printf '1\n'
+  }
+  [[ "$(select_reality_sni_default "" false)" == "www.cartoonbrew.com" ]] ||
+    fail "Reality 美西地区未映射到预期 SNI"
+)
+
+(
+  ui_menu() {
+    case "$1" in
+      "Reality SNI 地区") printf '3\n' ;;
+      "日本 Reality SNI")
+        [[ "$*" == *"shin-ei-animation.jp（默认）"* && "$*" == *"www.ritao.co（阿里精品）"* ]] ||
+          fail "Reality 日本地区菜单缺少预设域名"
+        printf '2\n'
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  [[ "$(select_reality_sni_default "" false)" == "www.ritao.co" ]] ||
+    fail "Reality 日本地区备选未映射到预期 SNI"
+)
+
+(
+  ui_menu() {
+    [[ "$*" == *"保持当前 SNI（custom.example.com）"* ]] ||
+      fail "已有 Reality 节点缺少保持当前 SNI 选项"
+    printf '5\n'
+  }
+  [[ "$(select_reality_sni_default "custom.example.com" true)" == "custom.example.com" ]] ||
+    fail "已有 Reality 节点无法保持当前 SNI"
+)
+
+test_configure_vless_reality_region_sni() {
+  local STATE_FILE="$test_root/reality-region-state.json"
+  install -m 0600 "$test_root/state/state.json" "$STATE_FILE"
+  state_jq '.protocols.vless_reality.enabled = false'
+
+  ui_menu() {
+    case "$1" in
+      "VLESS + Reality 内核") printf '2\n' ;;
+      "Reality SNI 地区") printf '2\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  have_cmd() { return 0; }
+  prompt_node_name_for_protocol() { return 0; }
+  prompt_number() { printf '%s\n' "$3"; }
+  prompt_nonempty() { printf '%s\n' "$3"; }
+  apply_sing_box_state_transaction() { rm -f "$1"; return 0; }
+
+  configure_vless_reality || fail "Reality 地区 SNI 配置流程失败"
+  jq -e '
+    .protocols.vless_reality.enabled == true
+    and .protocols.vless_reality.server_name == "ani-com.hk"
+    and .protocols.vless_reality.handshake_server == "ani-com.hk"
+    and .protocols.vless_reality.handshake_port == 443
+  ' "$STATE_FILE" >/dev/null || fail "Reality 地区 SNI 未同步写入服务名和握手站点"
+}
+(test_configure_vless_reality_region_sni)
+
 rendered="$test_root/rendered.json"
 render_config >"$rendered"
 if [[ -n "${SBOX_TEST_RENDERED_CONFIG:-}" ]]; then

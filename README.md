@@ -302,7 +302,9 @@ sbox delete-split-rule
 - Xray 首次安装只选择 GitHub 标记的官方稳定版，校验 `.dgst` SHA-256 后记录版本和二进制摘要；配置操作不会自动升级
 - 默认流控为 `xtls-rprx-vision`
 - 会自动生成 Reality 密钥对和 `short_id`
+- 创建时可按服务器地区选择默认 SNI：美西使用 `www.cartoonbrew.com`，香港使用 `ani-com.hk`，日本可选 `shin-ei-animation.jp` 或 `www.ritao.co`，其他地区使用 `www.tesla.com`；选定后仍可手动修改
 - 已存在 VLESS 时重新选择内核会复用 UUID、Reality 密钥和 `short_id`，避免现有客户端链接失效
+- 已存在 VLESS 时可在地区菜单中保持当前 SNI，避免重新配置时意外更换伪装域名
 - 首次配置建议确认伪装域名和端口是否可访问
 - VLESS 入站会在域名解析前后拒绝本机、私网、链路本地地址和常见云元数据地址
 - 当前 SRS/GeoSite 分流由 sing-box 实现；选择 Xray 的 VLESS 不继承这些分流，其他由 sing-box 承载的协议不受影响

@@ -6416,9 +6416,76 @@ configure_shadowsocks() {
   apply_config
 }
 
+select_reality_sni_default() {
+  local current_sni=${1:-}
+  local include_current=${2:-false}
+  local region_choice japan_choice
+
+  while true; do
+    if [[ "$include_current" == "true" && -n "$current_sni" && "$current_sni" != "null" ]]; then
+      region_choice="$(ui_menu "Reality SNI 地区" "请选择与服务器所在地区匹配的默认伪装域名；选定后仍可手动修改。" \
+        "1" "美西（www.cartoonbrew.com）" \
+        "2" "香港（ani-com.hk）" \
+        "3" "日本" \
+        "4" "其他地区（www.tesla.com）" \
+        "5" "保持当前 SNI（${current_sni}）" \
+        "0" "返回")" || return 1
+    else
+      region_choice="$(ui_menu "Reality SNI 地区" "请选择与服务器所在地区匹配的默认伪装域名；选定后仍可手动修改。" \
+        "1" "美西（www.cartoonbrew.com）" \
+        "2" "香港（ani-com.hk）" \
+        "3" "日本" \
+        "4" "其他地区（www.tesla.com）" \
+        "0" "返回")" || return 1
+    fi
+
+    case "$region_choice" in
+      1)
+        printf 'www.cartoonbrew.com\n'
+        return 0
+        ;;
+      2)
+        printf 'ani-com.hk\n'
+        return 0
+        ;;
+      3)
+        japan_choice="$(ui_menu "日本 Reality SNI" "请选择日本地区使用的默认伪装域名。" \
+          "1" "shin-ei-animation.jp（默认）" \
+          "2" "www.ritao.co（阿里精品）" \
+          "0" "返回地区选择")" || return 1
+        case "$japan_choice" in
+          1)
+            printf 'shin-ei-animation.jp\n'
+            return 0
+            ;;
+          2)
+            printf 'www.ritao.co\n'
+            return 0
+            ;;
+          0) continue ;;
+          *) return 1 ;;
+        esac
+        ;;
+      4)
+        printf 'www.tesla.com\n'
+        return 0
+        ;;
+      5)
+        if [[ "$include_current" == "true" && -n "$current_sni" && "$current_sni" != "null" ]]; then
+          printf '%s\n' "$current_sni"
+          return 0
+        fi
+        return 1
+        ;;
+      0) return 1 ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
 configure_vless_reality() {
-  local core_choice core ss_port port sni handshake_port keypair private_key public_key short_id listen_addr previous_state_file
-  local default_port default_sni default_handshake_port
+  local core_choice core ss_port port selected_sni sni handshake_port keypair private_key public_key short_id listen_addr previous_state_file
+  local default_port default_sni default_handshake_port vless_enabled
 
   core_choice="$(ui_menu "VLESS + Reality 内核" "两种内核使用相同的端口、Reality 参数、客户端和分享链接。Xray 仅在首次选择时下载固定稳定版本，配置变更不会自动升级。" \
     "1" "Xray-core（未安装则自动下载）" \
@@ -6455,7 +6522,8 @@ configure_vless_reality() {
   fi
 
   ss_port="$(state_get '.protocols.shadowsocks.port')"
-  if [[ "$(state_get '.protocols.vless_reality.enabled')" == "true" ]]; then
+  vless_enabled="$(state_get '.protocols.vless_reality.enabled')"
+  if [[ "$vless_enabled" == "true" ]]; then
     default_port="$(state_get '.protocols.vless_reality.port')"
     default_sni="$(state_get '.protocols.vless_reality.server_name')"
     default_handshake_port="$(state_get '.protocols.vless_reality.handshake_port')"
@@ -6467,7 +6535,10 @@ configure_vless_reality() {
   port="$(prompt_number "VLESS 端口" "请输入 VLESS + Reality 监听端口" "$default_port" 1 65535)" || {
     install -m 0600 "$previous_state_file" "$STATE_FILE"; rm -f "$previous_state_file"; return 1;
   }
-  sni="$(prompt_nonempty "Reality SNI" "请输入第三方 Reality 伪装域名（例如 www.cloudflare.com，不能填写本机 IP 或节点域名）" "$default_sni")" || {
+  selected_sni="$(select_reality_sni_default "$default_sni" "$vless_enabled")" || {
+    install -m 0600 "$previous_state_file" "$STATE_FILE"; rm -f "$previous_state_file"; return 1;
+  }
+  sni="$(prompt_nonempty "Reality SNI" "请确认地区默认域名，或输入其他第三方 Reality 伪装域名（不能填写本机 IP 或节点域名）" "$selected_sni")" || {
     install -m 0600 "$previous_state_file" "$STATE_FILE"; rm -f "$previous_state_file"; return 1;
   }
   handshake_port="$(prompt_number "Reality 握手端口" "请输入 Reality 伪装站点端口" "$default_handshake_port" 1 65535)" || {

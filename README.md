@@ -421,6 +421,13 @@ sudo yum install curl jq openssl ca-certificates git tar gzip unzip iproute ipta
 apk add --no-cache bash curl jq openssl ca-certificates git tar gzip unzip openrc coreutils findutils iproute2 iptables iptables-openrc su-exec libcap-setcap
 ```
 
+### `sing-box` 软件包安装失败
+
+- Alpine 会先使用当前已配置的软件源，再显式尝试当前版本的官方 `community` 仓库；旧稳定版没有该软件包时，最后尝试由 `apk` 验签的官方 `edge/community` 软件包
+- Debian / Ubuntu 请检查错误上方的 `apt-get update` 输出，以及 `https://sing-box.app/gpg.key`、`https://deb.sagernet.org/` 是否可访问
+- RHEL / CentOS 请检查错误上方的 DNF/YUM 输出，以及 `https://sing-box.app/sing-box.repo` 是否可访问
+- 脚本不会用未经签名或摘要校验的远程脚本、软件包或裸二进制绕过安装失败
+
 ## 安全提醒
 
 - 请在你拥有管理权限的服务器上使用本脚本

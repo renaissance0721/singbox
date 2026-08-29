@@ -781,6 +781,47 @@ install_dependencies() {
   esac
 }
 
+alpine_release_branch() {
+  local release_file="${ALPINE_RELEASE_FILE:-/etc/alpine-release}" version
+
+  [[ -r "$release_file" ]] || return 1
+  version="$(head -n 1 "$release_file" 2>/dev/null | tr -d '[:space:]')"
+  if [[ "$version" =~ ^([0-9]+)\.([0-9]+)(\.|$) ]]; then
+    printf 'v%s.%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    return 0
+  fi
+
+  return 1
+}
+
+install_sing_box_apk_package() {
+  local branch="" stable_repository=""
+
+  if apk add --no-cache sing-box; then
+    return 0
+  fi
+
+  # Minimal Alpine images commonly leave community disabled. Retry against
+  # the matching official repository explicitly so apk still verifies the
+  # package with Alpine's trusted signing keys.
+  branch="$(alpine_release_branch || true)"
+  if [[ -n "$branch" ]]; then
+    stable_repository="https://dl-cdn.alpinelinux.org/alpine/${branch}/community"
+    log "当前 Alpine 仓库未能安装 sing-box，尝试已签名的 ${branch}/community 软件包..."
+    if apk add --no-cache --repository "$stable_repository" sing-box; then
+      return 0
+    fi
+  fi
+
+  # sing-box was added to Alpine after some still-used stable releases. The
+  # edge package is self-contained apart from musl and remains signature-
+  # checked by apk; this avoids downloading an unchecked upstream binary.
+  log "当前 Alpine 版本未提供 sing-box，尝试已签名的 edge/community 软件包..."
+  apk add --no-cache \
+    --repository "https://dl-cdn.alpinelinux.org/alpine/edge/community" \
+    sing-box
+}
+
 install_sing_box_apt_repo() {
   local key_tmp key_fingerprint
   normalize_debian_apt_sources || warn "Debian apt 源自动修复失败，将继续尝试安装 sing-box。"
@@ -850,7 +891,7 @@ install_sing_box() {
 
   case "$PKG_MANAGER" in
     apk)
-      if apk add --no-cache sing-box; then
+      if install_sing_box_apk_package; then
         installed=1
       fi
       ;;
@@ -867,7 +908,7 @@ install_sing_box() {
   esac
 
   if (( ! installed )); then
-    die "sing-box 签名软件包安装失败；为避免以 root 执行未校验的远程脚本或二进制，已拒绝不安全的后备安装。"
+    die "sing-box 签名软件包安装失败（包管理器：${PKG_MANAGER}）。请检查上方软件源、网络或架构错误；为避免以 root 执行未校验的远程脚本或二进制，已拒绝不安全的后备安装。"
   fi
 
   hash -r 2>/dev/null || true

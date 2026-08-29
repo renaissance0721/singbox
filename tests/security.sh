@@ -115,6 +115,39 @@ EOF
 chmod 0600 "$STATE_FILE"
 
 (
+  ALPINE_RELEASE_FILE="$test_root/alpine-release"
+  apk_log="$test_root/sing-box-apk-install.log"
+  printf '3.21.4\n' >"$ALPINE_RELEASE_FILE"
+  apk() {
+    printf '%s\n' "$*" >>"$apk_log"
+    [[ "$*" == *'/edge/community'* ]]
+  }
+
+  install_sing_box_apk_package || fail "Alpine 旧稳定版未回退到经 apk 验签的 edge/community 软件包"
+  [[ "$(sed -n '1p' "$apk_log")" == 'add --no-cache sing-box' ]] ||
+    fail "Alpine sing-box 安装没有先使用系统已配置的软件源"
+  grep -Fxq 'add --no-cache --repository https://dl-cdn.alpinelinux.org/alpine/v3.21/community sing-box' "$apk_log" ||
+    fail "Alpine sing-box 安装未尝试当前稳定版的已签名 community 仓库"
+  grep -Fxq 'add --no-cache --repository https://dl-cdn.alpinelinux.org/alpine/edge/community sing-box' "$apk_log" ||
+    fail "Alpine sing-box 安装未使用经 apk 验签的 edge/community 后备包"
+)
+
+(
+  ALPINE_RELEASE_FILE="$test_root/alpine-release-current"
+  apk_log="$test_root/sing-box-apk-stable-install.log"
+  printf '3.23.1\n' >"$ALPINE_RELEASE_FILE"
+  apk() {
+    printf '%s\n' "$*" >>"$apk_log"
+    [[ "$*" == *'/v3.23/community'* ]]
+  }
+
+  install_sing_box_apk_package || fail "Alpine 未启用 community 时无法从当前稳定版签名仓库安装 sing-box"
+  if grep -Fq '/edge/community' "$apk_log"; then
+    fail "当前 Alpine 稳定版已有 sing-box 时仍错误混用 edge 仓库"
+  fi
+)
+
+(
   STATE_FILE="$test_root/legacy-shadowsocks-state.json"
   REALM_STATE_FILE="$test_root/no-realm-state.json"
   jq '

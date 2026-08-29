@@ -6737,13 +6737,25 @@ configure_outbound_ip_preference() {
 }
 
 node_menu_text() {
+  local vless_enabled vless_core vless_status
+  vless_enabled="$(state_get '.protocols.vless_reality.enabled // false')"
+  vless_status="VLESS + Reality：${vless_enabled}"
+  if [[ "$vless_enabled" == "true" ]]; then
+    vless_core="$(state_get '.protocols.vless_reality.core // "sing-box"')"
+    case "$vless_core" in
+      xray|sing-box) ;;
+      *) vless_core="未知" ;;
+    esac
+    vless_status+=$'\n'"VLESS 核心类型：${vless_core}"
+  fi
+
   cat <<EOF
 节点地址：$(state_get '.meta.server_address // "-"')
 IPv6 地址：$(state_get 'if (.meta.dual_stack // false) then (.meta.server_address_ipv6 // "-") else "未启用" end')
 网络模式：$(state_get 'if (.meta.dual_stack // false) then "IPv4 / IPv6 双栈" elif ((.meta.server_address // "") | contains(":")) then "IPv6" else "IPv4" end')
 出站访问：$(outbound_ip_preference_label)
 Shadowsocks：$(state_get '.protocols.shadowsocks.enabled')
-VLESS + Reality：$(state_get 'if .protocols.vless_reality.enabled then ("true（内核：" + (.protocols.vless_reality.core // "sing-box") + "）") else "false" end')
+${vless_status}
 Hysteria2：$(state_get '.protocols.hysteria2.enabled')
 
 请选择要执行的节点操作（输入 0 返回上一级，输入 00 退出脚本）

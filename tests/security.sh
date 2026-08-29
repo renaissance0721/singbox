@@ -115,6 +115,25 @@ EOF
 chmod 0600 "$STATE_FILE"
 
 (
+  STATE_FILE="$test_root/node-menu-state.json"
+  cp "$test_root/state/state.json" "$STATE_FILE"
+
+  menu_text="$(node_menu_text)"
+  grep -Fq 'VLESS + Reality：true' <<<"$menu_text" || fail "节点管理未显示已搭建的 VLESS 状态"
+  grep -Fq 'VLESS 核心类型：sing-box' <<<"$menu_text" || fail "旧 VLESS 状态缺少 core 时未默认显示 sing-box"
+
+  state_jq '.protocols.vless_reality.core = "xray"'
+  menu_text="$(node_menu_text)"
+  grep -Fq 'VLESS 核心类型：xray' <<<"$menu_text" || fail "节点管理未显示 VLESS 的 Xray 核心类型"
+
+  state_jq '.protocols.vless_reality.enabled = false'
+  menu_text="$(node_menu_text)"
+  if grep -Fq 'VLESS 核心类型：' <<<"$menu_text"; then
+    fail "未搭建 VLESS 时节点管理仍显示核心类型"
+  fi
+)
+
+(
   ALPINE_RELEASE_FILE="$test_root/alpine-release"
   apk_log="$test_root/sing-box-apk-install.log"
   printf '3.21.4\n' >"$ALPINE_RELEASE_FILE"

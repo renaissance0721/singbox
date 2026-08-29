@@ -4,6 +4,7 @@
 
 ## [Unreleased]
 
+- 修复旧版 glibc 系统安装新版 Realm 后因缺少 `GLIBC_2.32` 至 `GLIBC_2.38` 而无法启动：Linux 统一使用经 GitHub SHA-256 校验并通过本机自检的便携 musl 构建；进入 Realm 菜单或执行 `repair-install` 时会自动替换已识别的不兼容二进制并保留规则。
 - 修复 Alpine 未启用 `community` 或旧稳定版尚未收录 sing-box 时的安装失败：依次尝试当前版本与 `edge/community` 的 Alpine 官方签名软件包，并继续拒绝未校验脚本或二进制后备安装。
 - VLESS + Reality 创建流程新增地区化 SNI 预设：美西、香港、日本使用对应候选域名，其他地区继续默认 `www.tesla.com`；日本提供两个候选项，已有节点可保持当前 SNI，选定后仍允许手动修改。
 - 检测到 APT/dpkg 软件包锁被其他进程持有时，安全等待其正常结束后自动重试 `dpkg --configure -a`；等待超时会报告持锁 PID，且绝不删除锁文件。

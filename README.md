@@ -355,7 +355,7 @@ sbox delete-split-rule
 ## 更新、修复与卸载
 
 - “更新脚本”只更新管理脚本项目。更新成功后会重新打开面板；sing-box、Xray、节点和规则不会因此被删除或升级。
-- `sbox repair-install` 使用当前已经安装的管理脚本重新检查依赖，修复 sing-box、已选用的 Xray、运行用户、文件权限、服务与防火墙恢复环境，然后重新应用现有配置。已有 Xray 保持记录版本，不会隐式升级。
+- `sbox repair-install` 使用当前已经安装的管理脚本重新检查依赖，修复 sing-box、已选用的 Xray、Realm 二进制兼容性、运行用户、文件权限、服务与防火墙恢复环境，然后重新应用现有配置。已有 Xray 保持记录版本，不会隐式升级。
 - `sbox uninstall` 会在确认后停止并禁用 sing-box、脚本托管的 `sbox-xray`、Realm 和脚本托管的 `sbwg*` WireGuard 隧道，清理托管防火墙规则，卸载 sing-box 软件包，并删除本项目的配置、状态、密钥、客户端导出和管理命令。
 - 完整卸载不会删除 `/usr/local/bin/xray`、用户已有的 `xray.service`、非 `sbwg*` WireGuard 配置，也不会修改云安全组、外部防火墙或 NAT 映射。
 - 完整卸载不会删除非 `sbwg*` 的用户 WireGuard 配置，也不会修改云安全组、外部防火墙或 NAT 映射。卸载前请自行备份需要保留的客户端信息和配置。
@@ -373,6 +373,15 @@ journalctl -u sing-box -n 50 --no-pager
 ```bash
 journalctl -u sbox-xray -n 50 --no-pager
 ```
+
+### Realm 提示缺少 `GLIBC_x.x`
+
+```bash
+sbox repair-install
+/usr/local/bin/realm --version
+```
+
+修复流程会保留 Realm 与 WireGuard 状态，下载 Realm 官方便携 musl 构建，核对 GitHub 发布资产的 SHA-256，并在覆盖现有二进制前执行版本自检。
 
 ### 配置重载失败
 

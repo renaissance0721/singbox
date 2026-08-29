@@ -148,6 +148,40 @@ chmod 0600 "$STATE_FILE"
 )
 
 (
+  uname() { printf 'x86_64\n'; }
+  [[ "$(detect_realm_arch)" == "x86_64-unknown-linux-musl" ]] ||
+    fail "glibc 系统仍选择可能依赖新版 GLIBC 的 Realm GNU 构建"
+)
+
+(
+  REALM_BIN="$test_root/incompatible-realm"
+  repair_attempt=0
+  printf '#!/usr/bin/env sh\nprintf "%%s\\n" "libc.so.6: version GLIBC_2.38 not found" >&2\nexit 1\n' >"$REALM_BIN"
+  chmod 0755 "$REALM_BIN"
+  run_as_runtime() { "$@"; }
+  install_realm_binary() {
+    repair_attempt=$((repair_attempt + 1))
+    printf '#!/usr/bin/env sh\nprintf "%%s\\n" "realm 2.9.5"\n' >"$REALM_BIN"
+    chmod 0755 "$REALM_BIN"
+  }
+
+  repair_realm_binary_compatibility || fail "Realm GLIBC 不兼容时未自动切换到便携构建"
+  [[ "$repair_attempt" -eq 1 ]] || fail "Realm GLIBC 不兼容修复没有且仅有一次重新安装"
+  "$REALM_BIN" --version | grep -Fxq 'realm 2.9.5' || fail "Realm 兼容性修复后新二进制无法运行"
+)
+
+(
+  REALM_BIN="$test_root/unrelated-realm-failure"
+  printf '#!/usr/bin/env sh\nprintf "%%s\\n" "unexpected self-test failure" >&2\nexit 1\n' >"$REALM_BIN"
+  chmod 0755 "$REALM_BIN"
+  run_as_runtime() { "$@"; }
+  install_realm_binary() { fail "Realm 非兼容性错误不应自动覆盖现有二进制"; }
+  if repair_realm_binary_compatibility; then
+    fail "Realm 非兼容性错误被误判为可自动修复"
+  fi
+)
+
+(
   STATE_FILE="$test_root/legacy-shadowsocks-state.json"
   REALM_STATE_FILE="$test_root/no-realm-state.json"
   jq '

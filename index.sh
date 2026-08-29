@@ -1761,24 +1761,15 @@ restart_realm_service_raw() {
 }
 
 detect_realm_arch() {
-  local libc_target="gnu"
-  if have_cmd apk || [[ -f /etc/alpine-release ]]; then
-    libc_target="musl"
-  fi
-
   case "$(uname -m)" in
     x86_64|amd64)
-      printf 'x86_64-unknown-linux-%s\n' "$libc_target"
+      printf 'x86_64-unknown-linux-musl\n'
       ;;
     aarch64|arm64)
-      printf 'aarch64-unknown-linux-%s\n' "$libc_target"
+      printf 'aarch64-unknown-linux-musl\n'
       ;;
     armv7l|armv7)
-      if [[ "$libc_target" == "musl" ]]; then
-        printf 'armv7-unknown-linux-musleabihf\n'
-      else
-        printf 'armv7-unknown-linux-gnueabihf\n'
-      fi
+      printf 'armv7-unknown-linux-musleabihf\n'
       ;;
     *)
       return 1
@@ -1787,7 +1778,7 @@ detect_realm_arch() {
 }
 
 install_realm_binary() {
-  local arch tmp_dir archive_path extracted_bin release_json asset_name asset_url expected_digest actual_digest
+  local arch tmp_dir archive_path extracted_bin release_json asset_name asset_url expected_digest actual_digest version_output
   arch="$(detect_realm_arch)" || die "当前架构暂不支持自动安装 Realm：$(uname -m)"
   ensure_runtime_account
   tmp_dir="$(mktemp -d "$TMP_DIR/realm-install.XXXXXX")" || return 1
@@ -1823,13 +1814,39 @@ install_realm_binary() {
     return 1
   fi
   extracted_bin="$(find "$tmp_dir" -type f -name realm | head -n 1)"
-  [[ -n "$extracted_bin" ]] || {
+  [[ -n "$extracted_bin" && -f "$extracted_bin" && ! -L "$extracted_bin" ]] || {
     rm -rf "$tmp_dir"
     die "无法从下载包中找到 realm 可执行文件。"
   }
+  chmod 0755 "$extracted_bin" || {
+    rm -rf "$tmp_dir"
+    die "无法设置 Realm 临时二进制权限。"
+  }
+  if ! version_output="$(run_as_runtime "$extracted_bin" --version 2>&1)"; then
+    rm -rf "$tmp_dir"
+    die "Realm 官方 ${arch} 二进制与当前系统不兼容，已拒绝安装：${version_output:-无法执行}"
+  fi
 
   install -m 755 "$extracted_bin" "$REALM_BIN"
   rm -rf "$tmp_dir"
+  log "Realm 已安装：${version_output}（${arch}）"
+}
+
+repair_realm_binary_compatibility() {
+  local output=""
+
+  [[ -x "$REALM_BIN" ]] || return 0
+  if output="$(run_as_runtime "$REALM_BIN" --version 2>&1)"; then
+    return 0
+  fi
+
+  if ! grep -Eqi 'GLIBC_[0-9.]+.*not found|required file not found|No such file or directory|Exec format error' <<<"$output"; then
+    warn "Realm 二进制自检失败，未自动覆盖现有文件：${output:-未知错误}"
+    return 1
+  fi
+
+  warn "检测到 Realm 二进制与当前 libc/架构不兼容，正在安装经 SHA-256 校验的便携 musl 构建。"
+  install_realm_binary
 }
 
 detect_public_ipv4() {
@@ -6413,6 +6430,10 @@ repair_install() {
   log "repair-install 将使用当前已安装脚本修复核心、权限、服务和配置；如需更新脚本，请在面板选择 [更新脚本]。"
 
   install_sing_box
+  if [[ -x "$REALM_BIN" ]]; then
+    repair_realm_binary_compatibility || return 1
+    ensure_realm_service
+  fi
   ensure_firewall_restore_service || {
     ui_msg "防火墙开机恢复服务安装失败，请修复 systemd 后重试。"
     return 1
@@ -8331,7 +8352,11 @@ xray_install_status() {
 
 realm_install_status() {
   if [[ -x "$REALM_BIN" ]]; then
-    printf '已安装\n'
+    if run_as_runtime "$REALM_BIN" --version >/dev/null 2>&1; then
+      printf '已安装\n'
+    else
+      printf '已安装（当前无法运行，进入 Realm 菜单后自动修复）\n'
+    fi
   else
     printf '未安装\n'
   fi
@@ -8399,6 +8424,10 @@ prepare_realm_menu() {
   init_realm_state_file
 
   if [[ -x "$REALM_BIN" ]]; then
+    repair_realm_binary_compatibility || {
+      ui_msg "Realm 二进制与当前系统不兼容，自动修复失败。请检查上方下载或校验错误。"
+      return 1
+    }
     ensure_realm_service
   fi
 }
@@ -8771,7 +8800,7 @@ usage() {
   3. 一键安装使用官方原生 sing-box 软件包；选择 Xray VLESS 时按需下载经 SHA-256 校验的官方稳定版。
   4. 支持添加多个 SOCKS5 / Shadowsocks 分流落地，每个落地独立绑定规则集。
   5. 新建 Shadowsocks 节点与分流仅提供 SS2022，节点端口由端口管理统一控制。
-  6. repair-install 会修复 sing-box、已选用的 Xray、权限和服务，但不会删除状态文件、客户端或分流规则，也不会隐式升级 Xray。
+  6. repair-install 会修复 sing-box、已选用的 Xray、Realm 二进制兼容性、权限和服务，但不会删除状态文件、客户端或分流规则，也不会隐式升级 Xray。
   7. 一键安装只安装环境；节点名称和出口地址在新建节点时填写。
 EOF
 }

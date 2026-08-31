@@ -9,7 +9,7 @@
 
 - 只支持 Linux VPS
 - 输入安装命令后先进入终端管理面板
-- 在面板选择“安装 / 初始化 sing-box”后安装依赖与 sing-box，并自动确保内核包含 `with_v2ray_api`
+- 在面板选择“安装 / 初始化 sing-box”后安装依赖与软件源可用的最新 sing-box **1.13 系列稳定版**，并自动确保内核包含 `with_v2ray_api`
 - 退出后可直接输入 `sbox` 重新打开面板
 - 支持输入 `sbox uninstall` 一键卸载
 - 支持重新安装 / 修复并保留现有规则；面板可一键安全更新管理脚本
@@ -111,7 +111,7 @@ sbox change-address
 | 命令 | 说明 |
 | --- | --- |
 | `sbox` | 打开主菜单 |
-| `sbox quick-install` | 安装依赖与官方 sing-box，初始化基础环境；不会自动创建节点 |
+| `sbox quick-install` | 安装依赖与 sing-box 1.13 系列稳定版，初始化基础环境；不会自动创建节点 |
 | `sbox enable-v2ray-api` | 按当前版本在本机重编译，只补充 `with_v2ray_api`，不升级内核；也可在主菜单选择 11 |
 | `sbox node` | 打开代理节点管理菜单 |
 | `sbox change-address` | 更改所有协议共用的节点出口 IP 或域名 |
@@ -435,11 +435,13 @@ apk add --no-cache bash curl jq openssl ca-certificates git tar gzip unzip openr
 
 ### `sing-box` 软件包安装失败
 
+- 安装/修复时从 `sing-box` 与 `sing-box-oldstable` 的可用软件包中选择补丁号最高的 **1.13.x 稳定版**，排除 alpha、beta、rc 等预发布版本，并指定完整软件包版本安装。没有合适版本就报错，不自动改装 1.14 或其他系列；软件源可能晚于官方 Release 更新，Alpine 仍优先使用当前发行版的软件源。
+- 已有高于 1.13 的内核不会被自动降级。主菜单 11 / `sbox enable-v2ray-api` 不受安装选版限制，始终按已有内核的原版本补充 API。
 - 安装软件包后若缺少 `with_v2ray_api`，自动在 VPS 上重编译该版本；已有内核可执行 `sbox enable-v2ray-api` 或选择主菜单 **11**，不经过软件包安装/升级流程。已有此标签时直接跳过，无需 GitHub Actions 或预先发布内核。
 - 编译优先固定原 `Revision`，无 revision 时使用当前版本的官方 tag；保留原有全部标签、CGO 设置与 Go 版本，只追加 `with_v2ray_api`。无法取得对应源码或工具链时明确失败，不改用最新版，也不删减功能。自动下载的 Go SDK 会校验官方 SHA-256，不覆盖系统 Go。
 - 当前本机编译支持 amd64/arm64；含 Naive 且未使用 purego 的原内核还需下载对应 Chromium 工具链，并要求 amd64/glibc 构建主机（此类内核暂不能在 Alpine 或 ARM 主机本机编译）。请预留编译所需的内存、磁盘和下载时间；编译期间原服务继续运行。
 - 新内核通过版本、revision、全部标签、V2Ray API 和现有配置检查后才替换，运行中的服务会短暂重启；启动失败会回退。原内核备份保留在 `/etc/sing-box-manager/backups/sing-box-before-v2ray-api-*.bin`。不修改 Agent、节点、客户端或 API 配置；启用 API 监听仍由后续配置完成。
-- 系统包管理器单独升级可能覆盖自编译内核；之后执行 `sbox enable-v2ray-api` 可按升级后的当前版本重新补齐。
+- 1.13 选版限制仅作用于本脚本的安装流程；系统包管理器单独升级仍遵循系统的软件源策略，也可能覆盖自编译内核。之后执行 `sbox enable-v2ray-api` 可按升级后的当前版本重新补齐。
 - Alpine 会先使用当前已配置的软件源，再显式尝试当前版本的官方 `community` 仓库；旧稳定版没有该软件包时，最后尝试由 `apk` 验签的官方 `edge/community` 软件包
 - Debian / Ubuntu 请检查错误上方的 `apt-get update` 输出，以及 `https://sing-box.app/gpg.key`、`https://deb.sagernet.org/` 是否可访问
 - RHEL / CentOS 请检查错误上方的 DNF/YUM 输出，以及 `https://sing-box.app/sing-box.repo` 是否可访问

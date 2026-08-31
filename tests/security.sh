@@ -139,15 +139,26 @@ chmod 0600 "$STATE_FILE"
   printf '3.21.4\n' >"$ALPINE_RELEASE_FILE"
   apk() {
     printf '%s\n' "$*" >>"$apk_log"
-    [[ "$*" == *'/edge/community'* ]]
+    case "$1" in
+      update) return 0 ;;
+      policy)
+        if [[ "$*" == *'/edge/community'* ]]; then
+          printf 'sing-box policy:\n  1.13.21-r0:\n    https://dl-cdn.alpinelinux.org/alpine/edge/community\n'
+        else
+          printf 'sing-box policy:\n  1.12.0-r0:\n    configured-repository\n'
+        fi
+        ;;
+      add) [[ "$*" == *'/edge/community'* && "${!#}" == sing-box=1.13.21-r0 ]] ;;
+      *) return 1 ;;
+    esac
   }
 
   install_sing_box_apk_package || fail "Alpine 旧稳定版未回退到经 apk 验签的 edge/community 软件包"
-  [[ "$(sed -n '1p' "$apk_log")" == 'add --no-cache sing-box' ]] ||
+  [[ "$(sed -n '1p' "$apk_log")" == update ]] ||
     fail "Alpine sing-box 安装没有先使用系统已配置的软件源"
-  grep -Fxq 'add --no-cache --repository https://dl-cdn.alpinelinux.org/alpine/v3.21/community sing-box' "$apk_log" ||
+  grep -Fxq 'policy --repository https://dl-cdn.alpinelinux.org/alpine/v3.21/community sing-box sing-box-oldstable' "$apk_log" ||
     fail "Alpine sing-box 安装未尝试当前稳定版的已签名 community 仓库"
-  grep -Fxq 'add --no-cache --repository https://dl-cdn.alpinelinux.org/alpine/edge/community sing-box' "$apk_log" ||
+  grep -Fxq 'add --no-cache --repository https://dl-cdn.alpinelinux.org/alpine/edge/community sing-box=1.13.21-r0' "$apk_log" ||
     fail "Alpine sing-box 安装未使用经 apk 验签的 edge/community 后备包"
 )
 
@@ -157,13 +168,71 @@ chmod 0600 "$STATE_FILE"
   printf '3.23.1\n' >"$ALPINE_RELEASE_FILE"
   apk() {
     printf '%s\n' "$*" >>"$apk_log"
-    [[ "$*" == *'/v3.23/community'* ]]
+    case "$1" in
+      update) return 0 ;;
+      policy)
+        if [[ "$*" == *'/v3.23/community'* ]]; then
+          printf 'sing-box policy:\n  1.14.0-r0:\n    repo\n  1.13.20-r0:\n    repo\n'
+        fi
+        ;;
+      add) [[ "$*" == *'/v3.23/community'* && "${!#}" == sing-box=1.13.20-r0 ]] ;;
+      *) return 1 ;;
+    esac
   }
 
   install_sing_box_apk_package || fail "Alpine 未启用 community 时无法从当前稳定版签名仓库安装 sing-box"
   if grep -Fq '/edge/community' "$apk_log"; then
     fail "当前 Alpine 稳定版已有 sing-box 时仍错误混用 edge 仓库"
   fi
+  grep -Fq 'sing-box=1.13.20-r0' "$apk_log" || fail "Alpine 未指定 1.13 稳定版本"
+)
+
+(
+  candidates=$'sing-box 1.13.9\nsing-box 1.13.21\nsing-box 1.14.0\nsing-box 1.13.22~rc.1\nsing-box 1.13.22-beta.1\nsing-box 1.13.22_rc1-r0\nsing-box-testing 1.13.99\n'
+  [[ "$(printf '%s' "$candidates" | select_sing_box_113_package)" == $'sing-box\t1.13.21' ]] || fail "未选中最高的 1.13 稳定补丁版"
+  [[ "$(printf '%ssing-box-oldstable 1.13.22-1\n' "$candidates" | select_sing_box_113_package)" == $'sing-box-oldstable\t1.13.22-1' ]] || fail "未支持 oldstable 的新 1.13 稳定版"
+  [[ "$(printf 'sing-box 1.13.21-r2\nsing-box 1.13.21-r10\n' | select_sing_box_113_package)" == $'sing-box\t1.13.21-r10' ]] || fail "软件包修订号未按数字排序"
+  if printf 'sing-box 1.14.0\nsing-box 1.13.22-rc.1\n' | select_sing_box_113_package >/dev/null; then
+    fail "没有 1.13 稳定版时仍选中了其他版本"
+  fi
+)
+
+for package_manager in apt dnf yum; do
+  (
+    package_log="$test_root/package-select-$package_manager.log"
+    apt-cache() {
+      printf 'sing-box | 1.14.0 | repo\nsing-box | 1.13.21 | repo\nsing-box | 1.13.22~rc.1 | repo\nsing-box | 1.13.9 | repo\n'
+    }
+    package_command() {
+      printf '%s\n' "$*" >>"$package_log"
+      if [[ "$*" == *'--showduplicates list sing-box sing-box-oldstable'* ]]; then
+        printf 'Installed Packages\nsing-box.x86_64 1.13.21-1 @repo\nAvailable Packages\nsing-box.x86_64 1.14.0-1 repo\nsing-box.x86_64 1.13.9-1 repo\n'
+      fi
+    }
+    apt-get() { package_command "$@"; }
+    dnf() { package_command "$@"; }
+    yum() { package_command "$@"; }
+    install_sing_box_113_package "$package_manager" >/dev/null || fail "$package_manager 安装选版失败"
+    if [[ "$package_manager" == apt ]]; then
+      grep -Fxq 'install -y sing-box=1.13.21' "$package_log" || fail "APT 未固定 1.13 版本"
+    else
+      grep -Fxq 'install -y sing-box-1.13.21-1' "$package_log" || fail "$package_manager 未固定 1.13 版本"
+    fi
+    apt-cache() { printf 'sing-box | 1.14.0 | repo\n'; }
+    dnf() { [[ "$*" != *'--showduplicates list '* ]] || printf 'sing-box.x86_64 1.14.0-1 repo\n'; }
+    yum() { dnf "$@"; }
+    if install_sing_box_113_package "$package_manager" >/dev/null 2>&1; then
+      fail "$package_manager 缺少 1.13 稳定版时没有停止"
+    fi
+  )
+done
+
+(
+  have_cmd() { [[ "$1" == sing-box ]]; }
+  run_as_runtime() { printf 'sing-box version 1.14.0\n'; }
+  detect_pkg_manager() { printf 'unexpected package operation\n' >"$test_root/downgrade-attempt"; }
+  if (install_sing_box) >/dev/null 2>&1; then fail "未阻止对现有高版本内核的隐式降级"; fi
+  [[ ! -f "$test_root/downgrade-attempt" ]] || fail "拒绝降级前已执行软件包操作"
 )
 
 (

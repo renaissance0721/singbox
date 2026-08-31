@@ -794,10 +794,58 @@ alpine_release_branch() {
   return 1
 }
 
+select_sing_box_113_package() {
+  # Input: package-name package-version. Accept stable upstream versions with
+  # optional numeric distro revisions; never accept alpha/beta/rc/nightly.
+  jq -Rres '
+    [split("\n")[] |
+      capture("^(?<name>sing-box(?:-oldstable)?)\\s+(?<version>(?:(?<epoch>[0-9]+):)?1\\.13\\.(?<patch>[0-9]+)(?:-r?(?<revision>[0-9]+))?)$") |
+      .patch |= tonumber |
+      .epoch = ((.epoch // "0") | tonumber) |
+      .revision = ((.revision // "0") | tonumber)] |
+    sort_by(.patch, .epoch, .revision, (.name == "sing-box")) |
+    last | select(. != null) | [.name, .version] | @tsv
+  '
+}
+
+install_sing_box_113_package() {
+  local manager=$1 listing selected package package_version
+  shift
+  case "$manager" in
+    apt)
+      listing="$(apt-cache madison sing-box sing-box-oldstable | awk -F'|' '{gsub(/[[:space:]]/, "", $1); gsub(/[[:space:]]/, "", $2); print $1, $2}')" || return 1
+      ;;
+    dnf|yum)
+      "$manager" -q makecache -y || return 1
+      # Include installed versions too, so a repair cannot select an older
+      # patch just because the newest package is already installed.
+      listing="$(LC_ALL=C "$manager" -q --showduplicates list sing-box sing-box-oldstable |
+        awk '$1 ~ /^sing-box(-oldstable)?\./ {sub(/\.[^.]+$/, "", $1); print $1, $2}')" || return 1
+      ;;
+    apk)
+      apk update "$@" || return 1
+      listing="$(apk policy "$@" sing-box sing-box-oldstable |
+        awk '/^sing-box(-oldstable)? policy:$/ {name=$1; next} /^[[:space:]]+[0-9][^[:space:]]*:$/ {sub(/:$/, "", $1); print name, $1}')" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  selected="$(printf '%s\n' "$listing" | select_sing_box_113_package)" || {
+    warn "当前软件源没有可用的 sing-box 1.13 稳定版，不会改装其他系列或预发布版。"
+    return 1
+  }
+  IFS=$'\t' read -r package package_version <<<"$selected"
+  log "选择 sing-box 1.13 系列稳定版：${package} ${package_version}"
+  case "$manager" in
+    apt) apt-get install -y "${package}=${package_version}" ;;
+    dnf|yum) "$manager" install -y "${package}-${package_version}" ;;
+    apk) apk add --no-cache "$@" "${package}=${package_version}" ;;
+  esac
+}
+
 install_sing_box_apk_package() {
   local branch="" stable_repository=""
 
-  if apk add --no-cache sing-box; then
+  if install_sing_box_113_package apk; then
     return 0
   fi
 
@@ -808,7 +856,7 @@ install_sing_box_apk_package() {
   if [[ -n "$branch" ]]; then
     stable_repository="https://dl-cdn.alpinelinux.org/alpine/${branch}/community"
     log "当前 Alpine 仓库未能安装 sing-box，尝试已签名的 ${branch}/community 软件包..."
-    if apk add --no-cache --repository "$stable_repository" sing-box; then
+    if install_sing_box_113_package apk --repository "$stable_repository"; then
       return 0
     fi
   fi
@@ -817,9 +865,8 @@ install_sing_box_apk_package() {
   # edge package is self-contained apart from musl and remains signature-
   # checked by apk; this avoids downloading an unchecked upstream binary.
   log "当前 Alpine 版本未提供 sing-box，尝试已签名的 edge/community 软件包..."
-  apk add --no-cache \
-    --repository "https://dl-cdn.alpinelinux.org/alpine/edge/community" \
-    sing-box
+  install_sing_box_113_package apk \
+    --repository "https://dl-cdn.alpinelinux.org/alpine/edge/community"
 }
 
 install_sing_box_apt_repo() {
@@ -858,7 +905,7 @@ EOF
   export DEBIAN_FRONTEND=noninteractive
   repair_dpkg_state || return 1
   apt-get update -y || return 1
-  apt-get install -y sing-box || return 1
+  install_sing_box_113_package apt || return 1
 }
 
 install_sing_box_rpm_repo() {
@@ -869,14 +916,14 @@ install_sing_box_rpm_repo() {
     dnf config-manager addrepo --from-repofile=https://sing-box.app/sing-box.repo >/dev/null 2>&1 ||
       dnf config-manager --add-repo https://sing-box.app/sing-box.repo >/dev/null 2>&1 ||
       return 1
-    dnf install -y sing-box || return 1
+    install_sing_box_113_package dnf || return 1
     return 0
   fi
 
   yum install -y yum-utils >/dev/null 2>&1 || true
   if have_cmd yum-config-manager; then
     yum-config-manager --add-repo https://sing-box.app/sing-box.repo >/dev/null 2>&1 || return 1
-    yum install -y sing-box || return 1
+    install_sing_box_113_package yum || return 1
     return 0
   fi
 
@@ -1086,8 +1133,16 @@ ensure_sing_box_v2ray_api() (
 install_sing_box() {
   local installed=0 version_text=""
 
+  if have_cmd sing-box; then
+    version_text="$(run_as_runtime sing-box version 2>/dev/null | head -n 1 || true)"
+    if [[ "$version_text" =~ ^sing-box\ version\ ([0-9]+)\.([0-9]+)\. ]]; then
+      if (( BASH_REMATCH[1] > 1 || (BASH_REMATCH[1] == 1 && BASH_REMATCH[2] > 13) )); then
+        die "当前内核高于 1.13 系列，为避免现有配置不兼容，不会自动降级。仅补充 API 请使用 sbox enable-v2ray-api。"
+      fi
+    fi
+  fi
   detect_pkg_manager
-  log "安装官方原生 sing-box 软件包..."
+  log "安装软件源中可用的最新 sing-box 1.13 系列稳定软件包..."
 
   case "$PKG_MANAGER" in
     apk)
@@ -1108,11 +1163,14 @@ install_sing_box() {
   esac
 
   if (( ! installed )); then
-    die "sing-box 签名软件包安装失败（包管理器：${PKG_MANAGER}）。请检查上方软件源、网络或架构错误；为避免以 root 执行未校验的远程脚本或二进制，已拒绝不安全的后备安装。"
+    die "sing-box 1.13 稳定版签名软件包安装失败（包管理器：${PKG_MANAGER}）。请检查软件源是否保留该系列及上方网络/架构错误；不会改装 1.14 或预发布版，也不会使用不安全的后备安装。"
   fi
 
   hash -r 2>/dev/null || true
   have_cmd sing-box || die "安装完成后仍未找到 sing-box 命令。"
+  version_text="$(run_as_runtime sing-box version 2>/dev/null | head -n 1 || true)"
+  [[ "$version_text" =~ ^sing-box\ version\ 1\.13\.[0-9]+$ ]] ||
+    die "软件包安装后实际内核不是 1.13 稳定版，请检查 PATH 或软件包冲突；未继续编译或启用服务。"
   ensure_sing_box_service
   ensure_sing_box_v2ray_api || die "无法安装带 with_v2ray_api 的 sing-box，安装未完成。"
   enable_sing_box_service
@@ -8835,19 +8893,23 @@ uninstall_sbox() {
   case "$PKG_MANAGER" in
     apk)
       apk del sing-box >/dev/null 2>&1 || true
+      apk del sing-box-oldstable >/dev/null 2>&1 || true
       apk del sing-box-openrc >/dev/null 2>&1 || true
       ;;
     apt)
       export DEBIAN_FRONTEND=noninteractive
       apt-get remove -y sing-box >/dev/null 2>&1 || true
       apt-get purge -y sing-box >/dev/null 2>&1 || true
+      apt-get purge -y sing-box-oldstable >/dev/null 2>&1 || true
       apt-get autoremove -y >/dev/null 2>&1 || true
       ;;
     dnf)
       dnf remove -y sing-box >/dev/null 2>&1 || true
+      dnf remove -y sing-box-oldstable >/dev/null 2>&1 || true
       ;;
     yum)
       yum remove -y sing-box >/dev/null 2>&1 || true
+      yum remove -y sing-box-oldstable >/dev/null 2>&1 || true
       ;;
   esac
 

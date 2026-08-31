@@ -1605,4 +1605,192 @@ fi
     fail "Xray systemd 服务未限制地址族"
 )
 
+# A core rebuild must keep the exact version/features and leave a working old
+# executable in place on every failure. No packages or network are used here.
+for core_case in success already_enabled compile_failed wrong_version wrong_revision lost_tag api_failed config_failed restart_failed concurrent_change; do
+  (
+    core_dir="$test_root/core-$core_case"
+    mkdir -p "$core_dir/backups"
+    core_bin="$core_dir/sing-box"
+    BACKUP_DIR="$core_dir/backups"
+    CONFIG_FILE="$core_dir/config.json"
+    printf '{}\n' >"$CONFIG_FILE"
+    # Used by sourced core installation helpers.
+    # shellcheck disable=SC2034
+    RUNTIME_USER="$(id -u)"
+    # shellcheck disable=SC2034
+    RUNTIME_GROUP="$(id -g)"
+    core_revision=0123456789abcdef0123456789abcdef01234567
+    old_tags=with_quic,with_naive_outbound,with_musl
+    [[ "$core_case" != already_enabled ]] || old_tags+=,with_v2ray_api
+    write_test_core() {
+      cat >"$1" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == version ]]; then
+  printf '%s\n' 'sing-box version $2' 'Environment: go1.25.12 linux/amd64' 'Tags: $3' 'Revision: $4' 'CGO: enabled'
+elif [[ "\${1:-}" == check ]]; then
+  [[ '$core_case' != api_failed || "\$3" != */v2ray-check.json ]] || exit 1
+  [[ '$core_case' != config_failed || "\$3" != '$CONFIG_FILE' ]] || exit 1
+fi
+EOF
+      command chmod 0755 "$1"
+    }
+    write_test_core "$core_bin" 1.14.0 "$old_tags" "$core_revision"
+    original_digest="$(sha256_file "$core_bin")"
+    sing_box_check_bin() { printf '%s\n' "$core_bin"; }
+    chown() { :; }
+    run_as_runtime() { bash "$@"; }
+    sing_box_service_manager() { printf 'systemd\n'; }
+    sing_box_service_active() { printf 'active\n'; }
+    restart_sing_box() {
+      printf 'restart\n' >>"$core_dir/restarts"
+      [[ "$core_case" != restart_failed || "$(wc -l <"$core_dir/restarts")" -gt 1 ]]
+    }
+    build_sing_box_v2ray_api() {
+      printf 'build\n' >>"$core_dir/builds"
+      [[ "$core_case" != compile_failed ]] || return 1
+      local new_version=1.14.0 new_tags=$4 new_revision=$core_revision
+      [[ "$4" == "$old_tags,with_v2ray_api" ]] || fail "补齐 API 时未保留原标签"
+      [[ "$core_case" != wrong_version ]] || new_version=1.15.0
+      [[ "$core_case" != wrong_revision ]] || new_revision=ffffffffffffffffffffffffffffffffffffffff
+      [[ "$core_case" != lost_tag ]] || new_tags=with_quic,with_v2ray_api
+      [[ "$core_case" != concurrent_change ]] || printf '# changed externally\n' >>"$core_bin"
+      write_test_core "$1/sing-box" "$new_version" "$new_tags" "$new_revision"
+    }
+    result=0
+    ensure_sing_box_v2ray_api >"$core_dir/result.log" 2>&1 || result=$?
+    case "$core_case" in
+      success)
+        [[ "$result" == 0 ]] || { cat "$core_dir/result.log"; fail "同版本补齐失败"; }
+        bash "$core_bin" version | grep -Fq "Tags: $old_tags,with_v2ray_api" || fail "未安装含原功能的新内核"
+        [[ "$(wc -l <"$core_dir/restarts")" == 1 ]] || fail "补齐后未重启原服务"
+        backup_files=("$BACKUP_DIR"/*.bin)
+        [[ "${#backup_files[@]}" == 1 && "$(sha256_file "${backup_files[0]}")" == "$original_digest" ]] || fail "原内核备份不完整"
+        ;;
+      already_enabled)
+        [[ "$result" == 0 && ! -f "$core_dir/builds" && ! -f "$core_dir/restarts" ]] || fail "已有 API 标签仍重编译或重启"
+        ;;
+      concurrent_change)
+        [[ "$result" != 0 && ! -f "$core_dir/restarts" ]] || fail "编译期间内核改变后仍进行替换"
+        grep -Fq '# changed externally' "$core_bin" || fail "覆盖了其他进程更新的内核"
+        ;;
+      *)
+        [[ "$result" != 0 && "$(sha256_file "$core_bin")" == "$original_digest" ]] || fail "$core_case 未保护原内核"
+        if [[ "$core_case" == restart_failed ]]; then
+          [[ "$(wc -l <"$core_dir/restarts")" == 2 ]] || fail "回退旧内核后未重启"
+        else
+          [[ ! -f "$core_dir/restarts" ]] || fail "预检失败仍重启服务"
+        fi
+        ;;
+    esac
+    [[ "$(cat "$CONFIG_FILE")" == '{}' ]] || fail "补齐 API 修改了现有配置"
+  )
+done
+
+# Exercise the real build orchestration with fake SDK/git endpoints: pin the
+# original revision (or version tag), preserve CGO/CPU settings, reject dirty
+# source metadata and a bad SDK digest before any executable replacement.
+for build_case in revision version_tag naive dirty bad_digest; do
+  (
+    build_dir="$test_root/build-$build_case"
+    mkdir -p "$build_dir"
+    build_revision=0123456789abcdef0123456789abcdef01234567
+    metadata_revision="$build_revision"
+    [[ "$build_case" != version_tag ]] || metadata_revision=""
+    metadata="$(printf 'sing-box version 1.11.0\nEnvironment: go1.23.4 linux/amd64\nTags: with_quic\n')"
+    [[ -z "$metadata_revision" ]] || metadata+=$'\n'"Revision: $metadata_revision"
+    build_tags=with_quic,with_v2ray_api
+    [[ "$build_case" != naive ]] || build_tags=with_quic,with_naive_outbound,with_musl,with_v2ray_api
+    # Used by the sourced build helper.
+    # shellcheck disable=SC2034
+    detect_pkg_manager() { PKG_MANAGER=apt; }
+    getconf() { printf 'glibc 2.36\n'; }
+    repair_dpkg_state() { :; }
+    apt-get() { printf '%s\n' "$*" >>"$build_dir/packages"; }
+    download_to_file() {
+      if [[ "$2" == *'mode=json'* ]]; then
+        local sdk_digest
+        printf 'fake SDK' >"$build_dir/sdk-data"
+        sdk_digest="$(sha256_file "$build_dir/sdk-data")"
+        [[ "$build_case" != bad_digest ]] || sdk_digest=0000000000000000000000000000000000000000000000000000000000000000
+        printf '[{"files":[{"filename":"go1.23.4.linux-amd64.tar.gz","sha256":"%s"}]}]\n' "$sdk_digest" >"$1"
+      else
+        cp "$build_dir/sdk-data" "$1"
+      fi
+    }
+    run_as_runtime() {
+      local -a env_args=()
+      if [[ "$1" == env ]]; then
+        shift 2
+        while [[ "$1" == *=* ]]; do env_args+=("$1"); shift; done
+      fi
+      printf '%s\n' "$*" >>"$build_dir/commands"
+      case "$1 $2" in
+        'tar -xzf') return 0 ;;
+        'git init')
+          mkdir -p "${!#}"
+          if [[ "${!#}" == */source && "$build_case" == naive ]]; then
+            mkdir -p "${!#}/.github" "${!#}/release"
+            printf '%s\n' "$build_revision" >"${!#}/.github/CRONET_GO_VERSION"
+            printf '%s\n' '-checklinkname=0' >"${!#}/release/LDFLAGS"
+          fi
+          ;;
+        'git -C')
+          [[ "$*" != *'rev-parse HEAD' ]] || printf '%s\n' "$build_revision"
+          ;;
+        'go version')
+          if [[ "$build_case" == naive ]]; then
+            printf '\tbuild\tCGO_ENABLED=1\n'
+          else
+            printf '\tbuild\tCGO_ENABLED=0\n'
+          fi
+          printf '\tbuild\tGOAMD64=v3\n'
+          [[ "$build_case" != dirty ]] || printf '\tbuild\tvcs.modified=true\n'
+          ;;
+        'go build') printf '%s\n' "${env_args[@]}" >"$build_dir/build-env" ;;
+        'mkdir -p') command mkdir -p "${!#}" ;;
+        'rm -f'|'bash naiveproxy/src/build/linux/sysroot_scripts/generate_keyring.sh') : ;;
+        'go run')
+          [[ "${!#}" != env ]] || printf 'CC=/toolchain/clang --target=x86_64-openwrt-linux-musl\nCXX=/toolchain/clang++\nCGO_LDFLAGS=-fuse-ld=lld\n'
+          ;;
+        *) fail "意外的编译命令：$*" ;;
+      esac
+      return 0
+    }
+    result=0
+    build_sing_box_v2ray_api "$build_dir" /unused/original "$metadata" "$build_tags" >"$build_dir/result.log" 2>&1 || result=$?
+    if [[ "$build_case" == dirty || "$build_case" == bad_digest ]]; then
+      [[ "$result" != 0 ]] || fail "编译器未拒绝 $build_case"
+      ! grep -q 'go build' "$build_dir/commands" 2>/dev/null || fail "校验失败后仍编译"
+    else
+      [[ "$result" == 0 ]] || { cat "$build_dir/result.log"; fail "模拟编译流程失败"; }
+      grep -Fq "fetch --depth=1 origin ${metadata_revision:-refs/tags/v1.11.0}" "$build_dir/commands" || fail "没有固定原源码版本"
+      grep -Fq -- "-tags $build_tags" "$build_dir/commands" || fail "未追加 API 标签"
+      grep -Fq 'constant.Version=1.11.0' "$build_dir/commands" || fail "编译版本不一致"
+      if [[ "$build_case" == naive ]]; then
+        grep -Fxq 'CGO_ENABLED=1' "$build_dir/build-env" || fail "Naive CGO 设置未保留"
+        grep -Fq -- '--libc=musl download-toolchain' "$build_dir/commands" || fail "未匹配 Naive musl 工具链"
+        grep -Fxq 'CC=/toolchain/clang --target=x86_64-openwrt-linux-musl' "$build_dir/build-env" || fail "未使用 Naive 编译器"
+        grep -Fq -- '-checklinkname=0' "$build_dir/commands" || fail "未保留上游链接参数"
+      else
+        grep -Fxq 'CGO_ENABLED=0' "$build_dir/build-env" || fail "CGO 设置未保留"
+      fi
+      grep -Fxq 'GOAMD64=v3' "$build_dir/build-env" || fail "CPU 设置未保留"
+    fi
+    ! grep -Eq '(install.*sing-box|upgrade)' "$build_dir/packages" || fail "补齐 API 时调用了 sing-box 包升级"
+  )
+done
+
+(
+  has_openrc() { return 1; }
+  has_systemd() { return 0; }
+  systemctl() { printf 'ExecStart=/usr/bin/sing-box run\nExecStart=\nExecStart=/opt/core/sing-box run -c /etc/sing-box/config.json\n'; }
+  [[ "$(sing_box_service_exec_path)" == /opt/core/sing-box ]] || fail "未识别服务实际使用的内核路径"
+  require_linux() { :; }
+  require_root() { :; }
+  setup_terminal_env() { :; }
+  ensure_sing_box_v2ray_api() { printf 'current-core\n'; }
+  [[ "$(main enable-v2ray-api)" == current-core ]] || fail "补齐 API 命令未进入独立流程"
+)
+
 printf '[security-test] all checks passed\n'

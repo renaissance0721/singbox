@@ -883,67 +883,192 @@ install_sing_box_rpm_repo() {
   return 1
 }
 
-ensure_sing_box_v2ray_api() (
-  local bin work release asset url digest staged="" was_active=false replaced=false complete=false
-  bin="$(readlink -f "$(command -v sing-box)")" || return 1
-  if run_as_runtime "$bin" version | grep -Eq '^Tags:.*[ ,]with_v2ray_api([ ,]|$)'; then
-    return 0
+build_sing_box_v2ray_api() (
+  local build=$1 original=$2 version_text=$3 tags=$4
+  local version revision go_version arch sdk_file digest build_info cgo ref commit ldflags=""
+  local cronet_ref libc=glibc key value needs_naive=false
+  local -a build_env=() cgo_env=()
+  version="$(awk '/^sing-box version / {print $3; exit}' <<<"$version_text")"
+  revision="$(sed -n 's/^Revision: //p' <<<"$version_text")"
+  go_version="$(awk '/^Environment: / {print $2; exit}' <<<"$version_text")"
+  arch="$(awk '/^Environment: / {sub(/^linux\//, "", $3); print $3; exit}' <<<"$version_text")"
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+.][0-9A-Za-z.-]+)?$ &&
+     "$go_version" =~ ^go[0-9]+\.[0-9]+(\.[0-9]+)?$ &&
+     ( "$arch" == amd64 || "$arch" == arm64 ) &&
+     ( -z "$revision" || "$revision" =~ ^[0-9a-f]{40}$ ) ]] ||
+    die "无法确定原内核的版本/Go 工具链，或架构不是 amd64/arm64；未替换内核。"
+  if [[ ",$tags," == *,with_naive_outbound,* && ",$tags," != *,with_purego,* ]]; then
+    needs_naive=true
+    if [[ "$arch" != amd64 ]] || ! getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
+      die "Naive 的上游编译工具链需要 amd64/glibc 构建主机；当前系统不能直接编译，原内核保持不变。"
+    fi
   fi
 
-  # Build tags cannot be added to an existing executable. Download the same
-  # upstream feature set rebuilt by this repository with with_v2ray_api added.
-  case "$(uname -m)" in
-    x86_64|amd64) asset=sing-box-linux-amd64-musl.tar.gz ;;
-    aarch64|arm64) asset=sing-box-linux-arm64-musl.tar.gz ;;
-    *) die "带 with_v2ray_api 的内核目前仅构建 amd64/arm64，未替换当前内核。" ;;
+  detect_pkg_manager
+  log "安装本机编译依赖（不会安装或升级 sing-box 软件包）..."
+  case "$PKG_MANAGER" in
+    apt)
+      repair_dpkg_state || return 1
+      apt-get update -y || return 1
+      DEBIAN_FRONTEND=noninteractive apt-get install -y git curl jq ca-certificates tar gzip unzip xz-utils python3 build-essential gnupg || return 1
+      if [[ "$needs_naive" == true ]]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y python3-requests file || return 1
+      fi
+      ;;
+    dnf|yum)
+      "$PKG_MANAGER" install -y git curl jq ca-certificates tar gzip unzip xz python3 gcc gcc-c++ make gnupg2 || return 1
+      if [[ "$needs_naive" == true ]]; then
+        "$PKG_MANAGER" install -y python3-requests dpkg file which || return 1
+      fi
+      ;;
+    apk)
+      apk add --no-cache git curl jq ca-certificates tar gzip xz python3 build-base gnupg || return 1
+      ;;
+    *) die "无法自动安装编译依赖，未替换内核。" ;;
   esac
-  ensure_runtime_account
+
+  # Use a private SDK matching the original binary, without changing system Go.
+  sdk_file="${go_version}.linux-${arch}.tar.gz"
+  download_to_file "$build/go-releases.json" 'https://go.dev/dl/?mode=json&include=all' || return 1
+  digest="$(jq -er --arg file "$sdk_file" '.[] | .files[] | select(.filename == $file) | .sha256' "$build/go-releases.json")" ||
+    die "找不到原内核使用的 ${go_version} 官方工具链，未替换内核。"
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  download_to_file "$build/go.tar.gz" "https://go.dev/dl/$sdk_file" || return 1
+  [[ "$(sha256_file "$build/go.tar.gz")" == "$digest" ]] || die "Go 工具链 SHA-256 校验失败。"
+  chmod 0644 "$build/go.tar.gz" || return 1
+  run_as_runtime tar -xzf "$build/go.tar.gz" -C "$build" || return 1
+  build_env=(env -i "PATH=$build/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    "GOPATH=$build/gopath" "GOCACHE=$build/cache" "TMPDIR=$build" "GOTOOLCHAIN=local"
+    "GOMAXPROCS=2" "GOFLAGS=-p=1" "GIT_CONFIG_NOSYSTEM=1" "GIT_CONFIG_GLOBAL=/dev/null"
+    "GNUPGHOME=$build/gnupg")
+  build_info="$(run_as_runtime "${build_env[@]}" go version -m "$original")" || return 1
+  if grep -Eq 'vcs.modified=true|^[[:space:]]*=>' <<<"$build_info"; then
+    die "原内核包含本地源码修改或模块替换，不能安全重现；未替换内核。"
+  fi
+  cgo="$(sed -n 's/^[[:space:]]*build[[:space:]]*CGO_ENABLED=//p' <<<"$build_info")"
+  [[ "$cgo" == 0 || "$cgo" == 1 ]] || die "无法识别原内核的 CGO 设置，未替换内核。"
+  cgo_env=("CGO_ENABLED=$cgo" "GOOS=linux" "GOARCH=$arch")
+  while IFS='=' read -r key value; do
+    case "$key" in
+      GOAMD64|GOARM64|GOEXPERIMENT) cgo_env+=("$key=$value") ;;
+    esac
+  done < <(sed -n 's/^[[:space:]]*build[[:space:]]*//p' <<<"$build_info")
+
+  ref="${revision:-refs/tags/v$version}"
+  log "下载原版本源码：${version}（${ref}），保留原标签并追加 with_v2ray_api..."
+  run_as_runtime "${build_env[@]}" git init -q "$build/source" || return 1
+  run_as_runtime "${build_env[@]}" git -C "$build/source" remote add origin https://github.com/SagerNet/sing-box.git || return 1
+  run_as_runtime "${build_env[@]}" git -C "$build/source" fetch --depth=1 origin "$ref" ||
+    die "无法取得原内核对应源码；不会改用最新版。"
+  run_as_runtime "${build_env[@]}" git -C "$build/source" checkout -q --detach FETCH_HEAD || return 1
+  commit="$(run_as_runtime "${build_env[@]}" git -C "$build/source" rev-parse HEAD)" || return 1
+  [[ -z "$revision" || "$commit" == "$revision" ]] || die "源码 revision 不匹配，未替换内核。"
+
+  # Naive with CGO needs the toolchain pinned by that sing-box source revision.
+  # Never drop Naive or change musl/purego tags just to make compilation succeed.
+  if [[ "$needs_naive" == true ]]; then
+    [[ "$cgo" == 1 ]] || die "原 Naive 内核的 CGO 设置异常，未替换。"
+    cronet_ref="$(tr -d '\r\n' <"$build/source/.github/CRONET_GO_VERSION")" || return 1
+    [[ "$cronet_ref" =~ ^[0-9a-f]{40}$ ]] || die "原版本缺少可识别的 Naive 工具链，未替换内核。"
+    [[ ",$tags," != *,with_musl,* ]] || libc=musl
+    log "准备原版本 Naive/${libc} 工具链，下载和编译可能较久..."
+    run_as_runtime "${build_env[@]}" git init -q "$build/cronet" || return 1
+    run_as_runtime "${build_env[@]}" git -C "$build/cronet" remote add origin https://github.com/SagerNet/cronet-go.git || return 1
+    run_as_runtime "${build_env[@]}" git -C "$build/cronet" sparse-checkout set --no-cone '/*' '!/lib' || return 1
+    run_as_runtime "${build_env[@]}" git -C "$build/cronet" fetch --depth=1 --filter=blob:none origin "$cronet_ref" || return 1
+    run_as_runtime "${build_env[@]}" git -C "$build/cronet" checkout -q --detach FETCH_HEAD || return 1
+    run_as_runtime "${build_env[@]}" git -C "$build/cronet" submodule update --init --recursive --depth=1 || return 1
+    cd "$build/cronet" || return 1
+    run_as_runtime mkdir -p "$build/gnupg" || return 1
+    run_as_runtime rm -f naiveproxy/src/build/linux/sysroot_scripts/keyring.gpg || return 1
+    run_as_runtime "${build_env[@]}" GPG_TTY=/dev/null bash naiveproxy/src/build/linux/sysroot_scripts/generate_keyring.sh || return 1
+    run_as_runtime "${build_env[@]}" go run ./cmd/build-naive --target="linux/$arch" --libc="$libc" download-toolchain || return 1
+    run_as_runtime "${build_env[@]}" go run ./cmd/build-naive --target="linux/$arch" --libc="$libc" env >"$build/cgo.env" || return 1
+    while IFS='=' read -r key value; do
+      case "$key" in
+        CC|CXX|CGO_LDFLAGS) cgo_env+=("$key=$value") ;;
+      esac
+    done <"$build/cgo.env"
+  fi
+
+  cd "$build/source" || return 1
+  [[ ! -f release/LDFLAGS ]] || ldflags="$(cat release/LDFLAGS)"
+  log "本机编译 sing-box ${version}，编译期间不停止现有服务..."
+  run_as_runtime "${build_env[@]}" "${cgo_env[@]}" go build -mod=readonly -trimpath -buildvcs=true \
+    -tags "$tags" -ldflags "$ldflags -X github.com/sagernet/sing-box/constant.Version=$version -s -w -buildid=" \
+    -o "$build/sing-box" ./cmd/sing-box || return 1
+)
+
+ensure_sing_box_v2ray_api() (
+  local bin work version_text tags new_text tag original_hash backup="" staged=""
+  local was_active=false replaced=false complete=false
+  local -a required_tags=()
+  bin="$(sing_box_check_bin)" || die "尚未安装 sing-box，请先安装内核。"
+  bin="$(readlink -f "$bin")" || return 1
+  version_text="$(run_as_runtime "$bin" version)" || die "现有内核无法运行，未进行修改。"
+  tags="$(sed -n 's/^Tags: *//p' <<<"$version_text" | tr ' ' ',')"
+  if [[ ",$tags," == *,with_v2ray_api,* ]]; then
+    log "当前 sing-box 已包含 with_v2ray_api，无需重新编译。"
+    return 0
+  fi
+  [[ -z "$tags" || "$tags" =~ ^[a-zA-Z0-9_.,]+$ ]] || die "无法识别原内核标签，未替换内核。"
+  tags="${tags:+$tags,}with_v2ray_api"
   work="$(mktemp -d "$TMP_DIR/sbox-v2ray-core.XXXXXX")" || return 1
   # shellcheck disable=SC2329
   cleanup_v2ray_core() {
     if [[ "$replaced" == true && "$complete" != true ]]; then
-      install -m 0755 "$work/original" "$staged"
-      mv -f "$staged" "$bin"
-      if [[ "$(sing_box_service_manager)" == openrc ]]; then
-        ensure_openrc_low_port_capability "$bin" sing-box || true
-      fi
-      if [[ "$was_active" == true ]]; then
-        restart_sing_box || warn "旧内核已恢复，但服务未能启动，请检查日志。"
+      if install -m 0755 "$work/original" "$staged" && mv -f "$staged" "$bin"; then
+        if [[ "$(sing_box_service_manager)" == openrc ]]; then
+          ensure_openrc_low_port_capability "$bin" sing-box || true
+        fi
+        if [[ "$was_active" == true ]]; then
+          restart_sing_box || warn "旧内核已恢复，但服务未能启动，请检查日志。"
+        fi
+        warn "补充失败，已恢复原内核。"
+      else
+        warn "自动恢复失败，原内核备份位于：$backup"
       fi
     fi
     [[ -z "$staged" ]] || rm -f "$staged"
     rm -rf -- "$work"
   }
   trap cleanup_v2ray_core EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   chown root:"$RUNTIME_GROUP" "$work" || return 1
   chmod 0750 "$work" || return 1
-  log "当前内核缺少 with_v2ray_api，下载本仓库额外启用该标签的构建..."
-  download_to_file "$work/releases.json" \
-    "https://api.github.com/repos/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/releases?per_page=100" || return 1
-  release="$(jq -er '[.[] | select(.draft == false and (.tag_name | startswith("sing-box-v2ray-")))][0].tag_name // empty' "$work/releases.json")" ||
-    die "本仓库尚未发布带 with_v2ray_api 的内核；请先运行并发布 sing-box-core 构建，不能直接给现有二进制追加标签。"
-  [[ "$release" =~ ^sing-box-v2ray-[a-zA-Z0-9._-]+$ ]] || return 1
-  url="https://github.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/releases/download/${release}/${asset}"
-  digest="$(jq -er --arg release "$release" --arg asset "$asset" --arg url "$url" '
-    .[] | select(.tag_name == $release) | .assets[] |
-    select(.name == $asset and .browser_download_url == $url) |
-    .digest | select(test("^sha256:[0-9a-f]{64}$")) | ltrimstr("sha256:")
-  ' "$work/releases.json")" || die "发布包缺失或没有 GitHub SHA-256 摘要，未替换内核。"
-  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
-  download_to_file "$work/core.tar.gz" "$url" || return 1
-  [[ "$(sha256_file "$work/core.tar.gz")" == "$digest" ]] || die "sing-box 发布包 SHA-256 不匹配，未替换内核。"
-  # Extract one known file, without trusting archive paths or permissions.
-  tar -xOzf "$work/core.tar.gz" sing-box >"$work/sing-box" || return 1
-  chmod 0755 "$work/sing-box" || return 1
-  run_as_runtime "$work/sing-box" version | grep -Eq '^Tags:.*[ ,]with_v2ray_api([ ,]|$)' ||
-    die "下载的内核无法运行或仍缺少 with_v2ray_api，未替换。"
-  if [[ -s "$CONFIG_FILE" ]]; then
-    run_as_runtime "$work/sing-box" check -c "$CONFIG_FILE" || die "新内核不兼容现有配置，未替换。"
-  fi
   cp -p "$bin" "$work/original" || return 1
-  [[ "$(sing_box_service_active 2>/dev/null || true)" != active ]] || was_active=true
+  chown root:"$RUNTIME_GROUP" "$work/original" || return 1
+  chmod 0750 "$work/original" || return 1
+  original_hash="$(sha256_file "$work/original")" || return 1
+  install -d -o "$RUNTIME_USER" -g "$RUNTIME_GROUP" -m 0700 "$work/build" || return 1
+  build_sing_box_v2ray_api "$work/build" "$work/original" "$version_text" "$tags" ||
+    die "同版本内核编译失败，原内核保持不变。"
+  # Validate a root-owned candidate beside the installed binary (also keeps
+  # relative shared-library lookup working for existing purego installations).
   staged="$(mktemp "$(dirname "$bin")/.sing-box.XXXXXX")" || return 1
-  install -m 0755 "$work/sing-box" "$staged" || return 1
+  install -m 0755 "$work/build/sing-box" "$staged" || return 1
+  new_text="$(run_as_runtime "$staged" version)" || die "编译出的内核无法运行，未替换。"
+  [[ "$(head -n 1 <<<"$new_text")" == "$(head -n 1 <<<"$version_text")" ]] || die "编译后的版本发生变化，未替换。"
+  if grep -q '^Revision: ' <<<"$version_text"; then
+    [[ "$(sed -n 's/^Revision: //p' <<<"$new_text")" == "$(sed -n 's/^Revision: //p' <<<"$version_text")" ]] ||
+      die "编译后的源码 revision 发生变化，未替换。"
+  fi
+  IFS=',' read -r -a required_tags <<<"$tags"
+  for tag in "${required_tags[@]}"; do
+    [[ ",$(sed -n 's/^Tags: *//p' <<<"$new_text" | tr ' ' ',')," == *",$tag,"* ]] ||
+      die "编译后的内核缺少标签 ${tag}，未替换。"
+  done
+  printf '%s\n' '{"experimental":{"v2ray_api":{"listen":"127.0.0.1:10086","stats":{"enabled":true}}}}' >"$work/v2ray-check.json" || return 1
+  chmod 0644 "$work/v2ray-check.json" || return 1
+  run_as_runtime "$staged" check -c "$work/v2ray-check.json" || die "V2Ray API 功能检查失败，未替换。"
+  if [[ -s "$CONFIG_FILE" ]]; then
+    run_as_runtime "$staged" check -c "$CONFIG_FILE" || die "新内核不兼容现有配置，未替换。"
+  fi
+  [[ "$(sha256_file "$bin")" == "$original_hash" ]] || die "编译期间原内核被其他进程修改，请重新执行；未覆盖。"
+  backup="$BACKUP_DIR/sing-box-before-v2ray-api-$(date +%Y%m%d-%H%M%S)-$$.bin"
+  install -m 0700 "$work/original" "$backup" || return 1
+  [[ "$(sing_box_service_active 2>/dev/null || true)" != active ]] || was_active=true
   mv -f "$staged" "$bin" || return 1
   replaced=true
   if [[ "$(sing_box_service_manager)" == openrc ]]; then
@@ -955,7 +1080,7 @@ ensure_sing_box_v2ray_api() (
     [[ "$(sing_box_service_active 2>/dev/null || true)" == active ]] || return 1
   fi
   complete=true
-  log "sing-box 已启用编译标签 with_v2ray_api（${release}）。"
+  log "已为当前内核补充 with_v2ray_api，版本不变。原内核备份：$backup"
 )
 
 install_sing_box() {
@@ -1375,7 +1500,7 @@ sing_box_service_exec_path() {
   fi
 
   has_systemd || return 1
-  exec_line="$(systemctl cat sing-box 2>/dev/null | awk -F= '/^[[:space:]]*ExecStart=/ {print $2; exit}')"
+  exec_line="$(systemctl cat sing-box 2>/dev/null | awk '/^[[:space:]]*ExecStart=/ {sub(/^[^=]*=/, ""); line=$0} END {print line}')"
   [[ -n "$exec_line" ]] || return 1
 
   read -r -a exec_parts <<<"$exec_line"
@@ -8794,9 +8919,10 @@ main_menu() {
       "8" "一键常用脚本" \
       "9" "更新脚本" \
       "10" "卸载" \
+      "11" "为当前内核补充 V2Ray API（不升级）" \
       "0" "退出")" || continue
 
-    if ! have_cmd jq && [[ "$choice" != "1" && "$choice" != "8" && "$choice" != "0" ]]; then
+    if ! have_cmd jq && [[ "$choice" != "1" && "$choice" != "8" && "$choice" != "11" && "$choice" != "0" ]]; then
       ui_msg "管理环境尚未初始化，请先选择 1 安装 / 初始化 sing-box。"
       continue
     fi
@@ -8836,6 +8962,9 @@ main_menu() {
       10)
         uninstall_sbox || true
         ;;
+      11)
+        ensure_sing_box_v2ray_api || true
+        ;;
       0)
         break
         ;;
@@ -8855,6 +8984,8 @@ usage() {
 用法:
   $SCRIPT_NAME                打开管理面板
   $SCRIPT_NAME quick-install  一键安装并初始化
+  $SCRIPT_NAME enable-v2ray-api
+                          本机重编译当前内核，补充 V2Ray API（不升级）
   $SCRIPT_NAME node           打开代理节点管理菜单
   $SCRIPT_NAME ports          打开端口管理菜单
   $SCRIPT_NAME tools          打开一键常用脚本菜单
@@ -8899,6 +9030,11 @@ main() {
   case "${1:-panel}" in
     quick-install)
       quick_install
+      ;;
+    enable-v2ray-api)
+      require_linux
+      require_root
+      ensure_sing_box_v2ray_api
       ;;
     apply)
       require_linux

@@ -4,6 +4,7 @@
 
 ## [Unreleased]
 
+- 新增主菜单 11 和 `sbox enable-v2ray-api`：在本机按当前版本重编译 sing-box，保留原标签并补充 `with_v2ray_api`，不升级内核；安装时也自动补齐，替换前预检并保留原内核备份，移除独立的 GitHub 内核构建工作流。
 - 节点管理在已搭建 VLESS + Reality 时新增独立的核心类型显示，明确标注 `xray` 或 `sing-box`；未启用 VLESS 时隐藏该行，旧状态默认识别为 `sing-box`。
 - 修复旧版 glibc 系统安装新版 Realm 后因缺少 `GLIBC_2.32` 至 `GLIBC_2.38` 而无法启动：Linux 统一使用经 GitHub SHA-256 校验并通过本机自检的便携 musl 构建；进入 Realm 菜单或执行 `repair-install` 时会自动替换已识别的不兼容二进制并保留规则。
 - 修复 Alpine 未启用 `community` 或旧稳定版尚未收录 sing-box 时的安装失败：依次尝试当前版本与 `edge/community` 的 Alpine 官方签名软件包，并继续拒绝未校验脚本或二进制后备安装。

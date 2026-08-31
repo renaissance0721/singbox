@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+- 节点管理新增第 8 项“设置禁止访问 CN IP”，默认关闭并持久保存；支持 sing-box / Xray 的中国大陆目标 IPv4/IPv6 阻断，保留国内客户端入站连接，不影响纯 Realm / WireGuard 中转。
+- 开启 CN IP 限制时，在分流前解析并检查目标，保留原有私网和云元数据防护；sing-box 复用远程规则缓存和每日更新，Xray 使用现有 `geoip.dat`，应用失败沿用状态及运行配置回滚流程。
 - 默认安装限定为软件源中可用的最新 sing-box 1.13 系列稳定版，兼容 `sing-box-oldstable` 软件包，排除预发布版并避免自动跨到 1.14；补充 V2Ray API 仍保留原内核版本，已有更高系列不会被隐式降级。
 - 新增主菜单 11 和 `sbox enable-v2ray-api`：在本机按当前版本重编译 sing-box，保留原标签并补充 `with_v2ray_api`，不升级内核；安装时也自动补齐，替换前预检并保留原内核备份，移除独立的 GitHub 内核构建工作流。
 - 节点管理在已搭建 VLESS + Reality 时新增独立的核心类型显示，明确标注 `xray` 或 `sing-box`；未启用 VLESS 时隐藏该行，旧状态默认识别为 `sing-box`。

@@ -2324,6 +2324,7 @@ init_state_file() {
     }
   },
   "routing": {
+    "block_cn_ip": false,
     "split": {
       "legacy_defaults_removed": true,
       "outbounds": []
@@ -2406,6 +2407,7 @@ cleanup_removed_traffic_state() {
     .meta.server_address_ipv6 = (.meta.server_address_ipv6 // "") |
     .meta.dual_stack = (.meta.dual_stack // false) |
     .meta.outbound_ip_preference = (.meta.outbound_ip_preference // "auto") |
+    .routing.block_cn_ip = (.routing.block_cn_ip // false) |
     .protocols.vless_reality.core = (.protocols.vless_reality.core // "sing-box") |
     .runtime = (if ((.runtime // {}) | type) == "object" then .runtime else {} end) |
     .runtime.xray = (if ((.runtime.xray // {}) | type) == "object" then .runtime.xray else {managed: false, version: "", binary_sha256: "", installed_at: ""} end) |
@@ -3201,6 +3203,10 @@ validate_state() {
       ;;
   esac
 
+  if ! jq -e '(.routing.block_cn_ip // false) | type == "boolean"' "$STATE_FILE" >/dev/null; then
+    errors+=$'禁止访问 CN IP 设置必须是布尔值。\n'
+  fi
+
   if [[ "$ss_enabled" == "true" ]]; then
     [[ "$(state_get '.protocols.shadowsocks.users | length')" -gt 0 ]] || errors+=$'Shadowsocks 至少需要一个客户端。\n'
     [[ -n "$(state_get '.protocols.shadowsocks.server_password')" ]] || errors+=$'Shadowsocks 服务端密码不能为空。\n'
@@ -3301,6 +3307,47 @@ render_config() {
   def sing_box_vless_enabled:
     .protocols.vless_reality.enabled
     and ((.protocols.vless_reality.core // "sing-box") == "sing-box");
+  def proxy_inbounds:
+    [
+      if .protocols.shadowsocks.enabled then "ss-in" else empty end,
+      if sing_box_vless_enabled then "vless-reality-in" else empty end,
+      if .protocols.hysteria2.enabled then "hy2-in" else empty end
+    ];
+  def block_cn_ip_enabled:
+    (.routing.block_cn_ip == true) and ((proxy_inbounds | length) > 0);
+  def private_destination_rules:
+    if (proxy_inbounds | length) > 0 then
+      {
+        inbound: proxy_inbounds,
+        ip_cidr: ["169.254.169.254/32", "100.100.100.200/32", "fd00:ec2::254/128"],
+        action: "reject"
+      },
+      {
+        inbound: proxy_inbounds,
+        ip_is_private: true,
+        action: "reject"
+      }
+    else empty end;
+  def resolve_destination_rule:
+    if (proxy_inbounds | length) > 0 then
+      ({
+        inbound: proxy_inbounds,
+        action: "resolve",
+        server: "local"
+      } + (
+        if (.meta.outbound_ip_preference // "auto") == "auto" then {}
+        else { strategy: .meta.outbound_ip_preference } end
+      ))
+    else empty end;
+  def cn_ip_reject_rule:
+    if block_cn_ip_enabled then
+      {
+        inbound: proxy_inbounds,
+        rule_set: ["block-cn-ip"],
+        rule_set_ip_cidr_match_source: false,
+        action: "reject"
+      }
+    else empty end;
   def split_outbound_tag:
     "split-out:" + .;
   def split_rule_tag($id; $index):
@@ -3451,6 +3498,17 @@ render_config() {
     route: {
       rule_set: [
         (
+          if block_cn_ip_enabled then
+            {
+              type: "remote",
+              tag: "block-cn-ip",
+              format: "binary",
+              url: "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
+              update_interval: "1d"
+            }
+          else empty end
+        ),
+        (
           .routing.split.outbounds[]?
           | select((.enabled // false) and ((.rule_sets // []) | length > 0))
           | . as $outbound
@@ -3489,35 +3547,8 @@ render_config() {
         )
       ],
       rules: [
-        (
-          if (.protocols.shadowsocks.enabled or sing_box_vless_enabled or .protocols.hysteria2.enabled) then
-            [
-              {
-                inbound: [
-                  if .protocols.shadowsocks.enabled then "ss-in" else empty end,
-                  if sing_box_vless_enabled then "vless-reality-in" else empty end,
-                  if .protocols.hysteria2.enabled then "hy2-in" else empty end
-                ],
-                ip_cidr: [
-                  "169.254.169.254/32",
-                  "100.100.100.200/32",
-                  "fd00:ec2::254/128"
-                ],
-                action: "reject"
-              },
-              {
-                inbound: [
-                  if .protocols.shadowsocks.enabled then "ss-in" else empty end,
-                  if sing_box_vless_enabled then "vless-reality-in" else empty end,
-                  if .protocols.hysteria2.enabled then "hy2-in" else empty end
-                ],
-                ip_is_private: true,
-                action: "reject"
-              }
-            ][]
-          else empty
-          end
-        ),
+        private_destination_rules,
+        cn_ip_reject_rule,
         (
           if ([.routing.split.outbounds[]? | select((.enabled // false) and ((.rule_sets // []) | length > 0))] | length) > 0 then
             {
@@ -3527,6 +3558,13 @@ render_config() {
             }
           else empty
           end
+        ),
+        # Check resolved destinations before any split route can finish matching.
+        # With the switch off, retain the existing resolve-after-split behavior.
+        (
+          if block_cn_ip_enabled then
+            resolve_destination_rule, private_destination_rules, cn_ip_reject_rule
+          else empty end
         ),
         (
           [
@@ -3563,48 +3601,9 @@ render_config() {
             }
         ),
         (
-          if (.protocols.shadowsocks.enabled or sing_box_vless_enabled or .protocols.hysteria2.enabled) then
-            [
-              ({
-                inbound: [
-                  if .protocols.shadowsocks.enabled then "ss-in" else empty end,
-                  if sing_box_vless_enabled then "vless-reality-in" else empty end,
-                  if .protocols.hysteria2.enabled then "hy2-in" else empty end
-                ],
-                action: "resolve",
-                server: "local"
-              } + (
-                if (.meta.outbound_ip_preference // "auto") == "auto" then
-                  {}
-                else
-                  { strategy: .meta.outbound_ip_preference }
-                end
-              )),
-              {
-                inbound: [
-                  if .protocols.shadowsocks.enabled then "ss-in" else empty end,
-                  if sing_box_vless_enabled then "vless-reality-in" else empty end,
-                  if .protocols.hysteria2.enabled then "hy2-in" else empty end
-                ],
-                ip_cidr: [
-                  "169.254.169.254/32",
-                  "100.100.100.200/32",
-                  "fd00:ec2::254/128"
-                ],
-                action: "reject"
-              },
-              {
-                inbound: [
-                  if .protocols.shadowsocks.enabled then "ss-in" else empty end,
-                  if sing_box_vless_enabled then "vless-reality-in" else empty end,
-                  if .protocols.hysteria2.enabled then "hy2-in" else empty end
-                ],
-                ip_is_private: true,
-                action: "reject"
-              }
-            ][]
-          else empty
-          end
+          if block_cn_ip_enabled | not then
+            resolve_destination_rule, private_destination_rules
+          else empty end
         )
       ],
       final: "direct"
@@ -3679,7 +3678,7 @@ render_xray_config() {
         }
       ],
       routing: {
-        domainStrategy: "IPIfNonMatch",
+        domainStrategy: (if .routing.block_cn_ip == true then "IPOnDemand" else "IPIfNonMatch" end),
         rules: [
           {
             type: "field",
@@ -3699,10 +3698,33 @@ render_xray_config() {
               "fd00:ec2::254/128"
             ],
             outboundTag: "block"
-          }
+          },
+          (
+            if .routing.block_cn_ip == true then
+              {
+                type: "field",
+                inboundTag: ["vless-reality-in"],
+                ip: ["geoip:cn"],
+                outboundTag: "block"
+              }
+            else empty end
+          )
         ]
       }
-    }
+    } + (
+      if .routing.block_cn_ip == true then
+        {
+          dns: {
+            servers: ["localhost"],
+            queryStrategy: (
+              if .meta.outbound_ip_preference == "ipv4_only" then "UseIPv4"
+              elif .meta.outbound_ip_preference == "ipv6_only" then "UseIPv6"
+              else "UseIP" end
+            )
+          }
+        }
+      else {} end
+    )
   ' "$STATE_FILE"
 }
 
@@ -6995,6 +7017,44 @@ configure_outbound_ip_preference() {
   apply_sing_box_state_transaction "$previous_state_file" "出站 IPv4 / IPv6 策略变更"
 }
 
+block_cn_ip_label() {
+  case "$(state_get '.routing.block_cn_ip // false' 2>/dev/null || true)" in
+    true) printf '已开启\n' ;;
+    false) printf '已关闭\n' ;;
+    *) printf '未知\n' ;;
+  esac
+}
+
+configure_block_cn_ip() {
+  local current choice desired previous_state_file
+  current="$(state_get '.routing.block_cn_ip // false')"
+  choice="$(ui_menu "禁止访问 CN IP" "当前：$(block_cn_ip_label)。开启后，代理请求访问中国大陆目标 IP（IPv4/IPv6）将被拒绝，优先于分流。不会禁止国内客户端连接节点，不按 .cn 域名后缀拦截，也不影响 Realm 中转。首次启用 sing-box 规则需要联网下载。" \
+    "1" "开启 CN IP 出站限制" \
+    "2" "关闭 CN IP 出站限制" \
+    "0" "返回")" || return 1
+
+  case "$choice" in
+    1) desired=true ;;
+    2) desired=false ;;
+    0) return 0 ;;
+    *) ui_msg "无效选项，请重新选择。"; return 1 ;;
+  esac
+  if [[ "$desired" == "$current" ]]; then
+    ui_msg "CN IP 出站限制未发生变化。"
+    return 0
+  fi
+
+  previous_state_file="$(snapshot_sing_box_state_file)" || {
+    ui_msg "无法创建节点状态快照，未修改 CN IP 出站限制。"
+    return 1
+  }
+  state_jq --argjson enabled "$desired" --arg ts "$(utc_now)" '
+    .routing.block_cn_ip = $enabled |
+    .meta.updated_at = $ts
+  '
+  apply_sing_box_state_transaction "$previous_state_file" "CN IP 出站限制变更"
+}
+
 node_menu_text() {
   local vless_enabled vless_core vless_status
   vless_enabled="$(state_get '.protocols.vless_reality.enabled // false')"
@@ -7013,6 +7073,7 @@ node_menu_text() {
 IPv6 地址：$(state_get 'if (.meta.dual_stack // false) then (.meta.server_address_ipv6 // "-") else "未启用" end')
 网络模式：$(state_get 'if (.meta.dual_stack // false) then "IPv4 / IPv6 双栈" elif ((.meta.server_address // "") | contains(":")) then "IPv6" else "IPv4" end')
 出站访问：$(outbound_ip_preference_label)
+CN IP 出站限制：$(block_cn_ip_label)
 Shadowsocks：$(state_get '.protocols.shadowsocks.enabled')
 ${vless_status}
 Hysteria2：$(state_get '.protocols.hysteria2.enabled')
@@ -7128,6 +7189,7 @@ node_submenu() {
       "5" "重新生成配置并重载服务" \
       "6" "更改节点地址" \
       "7" "设置出站 IPv4 / IPv6 策略" \
+      "8" "设置禁止访问 CN IP" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || continue
 
@@ -7152,6 +7214,9 @@ node_submenu() {
         ;;
       7)
         configure_outbound_ip_preference || true
+        ;;
+      8)
+        configure_block_cn_ip || true
         ;;
       0)
         return 0
@@ -8764,6 +8829,7 @@ show_overview() {
 网络模式: $(state_get 'if (.meta.dual_stack // false) then "IPv4 / IPv6 双栈" elif ((.meta.server_address // "") | contains(":")) then "IPv6" else "IPv4" end' 2>/dev/null || printf '未知')
 IPv6 地址: $(state_get 'if (.meta.dual_stack // false) then (.meta.server_address_ipv6 // "未设置") else "未启用" end' 2>/dev/null || printf '未知')
 出站访问: $(outbound_ip_preference_label 2>/dev/null || printf '未知')
+CN IP 出站限制: $(block_cn_ip_label)
 sing-box 状态: $service_status
 Xray 状态: $xray_status
 配置文件: $CONFIG_FILE

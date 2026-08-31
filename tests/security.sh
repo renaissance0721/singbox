@@ -465,6 +465,74 @@ test_configure_outbound_ip_preference() {
 }
 (test_configure_outbound_ip_preference)
 
+test_configure_block_cn_ip() {
+  local STATE_FILE="$test_root/cn-ip-menu-state.json"
+  local menu_choice apply_count
+  cp "$test_root/state/state.json" "$STATE_FILE"
+  ui_msg() { :; }
+  ui_show_text() { printf '%s\n' "$2"; }
+  menu_choice=1
+  apply_count=0
+  ui_menu() {
+    [[ "$*" == *"不会禁止国内客户端连接节点"* && "$*" == *"Realm"* ]] ||
+      fail "CN IP 菜单没有说明目标 IP 与 Realm 的边界"
+    printf '%s\n' "$menu_choice"
+  }
+  apply_config() { apply_count=$((apply_count + 1)); }
+
+  migrate_state_schema
+  [[ "$(state_get '.routing.block_cn_ip')" == false ]] || fail "旧状态迁移意外开启了 CN IP 限制"
+  grep -Fq 'CN IP 出站限制：已关闭' <<<"$(node_menu_text)" || fail "节点菜单没有显示默认关闭的 CN IP 状态"
+  configure_block_cn_ip || fail "无法开启 CN IP 限制"
+  [[ "$(state_get '.routing.block_cn_ip')" == true && "$apply_count" == 1 ]] || fail "CN IP 开启状态未保存或未应用"
+  migrate_state_schema
+  [[ "$(state_get '.routing.block_cn_ip')" == true ]] || fail "迁移丢失已开启的 CN IP 设置"
+  grep -Fq 'CN IP 出站限制：已开启' <<<"$(node_menu_text)" || fail "节点菜单没有显示已开启的 CN IP 状态"
+  configure_block_cn_ip || fail "重复开启 CN IP 限制失败"
+  [[ "$apply_count" == 1 ]] || fail "重复开启 CN IP 限制仍重启了服务"
+  menu_choice=0
+  configure_block_cn_ip || fail "退出 CN IP 菜单失败"
+  [[ "$apply_count" == 1 ]] || fail "取消 CN IP 设置仍应用了配置"
+  menu_choice=2
+  configure_block_cn_ip || fail "无法关闭 CN IP 限制"
+  [[ "$(state_get '.routing.block_cn_ip')" == false && "$apply_count" == 2 ]] || fail "关闭 CN IP 限制未保存或未应用"
+  migrate_state_schema
+  [[ "$(state_get '.routing.block_cn_ip')" == false ]] || fail "迁移重新开启了已关闭的 CN IP 限制"
+
+  # Simulate either core rejecting the new configuration/startup. Exercise the
+  # actual transaction, so both the saved switch and runtime are rolled back.
+  cp "$STATE_FILE" "$test_root/cn-ip-before-failure.json"
+  apply_count=0
+  apply_config() {
+    apply_count=$((apply_count + 1))
+    [[ "$(state_get '.routing.block_cn_ip')" == false ]]
+  }
+  menu_choice=1
+  if configure_block_cn_ip; then
+    fail "CN IP 应用失败却报告成功"
+  fi
+  [[ "$apply_count" == 2 ]] || fail "CN IP 应用失败后未恢复原运行配置"
+  cmp -s "$STATE_FILE" "$test_root/cn-ip-before-failure.json" || fail "CN IP 应用失败后未恢复完整原状态"
+
+  state_jq '.routing.block_cn_ip = "true"'
+  if validate_state >/dev/null; then
+    fail "CN IP 状态接受了字符串而非布尔值"
+  fi
+}
+(test_configure_block_cn_ip)
+
+(
+  STATE_FILE="$test_root/cn-ip-fresh-state.json"
+  generate_random_service_port() { printf '24442\n'; }
+  generate_random_service_port_excluding() { printf '24443\n'; }
+  migrate_realm_tcp_only() { :; }
+  migrate_realm_wireguard_schema() { :; }
+  repair_sing_box_netlink_hardening() { :; }
+  init_state_file
+  jq -e '.routing.block_cn_ip == false and .routing.split.outbounds == []' "$STATE_FILE" >/dev/null ||
+    fail "首次安装没有默认关闭 CN IP 限制"
+)
+
 (
   ui_menu() {
     [[ "$*" == *"美西（www.cartoonbrew.com）"* && "$*" == *"香港（ani-com.hk）"* && "$*" == *"其他地区（www.tesla.com）"* ]] ||
@@ -616,6 +684,75 @@ jq -e '
 jq -e --arg cache_file "$RULE_SET_CACHE_FILE" '
   .experimental.cache_file == {enabled: true, path: $cache_file}
 ' "$split_rendered" >/dev/null || fail "远程规则集缓存没有启用或路径错误"
+
+test_cn_ip_render_config() {
+  local STATE_FILE="$test_root/cn-ip-render-state.json"
+  local before_config cn_config preference core
+  cp "$test_root/state/state.json" "$STATE_FILE"
+  before_config="$test_root/cn-ip-disabled.json"
+  cn_config="$test_root/cn-ip-enabled.json"
+  render_config >"$before_config"
+  jq -e '[.route.rule_set[] | select(.tag == "block-cn-ip")] == []' "$before_config" >/dev/null ||
+    fail "默认关闭时仍依赖 CN IP 远程规则"
+
+  for preference in auto prefer_ipv4 prefer_ipv6 ipv4_only ipv6_only; do
+    state_jq --arg preference "$preference" '
+      .routing.block_cn_ip = true | .meta.outbound_ip_preference = $preference
+    '
+    render_config >"$cn_config"
+    jq -e --arg preference "$preference" --slurpfile before "$before_config" '
+      ([.route.rule_set[] | select(.tag == "block-cn-ip")] == [{
+        type: "remote", tag: "block-cn-ip", format: "binary",
+        url: "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs", update_interval: "1d"
+      }])
+      and .experimental.cache_file.enabled == true
+      and .inbounds == $before[0].inbounds
+      and .outbounds == $before[0].outbounds
+      and ([.route.rules[] | select(.action == "resolve") | (.strategy // "auto")] == [$preference])
+      and (.route.rules | to_entries | . as $rules
+        | [.[] | select(.value.rule_set == ["block-cn-ip"])] as $blocks
+        | ($blocks | length) == 2
+        and ($blocks | all(.value.action == "reject" and .value.inbound == ["vless-reality-in"]
+          and .value.rule_set_ip_cidr_match_source == false
+          and (.value | has("source_ip_cidr") | not)))
+        and $blocks[0].key < ([$rules[] | select(.value.action == "sniff") | .key] | first)
+        and $blocks[1].key > ([$rules[] | select(.value.action == "resolve") | .key] | first)
+        and $blocks[1].key < ([$rules[] | select(.value.action == "route") | .key] | min))
+      and ([.route.rules[] | select(.ip_is_private == true and .action == "reject")] | length) == 2
+      and ([.route.rules[] | select(.action == "route")] == [$before[0].route.rules[] | select(.action == "route")])
+    ' "$cn_config" >/dev/null || fail "CN IP 阻断遗漏目标检查、影响入站或被分流提前绕过：$preference"
+  done
+
+  if [[ -n "${SBOX_TEST_CN_RENDERED_CONFIG:-}" ]]; then
+    state_jq '.meta.outbound_ip_preference = "auto"'
+    render_config >"$SBOX_TEST_CN_RENDERED_CONFIG"
+  fi
+  state_jq '.routing.block_cn_ip = false | .meta.outbound_ip_preference = "auto"'
+  render_config >"$cn_config"
+  cmp -s "$before_config" "$cn_config" || fail "关闭 CN IP 限制没有恢复原分流与 DNS 顺序"
+
+  state_jq '
+    .routing.block_cn_ip = true |
+    .protocols.shadowsocks.enabled = true |
+    .protocols.hysteria2.enabled = true
+  '
+  for core in sing-box xray; do
+    state_jq --arg core "$core" '.protocols.vless_reality.core = $core'
+    render_config >"$cn_config"
+    jq -e --arg core "$core" '
+      [.inbounds[].tag] as $inbounds
+      | [.route.rules[] | select(.rule_set == ["block-cn-ip"])] as $blocks
+      | ($blocks | length) == 2
+      and ($blocks | all(.inbound == $inbounds))
+      and ($inbounds | length) == (if $core == "sing-box" then 3 else 2 end)
+    ' "$cn_config" >/dev/null || fail "CN IP 规则没有覆盖所有启用的 sing-box 代理协议：$core"
+  done
+  state_jq '.protocols.shadowsocks.enabled = false | .protocols.hysteria2.enabled = false'
+  render_config >"$cn_config"
+  jq -e '.inbounds == [] and ([.route.rule_set[] | select(.tag == "block-cn-ip")] == [])' "$cn_config" >/dev/null ||
+    fail "Xray-only 节点仍要求 sing-box 加载 CN IP 规则"
+}
+(test_cn_ip_render_config)
 
 geosite_rules="$(build_split_geosite_json 'OpenAI, geolocation-!cn, bad/name')"
 jq -e '
@@ -1586,6 +1723,33 @@ grep -Fq 'bash -n "$DOWNLOAD_TMP"' "$repo_dir/install.sh" || fail "install.sh �
   [[ "$(sing_box_protocol_count)" == "0" ]] || fail "Xray-only VLESS 被错误计入 sing-box 协议数"
   xray_protocol_enabled || fail "Xray VLESS 状态未被识别"
   [[ "$(desired_xray_listeners)" == $'tcp\t24443\tVLESS + Reality (Xray)' ]] || fail "Xray 监听端口未进入统一端口管理"
+
+  jq -e '.routing.domainStrategy == "IPIfNonMatch" and (has("dns") | not)
+    and ([.routing.rules[].ip[]] | index("geoip:cn") == null)' "$xray_rendered" >/dev/null ||
+    fail "Xray 默认关闭时意外改变 DNS 或启用 CN IP 限制"
+  for preference in auto prefer_ipv4 prefer_ipv6 ipv4_only ipv6_only; do
+    state_jq --arg preference "$preference" '.routing.block_cn_ip = true | .meta.outbound_ip_preference = $preference'
+    render_xray_config >"$test_root/xray-cn-rendered.json"
+    jq -e --arg preference "$preference" --slurpfile before "$xray_rendered" '
+      .inbounds == $before[0].inbounds
+      and .routing.domainStrategy == "IPOnDemand"
+      and ([.routing.rules[] | select(.ip == ["geoip:cn"])] == [{
+        type: "field", inboundTag: ["vless-reality-in"], ip: ["geoip:cn"], outboundTag: "block"
+      }])
+      and .routing.rules[0] == $before[0].routing.rules[0]
+      and .dns.servers == ["localhost"]
+      and .dns.queryStrategy == (if $preference == "ipv4_only" then "UseIPv4"
+        elif $preference == "ipv6_only" then "UseIPv6" else "UseIP" end)
+      and .outbounds[0].settings.domainStrategy == ({auto:"AsIs", prefer_ipv4:"UseIPv4v6",
+        prefer_ipv6:"UseIPv6v4", ipv4_only:"ForceIPv4", ipv6_only:"ForceIPv6"}[$preference])
+    ' "$test_root/xray-cn-rendered.json" >/dev/null || fail "Xray CN IP 限制错误影响入站、私网防护或地址族策略：$preference"
+  done
+  if [[ -n "${SBOX_TEST_XRAY_CN_RENDERED_CONFIG:-}" ]]; then
+    cp "$test_root/xray-cn-rendered.json" "$SBOX_TEST_XRAY_CN_RENDERED_CONFIG"
+  fi
+  state_jq '.routing.block_cn_ip = false | .meta.outbound_ip_preference = "prefer_ipv4"'
+  render_xray_config >"$test_root/xray-cn-rendered.json"
+  cmp -s "$xray_rendered" "$test_root/xray-cn-rendered.json" || fail "Xray 关闭 CN IP 限制未恢复原配置"
 )
 
 (

@@ -883,6 +883,81 @@ install_sing_box_rpm_repo() {
   return 1
 }
 
+ensure_sing_box_v2ray_api() (
+  local bin work release asset url digest staged="" was_active=false replaced=false complete=false
+  bin="$(readlink -f "$(command -v sing-box)")" || return 1
+  if run_as_runtime "$bin" version | grep -Eq '^Tags:.*[ ,]with_v2ray_api([ ,]|$)'; then
+    return 0
+  fi
+
+  # Build tags cannot be added to an existing executable. Download the same
+  # upstream feature set rebuilt by this repository with with_v2ray_api added.
+  case "$(uname -m)" in
+    x86_64|amd64) asset=sing-box-linux-amd64-musl.tar.gz ;;
+    aarch64|arm64) asset=sing-box-linux-arm64-musl.tar.gz ;;
+    *) die "带 with_v2ray_api 的内核目前仅构建 amd64/arm64，未替换当前内核。" ;;
+  esac
+  ensure_runtime_account
+  work="$(mktemp -d "$TMP_DIR/sbox-v2ray-core.XXXXXX")" || return 1
+  # shellcheck disable=SC2329
+  cleanup_v2ray_core() {
+    if [[ "$replaced" == true && "$complete" != true ]]; then
+      install -m 0755 "$work/original" "$staged"
+      mv -f "$staged" "$bin"
+      if [[ "$(sing_box_service_manager)" == openrc ]]; then
+        ensure_openrc_low_port_capability "$bin" sing-box || true
+      fi
+      if [[ "$was_active" == true ]]; then
+        restart_sing_box || warn "旧内核已恢复，但服务未能启动，请检查日志。"
+      fi
+    fi
+    [[ -z "$staged" ]] || rm -f "$staged"
+    rm -rf -- "$work"
+  }
+  trap cleanup_v2ray_core EXIT
+  chown root:"$RUNTIME_GROUP" "$work" || return 1
+  chmod 0750 "$work" || return 1
+  log "当前内核缺少 with_v2ray_api，下载本仓库额外启用该标签的构建..."
+  download_to_file "$work/releases.json" \
+    "https://api.github.com/repos/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/releases?per_page=100" || return 1
+  release="$(jq -er '[.[] | select(.draft == false and (.tag_name | startswith("sing-box-v2ray-")))][0].tag_name // empty' "$work/releases.json")" ||
+    die "本仓库尚未发布带 with_v2ray_api 的内核；请先运行并发布 sing-box-core 构建，不能直接给现有二进制追加标签。"
+  [[ "$release" =~ ^sing-box-v2ray-[a-zA-Z0-9._-]+$ ]] || return 1
+  url="https://github.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/releases/download/${release}/${asset}"
+  digest="$(jq -er --arg release "$release" --arg asset "$asset" --arg url "$url" '
+    .[] | select(.tag_name == $release) | .assets[] |
+    select(.name == $asset and .browser_download_url == $url) |
+    .digest | select(test("^sha256:[0-9a-f]{64}$")) | ltrimstr("sha256:")
+  ' "$work/releases.json")" || die "发布包缺失或没有 GitHub SHA-256 摘要，未替换内核。"
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  download_to_file "$work/core.tar.gz" "$url" || return 1
+  [[ "$(sha256_file "$work/core.tar.gz")" == "$digest" ]] || die "sing-box 发布包 SHA-256 不匹配，未替换内核。"
+  # Extract one known file, without trusting archive paths or permissions.
+  tar -xOzf "$work/core.tar.gz" sing-box >"$work/sing-box" || return 1
+  chmod 0755 "$work/sing-box" || return 1
+  run_as_runtime "$work/sing-box" version | grep -Eq '^Tags:.*[ ,]with_v2ray_api([ ,]|$)' ||
+    die "下载的内核无法运行或仍缺少 with_v2ray_api，未替换。"
+  if [[ -s "$CONFIG_FILE" ]]; then
+    run_as_runtime "$work/sing-box" check -c "$CONFIG_FILE" || die "新内核不兼容现有配置，未替换。"
+  fi
+  cp -p "$bin" "$work/original" || return 1
+  [[ "$(sing_box_service_active 2>/dev/null || true)" != active ]] || was_active=true
+  staged="$(mktemp "$(dirname "$bin")/.sing-box.XXXXXX")" || return 1
+  install -m 0755 "$work/sing-box" "$staged" || return 1
+  mv -f "$staged" "$bin" || return 1
+  replaced=true
+  if [[ "$(sing_box_service_manager)" == openrc ]]; then
+    ensure_openrc_low_port_capability "$bin" sing-box || return 1
+  fi
+  if [[ "$was_active" == true ]]; then
+    restart_sing_box || return 1
+    sleep 1
+    [[ "$(sing_box_service_active 2>/dev/null || true)" == active ]] || return 1
+  fi
+  complete=true
+  log "sing-box 已启用编译标签 with_v2ray_api（${release}）。"
+)
+
 install_sing_box() {
   local installed=0 version_text=""
 
@@ -914,6 +989,7 @@ install_sing_box() {
   hash -r 2>/dev/null || true
   have_cmd sing-box || die "安装完成后仍未找到 sing-box 命令。"
   ensure_sing_box_service
+  ensure_sing_box_v2ray_api || die "无法安装带 with_v2ray_api 的 sing-box，安装未完成。"
   enable_sing_box_service
 
   version_text="$(run_as_runtime sing-box version 2>/dev/null | head -n 1 || true)"

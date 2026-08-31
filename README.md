@@ -9,7 +9,7 @@
 
 - 只支持 Linux VPS
 - 输入安装命令后先进入终端管理面板
-- 在面板选择“安装 / 初始化 sing-box”后安装依赖与官方原生 `sing-box`
+- 在面板选择“安装 / 初始化 sing-box”后安装依赖与 sing-box，并自动确保内核包含 `with_v2ray_api`
 - 退出后可直接输入 `sbox` 重新打开面板
 - 支持输入 `sbox uninstall` 一键卸载
 - 支持重新安装 / 修复并保留现有规则；面板可一键安全更新管理脚本
@@ -434,6 +434,9 @@ apk add --no-cache bash curl jq openssl ca-certificates git tar gzip unzip openr
 
 ### `sing-box` 软件包安装失败
 
+- 安装软件包后会检查 `sing-box version`；若缺少 `with_v2ray_api`，自动下载本仓库最新已发布的 `sing-box-v2ray-*` 内核，校验 SHA-256、标签和现有配置后替换。Agent、用户和配置管理逻辑不变。
+- 仓库维护者首次需运行 Actions 中的 **Build sing-box with V2Ray API** 并发布生成的 Release 草稿；尚无发布包时会明确报错，不会声称已补齐标签。构建保留所选官方 commit 的完整 Linux 默认标签，另加 `with_musl,with_v2ray_api`，提供 amd64/arm64 静态包。
+- 日常安装仍使用原命令，无需手工选内核。系统包管理器单独升级可能覆盖自建内核；再次运行 `sbox repair-install` 会重新检查并补齐。
 - Alpine 会先使用当前已配置的软件源，再显式尝试当前版本的官方 `community` 仓库；旧稳定版没有该软件包时，最后尝试由 `apk` 验签的官方 `edge/community` 软件包
 - Debian / Ubuntu 请检查错误上方的 `apt-get update` 输出，以及 `https://sing-box.app/gpg.key`、`https://deb.sagernet.org/` 是否可访问
 - RHEL / CentOS 请检查错误上方的 DNF/YUM 输出，以及 `https://sing-box.app/sing-box.repo` 是否可访问

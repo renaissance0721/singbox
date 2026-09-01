@@ -28,6 +28,7 @@ export FIREWALL_PORT_POLICY_FILE="$STATE_DIR/firewall-port-policy.tsv"
 export IPTABLES_MIGRATION_MARKER="$STATE_DIR/iptables-comment-rules.migrated"
 export SSHD_CONFIG_FILE="$test_root/sshd_config"
 export TMP_DIR="$test_root/tmp"
+export SBOX_BUILD_TMP_DIR="$TMP_DIR"
 mkdir -p "$TMP_DIR"
 
 # Load functions without executing main.
@@ -1883,6 +1884,7 @@ EOF
       printf 'build\n' >>"$core_dir/builds"
       [[ "$core_case" != compile_failed ]] || return 1
       local new_version=1.14.0 new_tags=$4 new_revision=$core_revision
+      [[ "$1" == "$SBOX_BUILD_TMP_DIR"/sbox-v2ray-core.*/build ]] || fail "补齐 API 未使用独立的大容量编译目录"
       [[ "$4" == "$old_tags,with_v2ray_api" ]] || fail "补齐 API 时未保留原标签"
       [[ "$core_case" != wrong_version ]] || new_version=1.15.0
       [[ "$core_case" != wrong_revision ]] || new_revision=ffffffffffffffffffffffffffffffffffffffff
@@ -1920,6 +1922,43 @@ EOF
   )
 done
 
+(
+  SBOX_BUILD_TMP_DIR=relative/path
+  result=0
+  (sing_box_build_tmp_parent) >"$test_root/build-parent.log" 2>&1 || result=$?
+  [[ "$result" != 0 ]] || fail "编译目录接受了相对路径"
+)
+
+(
+  SBOX_BUILD_TMP_DIR="$test_root/missing-build-parent"
+  result=0
+  (sing_box_build_tmp_parent) >"$test_root/build-parent.log" 2>&1 || result=$?
+  [[ "$result" != 0 ]] || fail "编译目录接受了不存在的路径"
+)
+
+(
+  SBOX_BUILD_TMP_DIR="$TMP_DIR"
+  [[ "$(sing_box_build_tmp_parent)" == "$TMP_DIR" ]] || fail "未采用显式指定的编译目录"
+)
+
+(
+  SBOX_BUILD_TMP_DIR=""
+  TMP_DIR="$test_root/tmp"
+  [[ "$(sing_box_build_tmp_parent)" == "$TMP_DIR" ]] || fail "未兼容原有 TMP_DIR 编译目录覆盖"
+)
+
+(
+  df() {
+    printf '%s\n' \
+      'Filesystem 1024-blocks Used Available Capacity Mounted on' \
+      '/dev/test 4194304 3145729 1048575 76% /test'
+  }
+  result=0
+  (check_sing_box_build_space /test) >"$test_root/build-space.log" 2>&1 || result=$?
+  [[ "$result" != 0 ]] || fail "编译前未拒绝小于 2 GiB 的可用空间"
+  grep -Fq 'SBOX_BUILD_TMP_DIR' "$test_root/build-space.log" || fail "磁盘不足提示缺少可操作的目录覆盖方法"
+)
+
 # Exercise the real build orchestration with fake SDK/git endpoints: pin the
 # original revision (or version tag), preserve CGO/CPU settings, reject dirty
 # source metadata and a bad SDK digest before any executable replacement.
@@ -1940,6 +1979,7 @@ for build_case in revision version_tag naive dirty bad_digest; do
     getconf() { printf 'glibc 2.36\n'; }
     repair_dpkg_state() { :; }
     apt-get() { printf '%s\n' "$*" >>"$build_dir/packages"; }
+    check_sing_box_build_space() { :; }
     download_to_file() {
       if [[ "$2" == *'mode=json'* ]]; then
         local sdk_digest

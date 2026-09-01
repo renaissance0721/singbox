@@ -77,6 +77,7 @@ SCRIPT_REPO_BRANCH="main"
 SCRIPT_REPO_ID="1210354428"
 SCRIPT_REPO_OWNER_ID="197479185"
 TMP_DIR="${TMP_DIR:-/tmp}"
+SBOX_BUILD_TMP_DIR="${SBOX_BUILD_TMP_DIR:-}"
 SSHD_CONFIG_FILE="${SSHD_CONFIG_FILE:-/etc/ssh/sshd_config}"
 
 PKG_MANAGER=""
@@ -930,6 +931,43 @@ install_sing_box_rpm_repo() {
   return 1
 }
 
+sing_box_build_tmp_parent() {
+  local parent
+
+  if [[ -n "$SBOX_BUILD_TMP_DIR" ]]; then
+    parent="$SBOX_BUILD_TMP_DIR"
+  elif [[ "$TMP_DIR" != /tmp ]]; then
+    parent="$TMP_DIR"
+  else
+    parent=/var/tmp
+    if [[ ! -d "$parent" || ! -w "$parent" ]]; then
+      parent="$TMP_DIR"
+    fi
+  fi
+  [[ "$parent" == /* ]] || die "sing-box 编译目录必须是绝对路径：$parent"
+  [[ -d "$parent" && -w "$parent" ]] ||
+    die "sing-box 编译目录不存在或不可写：$parent。请先创建可用目录，或通过 SBOX_BUILD_TMP_DIR 指定。"
+  printf '%s\n' "$parent"
+}
+
+check_sing_box_build_space() {
+  local build=$1 available_kib available_mib
+  available_kib="$(LC_ALL=C df -Pk "$build" 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ {print $4; exit}')"
+  if [[ ! "$available_kib" =~ ^[0-9]+$ ]]; then
+    warn "无法读取编译目录的可用空间：$build；将继续尝试编译。"
+    return 0
+  fi
+
+  available_mib=$(( available_kib / 1024 ))
+  log "编译工作目录：$build（当前可用 ${available_mib} MiB）"
+  if (( available_kib < 2097152 )); then
+    die "sing-box 完整功能编译至少需要约 2 GiB 可用空间，当前仅 ${available_mib} MiB。请清理磁盘，或将 SBOX_BUILD_TMP_DIR 指向大容量本地文件系统。"
+  fi
+  if (( available_kib < 4194304 )); then
+    warn "编译目录可用空间低于建议的 4 GiB；不同标签和工具链可能需要更多空间。"
+  fi
+}
+
 build_sing_box_v2ray_api() (
   local build=$1 original=$2 version_text=$3 tags=$4
   local version revision go_version arch sdk_file digest build_info cgo ref commit ldflags=""
@@ -973,6 +1011,7 @@ build_sing_box_v2ray_api() (
       ;;
     *) die "无法自动安装编译依赖，未替换内核。" ;;
   esac
+  check_sing_box_build_space "$build"
 
   # Use a private SDK matching the original binary, without changing system Go.
   sdk_file="${go_version}.linux-${arch}.tar.gz"
@@ -984,6 +1023,7 @@ build_sing_box_v2ray_api() (
   [[ "$(sha256_file "$build/go.tar.gz")" == "$digest" ]] || die "Go 工具链 SHA-256 校验失败。"
   chmod 0644 "$build/go.tar.gz" || return 1
   run_as_runtime tar -xzf "$build/go.tar.gz" -C "$build" || return 1
+  rm -f "$build/go.tar.gz" "$build/go-releases.json" || return 1
   build_env=(env -i "PATH=$build/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     "GOPATH=$build/gopath" "GOCACHE=$build/cache" "TMPDIR=$build" "GOTOOLCHAIN=local"
     "GOMAXPROCS=2" "GOFLAGS=-p=1" "GIT_CONFIG_NOSYSTEM=1" "GIT_CONFIG_GLOBAL=/dev/null"
@@ -1047,7 +1087,7 @@ build_sing_box_v2ray_api() (
 )
 
 ensure_sing_box_v2ray_api() (
-  local bin work version_text tags new_text tag original_hash backup="" staged=""
+  local bin work build_tmp_parent version_text tags new_text tag original_hash backup="" staged=""
   local was_active=false replaced=false complete=false
   local -a required_tags=()
   bin="$(sing_box_check_bin)" || die "尚未安装 sing-box，请先安装内核。"
@@ -1060,7 +1100,8 @@ ensure_sing_box_v2ray_api() (
   fi
   [[ -z "$tags" || "$tags" =~ ^[a-zA-Z0-9_.,]+$ ]] || die "无法识别原内核标签，未替换内核。"
   tags="${tags:+$tags,}with_v2ray_api"
-  work="$(mktemp -d "$TMP_DIR/sbox-v2ray-core.XXXXXX")" || return 1
+  build_tmp_parent="$(sing_box_build_tmp_parent)" || return 1
+  work="$(mktemp -d "$build_tmp_parent/sbox-v2ray-core.XXXXXX")" || return 1
   # shellcheck disable=SC2329
   cleanup_v2ray_core() {
     if [[ "$replaced" == true && "$complete" != true ]]; then
@@ -1090,7 +1131,7 @@ ensure_sing_box_v2ray_api() (
   original_hash="$(sha256_file "$work/original")" || return 1
   install -d -o "$RUNTIME_USER" -g "$RUNTIME_GROUP" -m 0700 "$work/build" || return 1
   build_sing_box_v2ray_api "$work/build" "$work/original" "$version_text" "$tags" ||
-    die "同版本内核编译失败，原内核保持不变。"
+    die "同版本内核编译失败，原内核保持不变。若上方出现 disk quota exceeded 或 no space left，请清理磁盘，或将 SBOX_BUILD_TMP_DIR 指向至少有 2 GiB（建议 4 GiB）可用空间的本地文件系统后重试。"
   # Validate a root-owned candidate beside the installed binary (also keeps
   # relative shared-library lookup working for existing purego installations).
   staged="$(mktemp "$(dirname "$bin")/.sing-box.XXXXXX")" || return 1

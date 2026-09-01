@@ -78,6 +78,8 @@ SCRIPT_REPO_ID="1210354428"
 SCRIPT_REPO_OWNER_ID="197479185"
 TMP_DIR="${TMP_DIR:-/tmp}"
 SBOX_BUILD_TMP_DIR="${SBOX_BUILD_TMP_DIR:-}"
+SING_BOX_BUILD_MIN_FREE_KIB=2097152
+SING_BOX_BUILD_MIN_FREE_INODES=65536
 SSHD_CONFIG_FILE="${SSHD_CONFIG_FILE:-/etc/ssh/sshd_config}"
 
 PKG_MANAGER=""
@@ -951,21 +953,83 @@ sing_box_build_tmp_parent() {
 }
 
 check_sing_box_build_space() {
-  local build=$1 available_kib available_mib
+  local build=$1 available_kib available_mib inode_stats total_inodes available_inodes
   available_kib="$(LC_ALL=C df -Pk "$build" 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ {print $4; exit}')"
   if [[ ! "$available_kib" =~ ^[0-9]+$ ]]; then
     warn "无法读取编译目录的可用空间：$build；将继续尝试编译。"
-    return 0
+  else
+    available_mib=$(( available_kib / 1024 ))
+    log "编译工作目录：$build（当前可用 ${available_mib} MiB）"
+    if (( available_kib < SING_BOX_BUILD_MIN_FREE_KIB )); then
+      die "编译环境不满足：sing-box 完整功能编译至少需要 2 GiB 可用空间，当前仅 ${available_mib} MiB，无法编译。请清理或扩容，或将 SBOX_BUILD_TMP_DIR 指向具有独立容量/配额的本地文件系统。"
+    fi
+    if (( available_kib < 4194304 )); then
+      warn "编译目录可用空间低于建议的 4 GiB；不同标签和工具链可能需要更多空间。"
+    fi
   fi
 
-  available_mib=$(( available_kib / 1024 ))
-  log "编译工作目录：$build（当前可用 ${available_mib} MiB）"
-  if (( available_kib < 2097152 )); then
-    die "sing-box 完整功能编译至少需要约 2 GiB 可用空间，当前仅 ${available_mib} MiB。请清理磁盘，或将 SBOX_BUILD_TMP_DIR 指向大容量本地文件系统。"
+  inode_stats="$(LC_ALL=C df -Pki "$build" 2>/dev/null | awk 'NR == 2 && $2 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {print $2, $4; exit}')"
+  read -r total_inodes available_inodes <<<"$inode_stats"
+  if [[ ! "$total_inodes" =~ ^[0-9]+$ || ! "$available_inodes" =~ ^[0-9]+$ || "$total_inodes" == 0 ]]; then
+    warn "无法读取编译目录的可用 inode 数；稍后仍会执行实际配额检测。"
+  elif (( available_inodes < SING_BOX_BUILD_MIN_FREE_INODES )); then
+    die "编译环境不满足：编译目录至少需要 ${SING_BOX_BUILD_MIN_FREE_INODES} 个可用 inode，当前仅 ${available_inodes} 个，无法编译。请清理小文件、提高 inode 配额或改用其他文件系统。"
   fi
-  if (( available_kib < 4194304 )); then
-    warn "编译目录可用空间低于建议的 4 GiB；不同标签和工具链可能需要更多空间。"
-  fi
+}
+
+probe_sing_box_build_quota() {
+  local build=$1 result=0 probe_bytes=$(( SING_BOX_BUILD_MIN_FREE_KIB * 1024 ))
+
+  # df may report the host filesystem's free space instead of a container,
+  # project, or per-user quota. Reserve and immediately release the minimum
+  # space as the actual unprivileged builder so EDQUOT is caught up front.
+  run_as_runtime python3 - "$build/.sbox-capacity-probe" "$probe_bytes" <<'PY' || result=$?
+import errno
+import os
+import sys
+
+path = sys.argv[1]
+size = int(sys.argv[2])
+fd = None
+status = 0
+try:
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.posix_fallocate(fd, 0, size)
+except OSError as error:
+    if error.errno in (errno.EDQUOT, errno.ENOSPC, errno.EFBIG):
+        status = 73
+    elif error.errno in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
+        status = 74
+    else:
+        status = 75
+except (AttributeError, ValueError):
+    status = 74
+finally:
+    if fd is not None:
+        os.close(fd)
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        status = 75
+sys.exit(status)
+PY
+
+  case "$result" in
+    0)
+      log "实际磁盘/用户/容器配额检测通过（可预留至少 2 GiB）。"
+      ;;
+    73)
+      die "编译环境不满足：sbox-runtime 用户或当前容器/文件系统无法实际预留 2 GiB，磁盘容量、inode 或配额不足，无法编译。仅改用 /tmp 或 /var/tmp 的其他子目录无效；请扩容或挂载具有独立配额的文件系统。"
+      ;;
+    74)
+      die "当前文件系统不支持可靠的容量预留检测，无法确认是否满足编译要求；为避免编译途中耗尽配额，已停止编译。请将 SBOX_BUILD_TMP_DIR 指向支持 fallocate 的本地文件系统。"
+      ;;
+    *)
+      die "无法以 sbox-runtime 用户完成编译容量检测，已停止编译；请检查编译目录权限和文件系统状态。"
+      ;;
+  esac
 }
 
 build_sing_box_v2ray_api() (
@@ -988,6 +1052,7 @@ build_sing_box_v2ray_api() (
       die "Naive 的上游编译工具链需要 amd64/glibc 构建主机；当前系统不能直接编译，原内核保持不变。"
     fi
   fi
+  check_sing_box_build_space "$build"
 
   detect_pkg_manager
   log "安装本机编译依赖（不会安装或升级 sing-box 软件包）..."
@@ -1011,7 +1076,7 @@ build_sing_box_v2ray_api() (
       ;;
     *) die "无法自动安装编译依赖，未替换内核。" ;;
   esac
-  check_sing_box_build_space "$build"
+  probe_sing_box_build_quota "$build"
 
   # Use a private SDK matching the original binary, without changing system Go.
   sdk_file="${go_version}.linux-${arch}.tar.gz"

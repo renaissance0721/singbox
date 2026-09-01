@@ -448,7 +448,7 @@ apk add --no-cache bash curl jq openssl ca-certificates git tar gzip unzip openr
 - 已有高于 1.13 的内核不会被自动降级。主菜单 11 / `sbox enable-v2ray-api` 不受安装选版限制，始终按已有内核的原版本补充 API。
 - 安装软件包后若缺少 `with_v2ray_api`，自动在 VPS 上重编译该版本；已有内核可执行 `sbox enable-v2ray-api` 或选择主菜单 **11**，不经过软件包安装/升级流程。已有此标签时直接跳过，无需 GitHub Actions 或预先发布内核。
 - 编译优先固定原 `Revision`，无 revision 时使用当前版本的官方 tag；保留原有全部标签、CGO 设置与 Go 版本，只追加 `with_v2ray_api`。无法取得对应源码或工具链时明确失败，不改用最新版，也不删减功能。自动下载的 Go SDK 会校验官方 SHA-256，不覆盖系统 Go。
-- 当前本机编译支持 amd64/arm64；含 Naive 且未使用 purego 的原内核还需下载对应 Chromium 工具链，并要求 amd64/glibc 构建主机（此类内核暂不能在 Alpine 或 ARM 主机本机编译）。大体积编译工作区默认放在 `/var/tmp`（不可用时回退到 `/tmp`），开始下载前要求至少 2 GiB 可用空间并建议预留 4 GiB；可用 `SBOX_BUILD_TMP_DIR=/mnt/data/tmp sbox enable-v2ray-api` 指向其他本地文件系统。编译期间原服务继续运行，结束后自动删除工作区。
+- 当前本机编译支持 amd64/arm64；含 Naive 且未使用 purego 的原内核还需下载对应 Chromium 工具链，并要求 amd64/glibc 构建主机（此类内核暂不能在 Alpine 或 ARM 主机本机编译）。大体积编译工作区默认放在 `/var/tmp`（不可用时回退到 `/tmp`）；编译前自动检查至少 2 GiB 可用空间、65536 个可用 inode，并以 `sbox-runtime` 身份实际预留后释放 2 GiB，以识别普通 `df` 看不到的用户、容器或项目配额。任一检测不满足就提示配置不足并停止，建议实际预留 4 GiB。可用 `SBOX_BUILD_TMP_DIR=/mnt/data/tmp sbox enable-v2ray-api` 指向具有独立容量/配额的本地文件系统；仅在同一文件系统内新建 `/tmp` 或 `/var/tmp` 子目录不会增加配额。编译期间原服务继续运行，结束后自动删除工作区。
 - 新内核通过版本、revision、全部标签、V2Ray API 和现有配置检查后才替换，运行中的服务会短暂重启；启动失败会回退。原内核备份保留在 `/etc/sing-box-manager/backups/sing-box-before-v2ray-api-*.bin`。不修改 Agent、节点、客户端或 API 配置；启用 API 监听仍由后续配置完成。
 - 1.13 选版限制仅作用于本脚本的安装流程；系统包管理器单独升级仍遵循系统的软件源策略，也可能覆盖自编译内核。之后执行 `sbox enable-v2ray-api` 可按升级后的当前版本重新补齐。
 - Alpine 会先使用当前已配置的软件源，再显式尝试当前版本的官方 `community` 仓库；旧稳定版没有该软件包时，最后尝试由 `apk` 验签的官方 `edge/community` 软件包

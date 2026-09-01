@@ -1959,6 +1959,32 @@ done
   grep -Fq 'SBOX_BUILD_TMP_DIR' "$test_root/build-space.log" || fail "磁盘不足提示缺少可操作的目录覆盖方法"
 )
 
+(
+  df() {
+    if [[ "$*" == *i* ]]; then
+      printf '%s\n' \
+        'Filesystem Inodes IUsed IFree IUse% Mounted on' \
+        '/dev/test 100000 90001 9999 91% /test'
+    else
+      printf '%s\n' \
+        'Filesystem 1024-blocks Used Available Capacity Mounted on' \
+        '/dev/test 8388608 4194304 4194304 50% /test'
+    fi
+  }
+  result=0
+  (check_sing_box_build_space /test) >"$test_root/build-inodes.log" 2>&1 || result=$?
+  [[ "$result" != 0 ]] || fail "编译前未拒绝 inode 配额不足"
+  grep -Fq 'inode' "$test_root/build-inodes.log" || fail "inode 不足提示不明确"
+)
+
+(
+  run_as_runtime() { return 73; }
+  result=0
+  (probe_sing_box_build_quota /test) >"$test_root/build-quota.log" 2>&1 || result=$?
+  [[ "$result" != 0 ]] || fail "编译前未拒绝实际用户/容器配额不足"
+  grep -Fq '无法实际预留 2 GiB' "$test_root/build-quota.log" || fail "实际配额不足提示不明确"
+)
+
 # Exercise the real build orchestration with fake SDK/git endpoints: pin the
 # original revision (or version tag), preserve CGO/CPU settings, reject dirty
 # source metadata and a bad SDK digest before any executable replacement.
@@ -1980,6 +2006,7 @@ for build_case in revision version_tag naive dirty bad_digest; do
     repair_dpkg_state() { :; }
     apt-get() { printf '%s\n' "$*" >>"$build_dir/packages"; }
     check_sing_box_build_space() { :; }
+    probe_sing_box_build_quota() { :; }
     download_to_file() {
       if [[ "$2" == *'mode=json'* ]]; then
         local sdk_digest

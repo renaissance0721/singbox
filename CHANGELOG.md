@@ -4,7 +4,7 @@
 
 ## [Unreleased]
 
-- 修复本机补充 `with_v2ray_api` 时把 Go SDK、模块和编译缓存全部写入容量受限的 `/tmp`，导致 Alpine 上出现 `disk quota exceeded` 及连锁标准库缺失报错：编译工作区改用 `/var/tmp`、提前检查可用空间、解压后删除 SDK 压缩包，并支持通过 `SBOX_BUILD_TMP_DIR` 指定大容量本地目录。
+- 修复本机补充 `with_v2ray_api` 时把 Go SDK、模块和编译缓存全部写入容量受限的 `/tmp`，导致 Alpine 上出现 `disk quota exceeded` 及连锁标准库缺失报错：编译工作区改用 `/var/tmp`、检查可用空间和 inode，并以低权限构建用户实际预留 2 GiB 来识别 `df` 不可见的用户/容器/项目配额；配置不足时在下载编译前明确停止。解压后删除 SDK 压缩包，并支持通过 `SBOX_BUILD_TMP_DIR` 指定具有独立配额的大容量目录。
 - 节点管理新增第 8 项“设置禁止访问 CN IP”，默认关闭并持久保存；支持 sing-box / Xray 的中国大陆目标 IPv4/IPv6 阻断，保留国内客户端入站连接，不影响纯 Realm / WireGuard 中转。
 - 开启 CN IP 限制时，在分流前解析并检查目标，保留原有私网和云元数据防护；sing-box 复用远程规则缓存和每日更新，Xray 使用现有 `geoip.dat`，应用失败沿用状态及运行配置回滚流程。
 - 默认安装限定为软件源中可用的最新 sing-box 1.13 系列稳定版，兼容 `sing-box-oldstable` 软件包，排除预发布版并避免自动跨到 1.14；补充 V2Ray API 仍保留原内核版本，已有更高系列不会被隐式降级。

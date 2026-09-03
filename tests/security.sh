@@ -1318,6 +1318,133 @@ EOF
 )
 
 (
+  rule_name='香港 "主线" \ TCP $HOME `date`'
+  [[ "$(realm_prompt_rule_name <<<"  $rule_name  ")" == "$rule_name" ]] ||
+    fail "Realm 名称未保留中文和特殊字符，或未去除首尾空白"
+  name_limit="$(jq -nr '"中" * 80')"
+  [[ "$(realm_prompt_rule_name <<<"$name_limit")" == "$name_limit" ]] ||
+    fail "Realm 名称长度未按 Unicode 字符计算"
+  for invalid_name in '' '   ' "${name_limit}中" $'香港\t中转' $'香港\033[31m中转'; do
+    if printf '%s\n%s\n' "$invalid_name" "$invalid_name" | realm_prompt_rule_name >/dev/null 2>&1; then
+      fail "Realm 接受了空名称、超长名称或控制字符"
+    fi
+  done
+)
+
+(
+  naming_root="$test_root/realm-names"
+  mkdir -p "$naming_root"
+  REALM_STATE_FILE="$naming_root/state.json"
+  REALM_CONFIG_FILE="$naming_root/config.toml"
+  REALM_BIN="$(command -v bash)"
+  cat >"$REALM_STATE_FILE" <<'EOF'
+{
+  "meta":{"updated_at":"original"},
+  "global":{"log_level":"warn","log_output":"stdout","use_udp":false,"no_tcp":false},
+  "wireguard":{"profiles":[{"id":"wg-test","name":"WG test","role":"relay","interface":"sbwg0","paired":true,"enabled":true,"peer_address":"10.253.10.2"}]},
+  "rules":[
+    {"id":"legacy","type":"single","mode":"direct","tunnel_id":null,"description":"0.0.0.0:30001 -> 192.0.2.1:443","entries":[{"listen":"0.0.0.0:30001","remote":"192.0.2.1:443"}]},
+    {"id":"range","name":null,"type":"range","mode":"direct","tunnel_id":null,"description":"0.0.0.0:31001-31002 -> 192.0.2.2:443-444","entries":[{"listen":"0.0.0.0:31001","remote":"192.0.2.2:443"},{"listen":"0.0.0.0:31002","remote":"192.0.2.2:444"}]}
+  ]
+}
+EOF
+  ensure_realm_dirs() { :; }
+  init_realm_state_file() { :; }
+  ui_msg() { :; }
+  ui_show_text() { printf '%s\n' "$2"; }
+  wireguard_profile_route_ready() { return 0; }
+  wireguard_probe_tcp() { return 0; }
+  apply_calls=0
+  apply_realm_config() { apply_calls=$((apply_calls + 1)); rm -f "$1"; }
+  restart_realm_service_raw() { fail "改名不应重启 Realm"; }
+  start_realm_service_raw() { fail "改名不应启动 Realm"; }
+  stop_realm_service_raw() { fail "改名不应停止 Realm"; }
+  sync_managed_firewall_rules() { fail "改名不应修改防火墙"; }
+  write_realm_config_file() { fail "改名不应写入 Realm 运行配置"; }
+
+  rendered_before="$(render_realm_config)"
+  printf '%s\n' "$rendered_before" >"$REALM_CONFIG_FILE"
+  legacy_before="$(cat "$REALM_STATE_FILE")"
+  for missing_name in missing null empty; do
+    case "$missing_name" in
+      missing) realm_state_jq 'del(.rules[0].name)' ;;
+      null) realm_state_jq '.rules[0].name = null' ;;
+      empty) realm_state_jq '.rules[0].name = ""' ;;
+    esac
+    grep -Fq '未命名  0.0.0.0:30001 -> 192.0.2.1:443' <<<"$(show_realm_config)" ||
+      fail "Realm 未兼容旧规则的缺失、null 或空名称"
+  done
+  printf '%s\n' "$legacy_before" >"$REALM_STATE_FILE"
+  unchanged_fields="$(jq -Sc 'del(.meta.updated_at, .rules[0].name)' "$REALM_STATE_FILE")"
+  rule_name='香港 "主线" \ TCP $HOME `date`'
+  modify_realm_rule <<<"$(printf '1\n1\n%s\n' "$rule_name")" 2>"$naming_root/menu.log" ||
+    fail "旧 Realm 规则无法通过修改配置补充名称"
+  [[ "$(jq -r '.rules[0].name' "$REALM_STATE_FILE")" == "$rule_name" ]] || fail "Realm 名称保存不准确"
+  [[ "$(jq -Sc 'del(.meta.updated_at, .rules[0].name)' "$REALM_STATE_FILE")" == "$unchanged_fields" ]] ||
+    fail "Realm 改名改变了名称和更新时间以外的状态"
+  [[ "$apply_calls" -eq 0 && "$(render_realm_config)" == "$rendered_before" && "$(cat "$REALM_CONFIG_FILE")" == "$rendered_before" ]] ||
+    fail "Realm 改名应用或改变了运行配置"
+  grep -Fq "$rule_name" <<<"$(show_realm_config)" || fail "Realm 配置页面未原样显示规则名称"
+  state_before="$(cat "$REALM_STATE_FILE")"
+  modify_realm_rule <<<'1
+1
+' 2>/dev/null || fail "Realm 改名时回车无法保留原名称"
+  modify_realm_rule <<<'1
+0' 2>/dev/null || fail "Realm 修改配置无法取消"
+  if rename_realm_rule legacy </dev/null 2>/dev/null; then
+    fail "Realm 名称输入中断仍被报告为保存成功"
+  fi
+  [[ "$(cat "$REALM_STATE_FILE")" == "$state_before" && "$apply_calls" -eq 0 ]] ||
+    fail "保留原名或取消修改时 Realm 状态发生变化"
+
+  (
+    realm_state_jq() { printf 'broken-state\n' >"$REALM_STATE_FILE"; return 1; }
+    if rename_realm_rule legacy <<<'保存失败测试'; then
+      fail "Realm 改名保存失败仍被报告为成功"
+    fi
+    [[ "$(cat "$REALM_STATE_FILE")" == "$state_before" ]] || fail "Realm 改名失败未恢复原状态"
+  )
+
+  modify_realm_rule <<<'1
+2
+1
+198.51.100.2' 2>/dev/null || fail "修改配置无法切换 Realm 直连目标"
+  jq -e --arg name "$rule_name" '.rules[0] | .name == $name and .mode == "direct" and .entries[0].remote == "198.51.100.2:443"' "$REALM_STATE_FILE" >/dev/null ||
+    fail "切换 Realm 直连链路后名称丢失或目标未更新"
+  modify_realm_rule <<<'1
+2
+2
+1' 2>/dev/null || fail "修改配置无法切换 Realm WireGuard 链路"
+  jq -e --arg name "$rule_name" '.rules[0] | .name == $name and .mode == "wireguard" and .tunnel_id == "wg-test" and .entries[0].remote == "10.253.10.2:443"' "$REALM_STATE_FILE" >/dev/null ||
+    fail "切换 Realm WireGuard 链路后名称丢失或隧道未更新"
+  [[ "$apply_calls" -eq 2 ]] || fail "Realm 链路变更没有各应用一次配置"
+
+  state_before="$(cat "$REALM_STATE_FILE")"
+  if add_realm_forward_rule <<<$'\n' >/dev/null 2>&1 || add_realm_range_rule <<<$'\n' >/dev/null 2>&1; then
+    fail "Realm 新增规则未要求填写名称"
+  fi
+  [[ "$(cat "$REALM_STATE_FILE")" == "$state_before" && "$apply_calls" -eq 2 ]] || fail "空名称新增操作改变了 Realm 状态"
+  add_realm_forward_rule <<<"$(printf '%s\n33001\n1\n192.0.2.3\n443\n' "$rule_name")" 2>/dev/null || fail "无法新增具名 Realm 单端口规则"
+  add_realm_range_rule <<<'日本端口段
+34001
+34002
+2
+1
+443
+444' 2>/dev/null || fail "无法新增具名 Realm WireGuard 端口段规则"
+  jq -e --arg name "$rule_name" '
+    (.rules | length == 4)
+    and (.rules[2] | .name == $name and .type == "single" and .entries[0].remote == "192.0.2.3:443")
+    and (.rules[3] | .name == "日本端口段" and .type == "range" and .mode == "wireguard" and (.entries | length == 2) and .entries[1].remote == "10.253.10.2:444")
+  ' "$REALM_STATE_FILE" >/dev/null || fail "新增 Realm 规则的名称、类型或端口映射不正确"
+  delete_realm_rule <<<'3' 2>"$naming_root/delete.log" || fail "无法删除同名 Realm 规则"
+  grep -Fq "$rule_name" "$naming_root/delete.log" || fail "Realm 删除列表未显示名称"
+  grep -Fq "$rule_name" "$naming_root/menu.log" && fail "旧规则补名前的列表不应提前出现新名称"
+  jq -e --arg name "$rule_name" '(.rules | length == 3) and (.rules[0].id == "legacy" and .rules[0].name == $name) and .rules[1].id == "range" and .rules[2].type == "range"' "$REALM_STATE_FILE" >/dev/null ||
+    fail "删除同名规则误删了其他 Realm 规则"
+)
+
+(
   render_root="$test_root/wireguard-render"
   mkdir -p "$render_root/wireguard"
   REALM_STATE_FILE="$render_root/realm-state.json"

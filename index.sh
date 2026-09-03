@@ -3151,6 +3151,29 @@ realm_prompt_number_limited() {
   done
 }
 
+realm_prompt_rule_name() {
+  local default_value=${1:-} value attempts=0
+
+  while (( attempts < 2 )); do
+    value="$(ui_input "Realm 规则名称" "请输入规则名称（1-80 个字符）" "$default_value")" || return 1
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    if jq -en --arg name "$value" '
+      $name | length >= 1 and length <= 80 and (test("[[:cntrl:]]") | not)
+    ' >/dev/null; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+
+    attempts=$((attempts + 1))
+    if (( attempts >= 2 )); then
+      ui_input_error_return
+      return 1
+    fi
+    printf '名称须为 1-80 个字符，不能包含控制字符，再次输错将退回菜单界面。\n' >&2
+  done
+}
+
 user_exists() {
   local protocol=$1
   local name=$2
@@ -8105,7 +8128,7 @@ select_realm_forward_mode() {
 }
 
 add_realm_forward_rule() {
-  local listen_port remote_host remote_port rule_id description entries_json previous_state_file mode_choice mode tunnel_id="" tunnel_name="" error_count=0
+  local name listen_port remote_host remote_port rule_id description entries_json previous_state_file mode_choice mode tunnel_id="" tunnel_name="" error_count=0
 
   ensure_realm_dirs
   init_realm_state_file
@@ -8115,6 +8138,7 @@ add_realm_forward_rule() {
     return 1
   }
 
+  name="$(realm_prompt_rule_name)" || return 1
   listen_port="$(realm_prompt_number_limited error_count "本地端口" "请输入需要监听的本地端口" "$(generate_random_service_port)" 1 65535)" || return 1
   mode_choice="$(select_realm_forward_mode)" || return 1
   case "$mode_choice" in
@@ -8160,8 +8184,8 @@ add_realm_forward_rule() {
     return 1
   }
 
-  if ! realm_state_jq --arg id "$rule_id" --arg description "$description" --arg mode "$mode" --arg tunnel_id "$tunnel_id" --argjson entries "$entries_json" --arg ts "$(utc_now)" '
-    .rules += [{id: $id, type: "single", mode: $mode, tunnel_id: (if $mode == "wireguard" then $tunnel_id else null end), description: $description, entries: $entries}] |
+  if ! realm_state_jq --arg id "$rule_id" --arg name "$name" --arg description "$description" --arg mode "$mode" --arg tunnel_id "$tunnel_id" --argjson entries "$entries_json" --arg ts "$(utc_now)" '
+    .rules += [{id: $id, name: $name, type: "single", mode: $mode, tunnel_id: (if $mode == "wireguard" then $tunnel_id else null end), description: $description, entries: $entries}] |
     .meta.updated_at = $ts
   '; then
     rm -f "$previous_state_file"
@@ -8173,7 +8197,7 @@ add_realm_forward_rule() {
 }
 
 add_realm_range_rule() {
-  local listen_start listen_end remote_host remote_start remote_end count rule_id description entries_json previous_state_file mode_choice mode tunnel_id="" tunnel_name="" error_count=0
+  local name listen_start listen_end remote_host remote_start remote_end count rule_id description entries_json previous_state_file mode_choice mode tunnel_id="" tunnel_name="" error_count=0
 
   ensure_realm_dirs
   init_realm_state_file
@@ -8183,6 +8207,7 @@ add_realm_range_rule() {
     return 1
   }
 
+  name="$(realm_prompt_rule_name)" || return 1
   while true; do
     listen_start="$(realm_prompt_number_limited error_count "起始端口" "请输入本地起始端口" "$(generate_random_service_port)" 1 65535)" || return 1
     listen_end="$(realm_prompt_number_limited error_count "结束端口" "请输入本地结束端口" "$listen_start" 1 65535)" || return 1
@@ -8273,8 +8298,8 @@ add_realm_range_rule() {
     return 1
   }
 
-  if ! realm_state_jq --arg id "$rule_id" --arg description "$description" --arg mode "$mode" --arg tunnel_id "$tunnel_id" --argjson entries "$entries_json" --arg ts "$(utc_now)" '
-    .rules += [{id: $id, type: "range", mode: $mode, tunnel_id: (if $mode == "wireguard" then $tunnel_id else null end), description: $description, entries: $entries}] |
+  if ! realm_state_jq --arg id "$rule_id" --arg name "$name" --arg description "$description" --arg mode "$mode" --arg tunnel_id "$tunnel_id" --argjson entries "$entries_json" --arg ts "$(utc_now)" '
+    .rules += [{id: $id, name: $name, type: "range", mode: $mode, tunnel_id: (if $mode == "wireguard" then $tunnel_id else null end), description: $description, entries: $entries}] |
     .meta.updated_at = $ts
   '; then
     rm -f "$previous_state_file"
@@ -8285,14 +8310,26 @@ add_realm_range_rule() {
   apply_realm_config "$previous_state_file"
 }
 
+realm_rule_rows() {
+  # Keep names separate from the address description used when changing transport.
+  jq -r '
+    .rules[]? |
+    (.name | if type == "string" then gsub("^\\s+|\\s+$"; "") else "" end) as $name |
+    [.id, (
+      "\(if $name == "" then "未命名" else $name end)  \(.description // .id)（\(.entries | length) 条）"
+      | gsub("[[:cntrl:]]"; " ")
+    )] | join("\t")
+  ' "$REALM_STATE_FILE"
+}
+
 select_realm_rule_id() {
-  local choice index id description entry_count
+  local choice index id label
   local -a ids=() options=()
-  while IFS=$'\t' read -r id description entry_count; do
+  while IFS=$'\t' read -r id label; do
     [[ -n "$id" ]] || continue
     ids+=("$id")
-    options+=("${#ids[@]}" "${description}（${entry_count} 条）")
-  done < <(jq -r '.rules[]? | [.id, .description, (.entries | length)] | @tsv' "$REALM_STATE_FILE")
+    options+=("${#ids[@]}" "$label")
+  done < <(realm_rule_rows)
   if (( ${#ids[@]} == 0 )); then
     ui_msg "当前没有 Realm 转发规则。"
     return 1
@@ -8305,10 +8342,56 @@ select_realm_rule_id() {
   printf '%s\n' "${ids[$index]}"
 }
 
-change_realm_rule_transport() {
-  local id mode_choice mode tunnel_id="" tunnel_name="" remote_host first_port last_port old_description left description previous_state_file error_count=0
+rename_realm_rule() {
+  local id=$1 old_name name previous_state_file
+  old_name="$(jq -r --arg id "$id" '.rules[] | select(.id == $id) | .name | if type == "string" then . else "" end' "$REALM_STATE_FILE")" || return 1
+  name="$(realm_prompt_rule_name "$old_name")" || return 1
+  if [[ "$name" == "$old_name" ]]; then
+    ui_msg "规则名称未改变。"
+    return 0
+  fi
+
+  previous_state_file="$(snapshot_realm_state_file)" || return 1
+  if ! realm_state_jq --arg id "$id" --arg name "$name" --arg ts "$(utc_now)" '
+    if any(.rules[]?; .id == $id) then
+      (.rules[] | select(.id == $id)).name = $name |
+      .meta.updated_at = $ts
+    else error("Realm 规则不存在") end
+  '; then
+    if install -m 0600 "$previous_state_file" "$REALM_STATE_FILE"; then
+      rm -f "$previous_state_file"
+      ui_msg "规则名称保存失败，已恢复原状态。"
+    else
+      ui_msg "规则名称保存失败，恢复原状态失败；状态备份保存在 ${previous_state_file}。"
+    fi
+    return 1
+  fi
+  rm -f "$previous_state_file"
+  ui_msg "规则名称已修改为：${name}。转发服务无需重启。"
+}
+
+modify_realm_rule() {
+  local id choice
   init_realm_state_file
   id="$(select_realm_rule_id)" || return 0
+  choice="$(ui_menu "修改 Realm 配置" "请选择要修改的配置" \
+    "1" "修改名称" \
+    "2" "修改转发链路（直连 / WireGuard）" \
+    "0" "返回")" || return 1
+  case "$choice" in
+    1) rename_realm_rule "$id" ;;
+    2) change_realm_rule_transport "$id" ;;
+    0) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+change_realm_rule_transport() {
+  local id=${1:-} mode_choice mode tunnel_id="" tunnel_name="" remote_host first_port last_port old_description left description previous_state_file error_count=0
+  init_realm_state_file
+  if [[ -z "$id" ]]; then
+    id="$(select_realm_rule_id)" || return 0
+  fi
   first_port="$(jq -r --arg id "$id" '.rules[] | select(.id == $id) | .entries[0].remote | capture(":(?<port>[0-9]+)$").port' "$REALM_STATE_FILE")" || return 1
   last_port="$(jq -r --arg id "$id" '.rules[] | select(.id == $id) | .entries[-1].remote | capture(":(?<port>[0-9]+)$").port' "$REALM_STATE_FILE")" || return 1
   mode_choice="$(select_realm_forward_mode)" || return 1
@@ -8370,7 +8453,7 @@ change_realm_rule_transport() {
 }
 
 delete_realm_rule() {
-  local choice selected_index rule_id previous_state_file
+  local choice selected_index rule_id label previous_state_file
   local -a rule_ids=()
   local -a options=()
 
@@ -8382,11 +8465,11 @@ delete_realm_rule() {
     return 0
   fi
 
-  while IFS=$'\t' read -r rule_id description entry_count; do
+  while IFS=$'\t' read -r rule_id label; do
     [[ -n "$rule_id" ]] || continue
     rule_ids+=("$rule_id")
-    options+=("$(( ${#rule_ids[@]} ))" "${description}（${entry_count} 条）")
-  done < <(jq -r '.rules[]? | [.id, .description, (.entries | length)] | @tsv' "$REALM_STATE_FILE")
+    options+=("$(( ${#rule_ids[@]} ))" "$label")
+  done < <(realm_rule_rows)
 
   options+=("0" "返回")
   options+=("00" "退出脚本")
@@ -8431,18 +8514,18 @@ delete_realm_rule() {
 }
 
 show_realm_config() {
-  local summary rendered
+  local summary="" rendered id label index=0
 
   ensure_realm_dirs
   init_realm_state_file
 
-  summary="$(jq -r '
-    if (.rules | length) == 0 then
-      "当前没有任何 Realm 转发规则。"
-    else
-      (.rules | to_entries | map("\(.key + 1). \(.value.description)（\(.value.entries | length) 条）") | join("\n"))
-    end
-  ' "$REALM_STATE_FILE")"
+  while IFS=$'\t' read -r id label; do
+    [[ -n "$id" ]] || continue
+    index=$((index + 1))
+    summary+="${index}. ${label}"$'\n'
+  done < <(realm_rule_rows)
+  summary="${summary%$'\n'}"
+  summary="${summary:-当前没有任何 Realm 转发规则。}"
   rendered="$(render_realm_config)"
 
   ui_show_text "Realm 当前配置" "$(printf '规则列表：\n%s\n\n配置文件：%s\n\n%s\n' "$summary" "$REALM_CONFIG_FILE" "$rendered")"
@@ -8715,7 +8798,7 @@ realm_submenu() {
       "2" "安装 / 重置 Realm" \
       "3" "添加转发规则" \
       "4" "添加端口段转发" \
-      "5" "修改转发链路（直连 / WireGuard）" \
+      "5" "修改配置" \
       "6" "删除转发规则" \
       "7" "查看当前配置" \
       "8" "启动服务" \
@@ -8740,7 +8823,7 @@ realm_submenu() {
         add_realm_range_rule || true
         ;;
       5)
-        change_realm_rule_transport || true
+        modify_realm_rule || true
         ;;
       6)
         delete_realm_rule || true

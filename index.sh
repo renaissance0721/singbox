@@ -10,7 +10,7 @@
 #
 # 使用方法:
 #   sbox                        打开管理面板
-#   sbox quick-install          一键安装并初始化
+#   sbox quick-install          初始化管理环境
 #   sbox add-client             打开新增客户端流程
 #   sbox remove-client          打开删除客户端流程
 #   sbox show                   查看客户端信息
@@ -784,6 +784,29 @@ install_dependencies() {
   esac
 }
 
+realm_dependencies_ready() {
+  local command_name
+
+  for command_name in jq tar gzip find timeout; do
+    have_cmd "$command_name" || return 1
+  done
+  { have_cmd curl || have_cmd wget; } || return 1
+  { have_cmd sha256sum || have_cmd openssl; } || return 1
+}
+
+ensure_realm_dependencies() {
+  if realm_dependencies_ready; then
+    return 0
+  fi
+
+  log "正在安装 Realm 管理所需的基础依赖（不会安装 sing-box）..."
+  install_dependencies || return 1
+  realm_dependencies_ready || {
+    ui_msg "Realm 基础依赖安装后仍不完整，请检查 jq、下载工具、校验工具及 tar/gzip。"
+    return 1
+  }
+}
+
 alpine_release_branch() {
   local release_file="${ALPINE_RELEASE_FILE:-/etc/alpine-release}" version
 
@@ -1283,6 +1306,19 @@ install_sing_box() {
 
   version_text="$(run_as_runtime sing-box version 2>/dev/null | head -n 1 || true)"
   log "sing-box 已安装：${version_text:-version unknown}"
+}
+
+ensure_sing_box_for_node() {
+  local protocol_name=$1
+
+  if have_cmd sing-box; then
+    ensure_sing_box_service || return 1
+    ensure_sing_box_v2ray_api || return 1
+    return 0
+  fi
+
+  ui_yesno "搭建 ${protocol_name} 节点需要安装 sing-box，是否现在安装？" || return 1
+  install_sing_box
 }
 
 xray_release_arch() {
@@ -6810,36 +6846,36 @@ quick_install() {
   require_root
   ensure_dirs
   install_dependencies
-  install_sing_box
   init_state_file
   migrate_legacy_auto_init_state
   normalize_protocol_listen_addresses
-  if [[ "$(enabled_protocol_count)" -eq 0 ]]; then
-    stop_sing_box
-    disable_sing_box_service
-  fi
   ensure_firewall_restore_service || {
     ui_msg "防火墙开机恢复服务安装失败，请修复 systemd 后重试。"
     return 1
   }
-  ui_msg "基础环境安装完成，请继续在面板中按需启用并配置协议。"
+  ui_msg "管理环境初始化完成，未安装任何代理核心。请进入代理节点管理按需搭建节点，或直接使用 Realm 中转。"
 }
 
 repair_install() {
-  local manager_target
+  local manager_target sing_box_needed=false proxy_runtime_present=false
   require_linux
   require_root
   if is_interactive; then
     export SBOX_REPAIR_OPEN_PANEL="${SBOX_REPAIR_OPEN_PANEL:-1}"
   fi
   ensure_dirs
-  init_state_file
   install_dependencies
+  init_state_file
 
   manager_target="$MANAGER_SCRIPT_PATH"
   log "repair-install 将使用当前已安装脚本修复核心、权限、服务和配置；如需更新脚本，请在面板选择 [更新脚本]。"
 
-  install_sing_box
+  if have_cmd sing-box || [[ "$(sing_box_protocol_count)" -gt 0 ]]; then
+    sing_box_needed=true
+    install_sing_box
+  else
+    log "未检测到 sing-box 或需要 sing-box 的代理协议，已跳过 sing-box 安装。"
+  fi
   if [[ -x "$REALM_BIN" ]]; then
     repair_realm_binary_compatibility || return 1
     ensure_realm_service
@@ -6848,7 +6884,13 @@ repair_install() {
     ui_msg "防火墙开机恢复服务安装失败，请修复 systemd 后重试。"
     return 1
   }
-  apply_config || return 1
+  if [[ "$sing_box_needed" == true || -x "$XRAY_BIN" || "$(enabled_protocol_count)" -gt 0 ]]; then
+    proxy_runtime_present=true
+    apply_config || return 1
+  fi
+  if [[ "$proxy_runtime_present" != true ]]; then
+    log "未检测到代理节点运行环境，已跳过代理配置重载。"
+  fi
   ui_msg "重新安装 / 修复完成。原有节点、客户端和分流规则已保留。"
 
   if [[ "${SBOX_REPAIR_OPEN_PANEL:-0}" == "1" && -x "$manager_target" ]]; then
@@ -6961,7 +7003,7 @@ configure_vless_reality() {
 
   core_choice="$(ui_menu "VLESS + Reality 内核" "两种内核使用相同的端口、Reality 参数、客户端和分享链接。Xray 仅在首次选择时下载固定稳定版本，配置变更不会自动升级。" \
     "1" "Xray-core（未安装则自动下载）" \
-    "2" "sing-box（使用现有内核）" \
+    "2" "sing-box（未安装则询问安装）" \
     "0" "返回")" || return 1
   case "$core_choice" in
     1)
@@ -6973,7 +7015,7 @@ configure_vless_reality() {
       ;;
     2)
       core="sing-box"
-      have_cmd sing-box || install_sing_box
+      ensure_sing_box_for_node "VLESS + Reality（sing-box 内核）" || return 1
       ;;
     0) return 0 ;;
     *)
@@ -7203,6 +7245,8 @@ IPv6 地址：$(state_get 'if (.meta.dual_stack // false) then (.meta.server_add
 网络模式：$(state_get 'if (.meta.dual_stack // false) then "IPv4 / IPv6 双栈" elif ((.meta.server_address // "") | contains(":")) then "IPv6" else "IPv4" end')
 出站访问：$(outbound_ip_preference_label)
 CN IP 出站限制：$(block_cn_ip_label)
+sing-box 核心：$(sing_box_install_status)（搭建相关节点时按需安装）
+Xray 核心：$(xray_install_status)
 Shadowsocks：$(state_get '.protocols.shadowsocks.enabled')
 ${vless_status}
 Hysteria2：$(state_get '.protocols.hysteria2.enabled')
@@ -7222,7 +7266,12 @@ build_node() {
     "0" "返回")" || return 1
 
   case "$protocol_choice" in
-    1|2|3)
+    1)
+      ensure_sing_box_for_node "Shadowsocks" || return 1
+      ;;
+    2) ;;
+    3)
+      ensure_sing_box_for_node "Hysteria2" || return 1
       ;;
     0)
       return 0
@@ -8868,8 +8917,13 @@ sing_box_install_status() {
 }
 
 xray_install_status() {
+  local version="版本未知"
+
   if [[ -x "$XRAY_BIN" ]]; then
-    printf '已安装（%s）\n' "$(state_get '.runtime.xray.version // "版本未知"' 2>/dev/null || printf '版本未知')"
+    if have_cmd jq && [[ -s "$STATE_FILE" ]]; then
+      version="$(state_get '.runtime.xray.version // "版本未知"' 2>/dev/null || printf '版本未知')"
+    fi
+    printf '已安装（%s）\n' "$version"
   else
     printf '未安装（按需安装）\n'
   fi
@@ -8890,13 +8944,20 @@ realm_install_status() {
 main_menu_text() {
   local realm_forward_count=0 wireguard_tunnel_count=0
 
-  if ! have_cmd jq; then
+  if ! have_cmd jq || [[ ! -s "$STATE_FILE" ]]; then
+    if have_cmd jq && [[ -s "$REALM_STATE_FILE" ]]; then
+      realm_forward_count="$(realm_rule_group_count)"
+      wireguard_tunnel_count="$(wireguard_profile_count)"
+    fi
     cat <<EOF
 Sing-box 状态：$(sing_box_install_status)
 Xray 状态：$(xray_install_status)
-管理环境：未初始化
+代理环境：未初始化
+Realm 状态：$(realm_install_status)
+Realm转发个数：${realm_forward_count} 个
+WireGuard隧道：${wireguard_tunnel_count} 个
 
-请先选择 1 安装 / 初始化 sing-box；一键常用脚本无需初始化
+请先选择 1 初始化管理环境；只使用 Realm 可直接选择 4
 EOF
     return 0
   fi
@@ -8945,6 +9006,7 @@ prepare_realm_menu() {
     return 1
   }
 
+  ensure_realm_dependencies || return 1
   ensure_realm_dirs
   init_realm_state_file
 
@@ -9080,8 +9142,11 @@ show_service_status() {
   else
     if [[ "$service_manager" != "none" ]]; then
       text+="未检测到 sing-box ${service_manager} 服务。\n"
-      text+="可尝试执行：sbox quick-install\n"
-      text+="如果 sing-box 已安装，脚本会自动补建服务。"
+      if have_cmd sing-box; then
+        text+="可尝试执行：sbox repair-install"
+      else
+        text+="如需使用 sing-box，请进入代理节点管理新建对应节点。"
+      fi
     else
       text+="当前系统未检测到可用的 systemd 或 OpenRC 环境。"
     fi
@@ -9226,7 +9291,7 @@ main_menu() {
   while true; do
     menu_text="$(main_menu_text)"
     choice="$(ui_menu "$APP_TITLE" "$menu_text" \
-      "1" "安装 / 初始化 sing-box" \
+      "1" "初始化环境" \
       "2" "代理节点管理" \
       "3" "分流管理" \
       "4" "Realm 中转" \
@@ -9239,8 +9304,9 @@ main_menu() {
       "11" "为当前内核补充 V2Ray API（不升级）" \
       "0" "退出")" || continue
 
-    if ! have_cmd jq && [[ "$choice" != "1" && "$choice" != "8" && "$choice" != "11" && "$choice" != "0" ]]; then
-      ui_msg "管理环境尚未初始化，请先选择 1 安装 / 初始化 sing-box。"
+    if { ! have_cmd jq || [[ ! -s "$STATE_FILE" ]]; } &&
+      [[ "$choice" != "1" && "$choice" != "4" && "$choice" != "8" && "$choice" != "11" && "$choice" != "0" ]]; then
+      ui_msg "管理环境尚未初始化，请先选择 1 初始化环境；只使用 Realm 可直接选择 4。"
       continue
     fi
 
@@ -9300,7 +9366,7 @@ usage() {
   cat <<EOF
 用法:
   $SCRIPT_NAME                打开管理面板
-  $SCRIPT_NAME quick-install  一键安装并初始化
+  $SCRIPT_NAME quick-install  初始化管理环境（不安装代理核心）
   $SCRIPT_NAME enable-v2ray-api
                           本机重编译当前内核，补充 V2Ray API（不升级）
   $SCRIPT_NAME node           打开代理节点管理菜单
@@ -9322,7 +9388,7 @@ usage() {
   $SCRIPT_NAME delete-split-rule
                           删除关键词或网址分流规则
   $SCRIPT_NAME repair-install 重新安装 / 修复环境并保留现有规则
-  $SCRIPT_NAME realm          打开 Realm 中转菜单
+  $SCRIPT_NAME realm          打开 Realm 中转菜单（无需预先安装 sing-box）
   $SCRIPT_NAME apply          重新生成配置并重载服务
   $SCRIPT_NAME show           查看客户端信息
   $SCRIPT_NAME overview       查看当前概览
@@ -9333,11 +9399,11 @@ usage() {
 说明:
   1. 面板使用纯命令行数字输入，不依赖方向键。
   2. Hysteria2 默认使用自签名证书。
-  3. 一键安装使用官方原生 sing-box 软件包；选择 Xray VLESS 时按需下载经 SHA-256 校验的官方稳定版。
+  3. 初始化环境不会安装代理核心；搭建节点时再按所选协议安装 sing-box 或经 SHA-256 校验的 Xray-core。
   4. 支持添加多个 SOCKS5 / Shadowsocks 分流落地，每个落地独立绑定规则集。
   5. 新建 Shadowsocks 节点与分流仅提供 SS2022，节点端口由端口管理统一控制。
-  6. repair-install 会修复 sing-box、已选用的 Xray、Realm 二进制兼容性、权限和服务，但不会删除状态文件、客户端或分流规则，也不会隐式升级 Xray。
-  7. 一键安装只安装环境；节点名称和出口地址在新建节点时填写。
+  6. repair-install 会按现有配置修复所需核心、Realm 二进制兼容性、权限和服务；纯 Realm 环境不会安装 sing-box，也不会删除状态文件、客户端或分流规则、隐式升级 Xray。
+  7. 节点名称、出口地址和所需代理核心均在新建节点时按需配置。
 EOF
 }
 
@@ -9455,7 +9521,6 @@ main() {
       repair_install
       ;;
     realm)
-      ensure_dirs
       prepare_realm_menu && realm_submenu
       ;;
     ports|port|port-menu)
@@ -9512,7 +9577,7 @@ main() {
       require_linux
       require_root
       ensure_dirs
-      if have_cmd jq; then
+      if have_cmd jq && [[ -s "$STATE_FILE" ]]; then
         init_state_file
       fi
       main_menu

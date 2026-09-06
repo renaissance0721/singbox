@@ -3,13 +3,15 @@
 ![CI](https://github.com/renaissance0721/singbox/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/github/license/renaissance0721/singbox)
 
-一个只面向 Linux VPS、以 `sing-box` 为基础并支持按需安装 `Xray-core` 的一键管理脚本。
+一个只面向 Linux VPS、支持按需管理 `sing-box`、`Xray-core`、Realm 与 WireGuard 的一键脚本；只使用 Realm 中转时无需安装 `sing-box`。
 
 ## 功能特性
 
 - 只支持 Linux VPS
 - 输入安装命令后先进入终端管理面板
-- 在面板选择“安装 / 初始化 sing-box”后安装依赖与软件源可用的最新 sing-box **1.13 系列稳定版**，并自动确保内核包含 `with_v2ray_api`
+- 主菜单“初始化环境”只安装通用依赖并创建管理状态，不安装任何代理核心
+- 在代理节点管理中搭建 Shadowsocks、Hysteria2 或 sing-box 内核的 VLESS 时，才询问并安装软件源可用的最新 sing-box **1.13 系列稳定版**，同时确保内核包含 `with_v2ray_api`
+- Realm 使用独立的按需初始化流程，可从主菜单直接进入并安装自身依赖，不会强制安装 sing-box
 - 退出后可直接输入 `sbox` 重新打开面板
 - 支持输入 `sbox uninstall` 一键卸载
 - 支持重新安装 / 修复并保留现有规则；面板可一键安全更新管理脚本
@@ -87,7 +89,9 @@ bash install.sh
 - 安装管理命令到 `/usr/local/bin/sbox`
 - 在安装前校验 `index.sh` 的内置 SHA-256，并使用临时文件原子替换
 - 自动打开管理面板
-- 由用户选择“安装 / 初始化 sing-box”后执行初始化安装
+- 由用户选择“初始化环境”后安装通用依赖并创建管理状态，不预装 sing-box 或 Xray-core
+- 进入“代理节点管理 → 新建节点”后，脚本才按所选协议询问或安装所需代理核心
+- 只使用 Realm/WireGuard 时可直接选择“Realm 中转”，脚本只补齐该功能所需的基础依赖
 - 选择 Xray-core 搭建 VLESS 时，按需下载 XTLS 官方稳定版并校验官方 SHA-256 摘要；不会执行远程 Xray 安装脚本
 - 自动创建无登录权限的 `sbox-runtime` 用户，代理服务不以 root 运行
 - systemd/OpenRC 均保留低端口监听能力，不需要手动设置权限或 capabilities
@@ -113,7 +117,7 @@ sbox change-address
 | 命令 | 说明 |
 | --- | --- |
 | `sbox` | 打开主菜单 |
-| `sbox quick-install` | 安装依赖与 sing-box 1.13 系列稳定版，初始化基础环境；不会自动创建节点 |
+| `sbox quick-install` | 初始化通用管理环境，不安装 sing-box、Xray-core 或 Realm |
 | `sbox enable-v2ray-api` | 按当前版本在本机重编译，只补充 `with_v2ray_api`，不升级内核；也可在主菜单选择 11 |
 | `sbox node` | 打开代理节点管理菜单 |
 | `sbox change-address` | 更改所有协议共用的节点出口 IP 或域名 |
@@ -131,7 +135,7 @@ sbox change-address
 | `sbox split-rules` | 查看全部分流落地与规则 |
 | `sbox add-split-rule chatgpt claude` | 新增关键词规则并选择绑定落地 |
 | `sbox delete-split-rule` | 删除关键词、域名、GeoSite 或远程 SRS 规则 |
-| `sbox realm` | 打开 Realm 与 WireGuard 管理菜单 |
+| `sbox realm` | 打开 Realm 与 WireGuard 管理菜单；无需预先安装 sing-box |
 | `sbox ports` | 查看端口并管理本机防火墙规则 |
 | `sbox tools` | 打开一键常用脚本菜单 |
 | `sbox repair-install` | 使用当前脚本修复依赖、权限、服务和配置，保留现有规则 |
@@ -141,7 +145,7 @@ sbox change-address
 
 ## 节点与客户端管理
 
-“安装 / 初始化 sing-box”只准备基础环境。安装完成后，需要进入“代理节点管理 → 新建节点”，选择并配置至少一个协议。选择 VLESS + Reality 后还会选择 Xray-core 或 sing-box；Xray 仅在第一次选择时安装，后续配置和用户操作不会触发升级。Shadowsocks、VLESS + Reality 和 Hysteria2 可以分别启用，并共用节点名称与出口地址。新建节点时会分别探测公网 IPv4 和 IPv6；同时检测到两种地址后会自动启用双栈监听，不再额外询问。双栈只生成一个使用主地址的客户端链接，默认主地址为探测到的 IPv4，不再额外生成 IPv6 节点。
+“初始化环境”只安装通用依赖、创建状态文件和防火墙恢复环境，不安装任何代理核心。进入“代理节点管理 → 新建节点”后，Shadowsocks 和 Hysteria2 会在本机缺少 sing-box 时询问是否安装；VLESS + Reality 会先选择 Xray-core 或 sing-box，再按选择安装对应核心。Xray 仅在第一次选择时安装，后续配置和用户操作不会隐式升级。三个协议可以分别启用，并共用节点名称与出口地址。新建节点时会分别探测公网 IPv4 和 IPv6；同时检测到两种地址后会自动启用双栈监听，不再额外询问。双栈只生成一个使用主地址的客户端链接，默认主地址为探测到的 IPv4，不再额外生成 IPv6 节点。
 
 节点管理会在 VLESS + Reality 已启用时单独显示“VLESS 核心类型”，值为 `xray` 或 `sing-box`；未启用 VLESS 时不显示该行。
 
@@ -273,13 +277,17 @@ sbox delete-split-rule
 
 ## 使用流程
 
+代理节点流程：
+
 1. 执行安装命令，脚本会先打开管理面板。
-2. 选择“安装 / 初始化 sing-box”。
-3. 等待脚本安装依赖和官方 `sing-box` 软件包。
-4. 进入“代理节点管理 → 新建节点”，选择协议并确认监听端口、节点地址及协议参数。
+2. 选择“初始化环境”，等待脚本安装通用依赖；此时不会安装代理核心。
+3. 进入“代理节点管理 → 新建节点”，选择协议；脚本会按需询问并安装 sing-box，或在 VLESS 中按选择安装 Xray-core。
+4. 确认监听端口、节点地址及协议参数。
 5. 保存后检查脚本输出的订阅链接，并在云厂商安全组或 NAT 面板放行、映射对应端口。
 6. 使用客户端连接并测试；需要增加用户时进入“管理客户端”。
 7. 退出面板后，输入 `sbox` 可随时重新打开。
+
+如果只使用 Realm 中转，安装管理脚本后直接选择主菜单“Realm 中转”（或执行 `sbox realm`），再选择“安装 / 重置 Realm”即可；此流程不会安装 sing-box。
 
 ## 生成文件位置
 
@@ -330,6 +338,7 @@ sbox delete-split-rule
 
 ### Realm 中转
 
+- Realm 与 sing-box 的安装生命周期相互独立；首次直接进入 Realm 菜单只会补齐 Realm 管理依赖，不会安装 sing-box
 - Realm 仅创建 TCP 转发，不启用 UDP
 - 每条规则由本机监听端口和远端地址/端口组成
 - 新建规则须填写 1-80 个字符的名称，端口段整组共用一个名称；名称会显示在查看配置、修改和删除的规则列表中
@@ -370,7 +379,7 @@ sbox delete-split-rule
 ## 更新、修复与卸载
 
 - “更新脚本”只更新管理脚本项目。更新成功后会重新打开面板；sing-box、Xray、节点和规则不会因此被删除或升级。
-- `sbox repair-install` 使用当前已经安装的管理脚本重新检查依赖，修复 sing-box、已选用的 Xray、Realm 二进制兼容性、运行用户、文件权限、服务与防火墙恢复环境，然后重新应用现有配置。已有 Xray 保持记录版本，不会隐式升级。
+- `sbox repair-install` 使用当前已经安装的管理脚本重新检查依赖，并按现有配置修复所需核心、Realm 二进制兼容性、运行用户、文件权限、服务与防火墙恢复环境。纯 Realm 环境不会因此安装 sing-box；已有 Xray 保持记录版本，不会隐式升级。
 - `sbox uninstall` 会在确认后停止并禁用 sing-box、脚本托管的 `sbox-xray`、Realm 和脚本托管的 `sbwg*` WireGuard 隧道，清理托管防火墙规则，卸载 sing-box 软件包，并删除本项目的配置、状态、密钥、客户端导出和管理命令。
 - 完整卸载不会删除 `/usr/local/bin/xray`、用户已有的 `xray.service`、非 `sbwg*` WireGuard 配置，也不会修改云安全组、外部防火墙或 NAT 映射。
 - 完整卸载不会删除非 `sbwg*` 的用户 WireGuard 配置，也不会修改云安全组、外部防火墙或 NAT 映射。卸载前请自行备份需要保留的客户端信息和配置。

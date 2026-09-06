@@ -237,6 +237,48 @@ done
 )
 
 (
+  dependency_calls=0
+  success_message=""
+  require_linux() { :; }
+  require_root() { :; }
+  ensure_dirs() { :; }
+  install_dependencies() { dependency_calls=$((dependency_calls + 1)); }
+  install_sing_box() { fail "初始化管理环境不应安装 sing-box"; }
+  init_state_file() { :; }
+  migrate_legacy_auto_init_state() { :; }
+  normalize_protocol_listen_addresses() { :; }
+  stop_sing_box() { fail "初始化管理环境不应停止 sing-box"; }
+  disable_sing_box_service() { fail "初始化管理环境不应禁用 sing-box"; }
+  ensure_firewall_restore_service() { :; }
+  ui_msg() { success_message=$1; }
+
+  quick_install || fail "管理环境初始化失败"
+  [[ "$dependency_calls" -eq 1 && "$success_message" == *"未安装任何代理核心"* ]] ||
+    fail "管理环境初始化未正确保持代理核心按需安装"
+)
+
+(
+  core_present=false
+  install_calls=0
+  service_calls=0
+  api_calls=0
+  have_cmd() { [[ "$1" == "sing-box" && "$core_present" == true ]]; }
+  ui_yesno() {
+    [[ "$1" == *"搭建 Shadowsocks 节点需要安装 sing-box"* ]] || fail "节点安装提示缺少协议名称"
+  }
+  install_sing_box() { install_calls=$((install_calls + 1)); core_present=true; }
+  ensure_sing_box_service() { service_calls=$((service_calls + 1)); }
+  ensure_sing_box_v2ray_api() { api_calls=$((api_calls + 1)); }
+
+  ensure_sing_box_for_node "Shadowsocks" || fail "新建 sing-box 节点未能按需安装核心"
+  [[ "$install_calls" -eq 1 && "$service_calls" -eq 0 && "$api_calls" -eq 0 ]] ||
+    fail "首次新建节点没有且仅有一次安装 sing-box"
+  ensure_sing_box_for_node "Shadowsocks" || fail "已有 sing-box 时节点环境检查失败"
+  [[ "$install_calls" -eq 1 && "$service_calls" -eq 1 && "$api_calls" -eq 1 ]] ||
+    fail "已有 sing-box 时发生重复安装或未补齐服务能力"
+)
+
+(
   uname() { printf 'x86_64\n'; }
   [[ "$(detect_realm_arch)" == "x86_64-unknown-linux-musl" ]] ||
     fail "glibc 系统仍选择可能依赖新版 GLIBC 的 Realm GNU 构建"
@@ -427,6 +469,7 @@ test_build_node_dual_stack() {
   ui_menu() { printf '1\n'; }
   ui_yesno() { fail "检测到双栈时不应再询问是否启用"; }
   prompt_nonempty() { printf '%s\n' "$3"; }
+  ensure_sing_box_for_node() { :; }
   configure_shadowsocks() { normalize_protocol_listen_addresses; }
 
   build_node || fail "自动搭建双栈节点失败"
@@ -583,6 +626,7 @@ test_configure_vless_reality_region_sni() {
     esac
   }
   have_cmd() { return 0; }
+  ensure_sing_box_for_node() { :; }
   prompt_node_name_for_protocol() { return 0; }
   prompt_number() { printf '%s\n' "$3"; }
   prompt_nonempty() { printf '%s\n' "$3"; }
@@ -1009,6 +1053,10 @@ fi
 grep -Fq '"12" "卸载 Realm"' "$repo_dir/index.sh" || fail "Realm 卸载选项未移动到操作菜单末尾"
 grep -Fq 'realm_install_or_reset || true' "$repo_dir/index.sh" || fail "Realm 菜单未捕获操作失败状态"
 grep -Fq 'quick_install || true' "$repo_dir/index.sh" || fail "主菜单未捕获操作失败状态"
+grep -Fq '"1" "初始化环境"' "$repo_dir/index.sh" || fail "主菜单第 1 项未改为纯环境初始化"
+if grep -Fq '"1" "安装 / 初始化 sing-box"' "$repo_dir/index.sh"; then
+  fail "主菜单仍显示安装 sing-box"
+fi
 grep -Fq 'read -r _ || true' "$repo_dir/index.sh" || fail "按回车返回菜单仍可能把读取状态传递为脚本失败"
 grep -Fq '"8" "一键常用脚本"' "$repo_dir/index.sh" || fail "主菜单缺少一键常用脚本入口"
 grep -Fq 'run_common_script "NodeQuality" "https://run.NodeQuality.com"' "$repo_dir/index.sh" || fail "NodeQuality 入口缺失或地址错误"
@@ -1042,6 +1090,28 @@ menu_test_status=$?
 set -e
 [[ "$menu_test_status" -eq 0 && "$menu_test_output" == *menu-survived* && "$(cat "$menu_counter_file")" -eq 2 ]] ||
   fail "主菜单操作返回非零状态后仍会退出脚本"
+
+printf '0\n' >"$menu_counter_file"
+realm_without_jq_output="$(REPO_DIR="$repo_dir" MENU_COUNTER_FILE="$menu_counter_file" bash -c '
+  set -Eeuo pipefail
+  source <(sed "\$d" "$REPO_DIR/index.sh")
+  main_menu_text() { printf "test\n"; }
+  have_cmd() { return 1; }
+  prepare_realm_menu() { printf "realm-prepared\n"; }
+  realm_submenu() { printf "realm-opened\n"; }
+  ui_msg() { printf "message:%s\n" "$1"; }
+  ui_menu() {
+    local count
+    count="$(cat "$MENU_COUNTER_FILE")"
+    count=$((count + 1))
+    printf "%s\n" "$count" >"$MENU_COUNTER_FILE"
+    if (( count == 1 )); then printf "4\n"; else printf "0\n"; fi
+  }
+  main_menu
+')"
+[[ "$realm_without_jq_output" == *realm-prepared* && "$realm_without_jq_output" == *realm-opened* &&
+   "$realm_without_jq_output" != *"管理环境尚未初始化"* && "$(cat "$menu_counter_file")" -eq 2 ]] ||
+  fail "未初始化代理环境时主菜单仍阻止进入 Realm"
 
 common_script_output="$({
   have_cmd() { [[ "$1" == "curl" ]]; }
@@ -1516,14 +1586,38 @@ fi
   # Used by sourced Realm menu preparation.
   # shellcheck disable=SC2034
   REALM_BIN="$test_root/not-installed-realm"
+  dependency_install_calls=0
   require_linux() { :; }
   require_root() { :; }
   realm_service_manager() { printf 'systemd\n'; }
+  realm_dependencies_ready() { (( dependency_install_calls > 0 )); }
+  install_dependencies() { dependency_install_calls=$((dependency_install_calls + 1)); }
   ensure_realm_dirs() { :; }
   init_realm_state_file() { :; }
+  install_sing_box() { fail "进入 Realm 菜单时不应安装 sing-box"; }
   install_realm_binary() { fail "进入 WireGuard/Realm 菜单时不应强制安装 Realm"; }
   ensure_realm_service() { fail "Realm 未安装时不应创建无效服务"; }
   prepare_realm_menu || fail "未安装 Realm 时无法进入 WireGuard 管理菜单"
+  [[ "$dependency_install_calls" -eq 1 ]] || fail "Realm 菜单未独立补齐基础依赖"
+)
+
+(
+  REALM_BIN="$test_root/not-installed-realm"
+  XRAY_BIN="$test_root/not-installed-xray"
+  require_linux() { :; }
+  require_root() { :; }
+  ensure_dirs() { :; }
+  init_state_file() { :; }
+  install_dependencies() { :; }
+  have_cmd() { return 1; }
+  sing_box_protocol_count() { printf '0\n'; }
+  enabled_protocol_count() { printf '0\n'; }
+  install_sing_box() { fail "纯 Realm 修复流程不应安装 sing-box"; }
+  ensure_firewall_restore_service() { :; }
+  apply_config() { fail "纯 Realm 修复流程不应重载代理配置"; }
+  ui_msg() { :; }
+  is_interactive() { return 1; }
+  repair_install || fail "纯 Realm 环境 repair-install 执行失败"
 )
 
 (

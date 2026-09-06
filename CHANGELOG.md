@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+- 主菜单第 1 项改为“初始化环境”，只安装通用依赖和创建管理状态，不再安装或操作 sing-box；Shadowsocks、Hysteria2 及选择 sing-box 内核的 VLESS 改为在新建节点时按需询问安装。
+- Realm 支持在未初始化管理环境时从主菜单或 `sbox realm` 直接按需安装基础依赖，且 `repair-install` 在纯 Realm 环境中不再强制安装 sing-box 或重载代理配置。
 - Realm 新建单端口和端口段规则时必填名称，所有规则列表统一显示名称和转发地址；第 5 项调整为“修改配置”，支持旧规则补名、已有规则改名及切换转发链路，单独改名无需重启服务。
 - 修复本机补充 `with_v2ray_api` 时把 Go SDK、模块和编译缓存全部写入容量受限的 `/tmp`，导致 Alpine 上出现 `disk quota exceeded` 及连锁标准库缺失报错：编译工作区改用 `/var/tmp`、检查可用空间和 inode，并以低权限构建用户实际预留 2 GiB 来识别 `df` 不可见的用户/容器/项目配额；配置不足时在下载编译前明确停止。解压后删除 SDK 压缩包，并支持通过 `SBOX_BUILD_TMP_DIR` 指定具有独立配额的大容量目录。
 - 节点管理新增第 8 项“设置禁止访问 CN IP”，默认关闭并持久保存；支持 sing-box / Xray 的中国大陆目标 IPv4/IPv6 阻断，保留国内客户端入站连接，不影响纯 Realm / WireGuard 中转。

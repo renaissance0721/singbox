@@ -23,7 +23,7 @@
 - Xray 使用隔离的脚本托管路径和独立 `sbox-xray` 服务，不覆盖系统已有 Xray；管理脚本更新和配置重载不会隐式升级核心
 - 支持客户端新增、删除、导出
 - 自动生成 Reality 密钥、随机密码和 Hysteria2 自签名证书
-- 新建 Shadowsocks 主节点与分流仅提供 SS2022；主节点的监听端口由端口与防火墙管理统一控制
+- 新建 Shadowsocks 节点仅提供 SS2022；监听端口由端口与防火墙管理统一控制
 - 经 Shadowsocks、VLESS 或 Hysteria2 入站转发的流量都会拒绝访问本机、私网、链路本地地址和常见云元数据地址
 - Realm 仅启用 TCP 转发；升级时会迁移旧配置并清理脚本管理的 Realm UDP 放行规则
 - Realm 每条规则可选择直接转发或通过脚本托管的点对点 WireGuard 隧道转发
@@ -32,8 +32,6 @@
 - 支持按用途查看监听端口、已监听未开放端口和已开放未监听端口，并持久开放或关闭指定端口
 - 支持 UFW、firewalld、iptables/ip6tables，并为托管规则提供 systemd/OpenRC 重启恢复
 - iptables/ip6tables 托管规则保留既有拒绝、限速和 Fail2ban 的优先级，并兼容链末端默认拒绝规则
-- 支持零预置的自定义分流规则集，可随时新增、查看和删除
-- 支持添加多个 SOCKS5 / Shadowsocks 分流落地
 - 集成 NodeQuality、TcpQuality、Tcpfit、流媒体解锁和 IP 质量体检的一键入口
 
 ## 适用环境
@@ -126,15 +124,8 @@ sbox change-address
 | `sbox remove-client` | 删除指定协议的客户端 |
 | `sbox show` | 查看全部客户端信息和订阅链接 |
 | `sbox apply` | 重新生成配置、同步防火墙并重载服务 |
-| `sbox overview` | 查看节点、协议、客户端和分流概览 |
+| `sbox overview` | 查看节点、协议和客户端概览 |
 | `sbox status` | 查看服务状态与最近日志 |
-| `sbox split` | 打开分流管理菜单 |
-| `sbox split-route` | 新增 SOCKS5 或 Shadowsocks 分流落地 |
-| `sbox edit-split-route` | 编辑、启用或停用分流落地 |
-| `sbox delete-split-route` | 删除分流落地 |
-| `sbox split-rules` | 查看全部分流落地与规则 |
-| `sbox add-split-rule chatgpt claude` | 新增关键词规则并选择绑定落地 |
-| `sbox delete-split-rule` | 删除关键词、域名、GeoSite 或远程 SRS 规则 |
 | `sbox realm` | 打开 Realm 与 WireGuard 管理菜单；无需预先安装 sing-box |
 | `sbox ports` | 查看端口并管理本机防火墙规则 |
 | `sbox tools` | 打开一键常用脚本菜单 |
@@ -155,7 +146,7 @@ sbox change-address
 
 开启后，只拒绝代理请求访问规则库中标记为 CN 的中国大陆目标 IP，包括 IPv4 和 IPv6。不会按 `.cn` 后缀或国内域名分类拦截，也不额外封锁 HK/MO/TW 地址段；国内客户端仍能连接节点，SSH、系统自身联网及 Realm / WireGuard 中转不受这条代理规则影响。“系统代理 / TUN + 国内直连”中没有经过节点的请求不受限制。纯 Realm 中转不需要开启，应在实际处理代理请求的落地节点开启；此功能是访问限制，不承诺降低 IP 被墙概率。
 
-CN IP 检查优先于已有分流：直接输入的目标 IP 先检查，域名在节点解析后再次检查，未命中才继续分流或直连。原有私网和云元数据保护继续保留；关闭开关后恢复原有分流和解析顺序。域名按当前地址族策略得到的候选地址判断，只要候选中命中 CN 就拒绝整个请求，因此混合境内外地址的域名也可能被拒绝。开启后，原先直接交给分流落地的域名也需要先在本机解析，可能影响解析耗时和 CDN 选择；如果远端落地再次解析域名，其结果可能不同，严格限制最终出口时应在最终落地同样配置限制。
+直接输入的目标 IP 会在转发前检查；域名会先按当前地址族策略解析，再检查解析结果。只要候选地址中包含 CN 地址就会拒绝整个请求，因此混合境内外地址的域名也可能被拒绝。原有私网和云元数据保护继续保留，关闭开关后恢复普通解析和直连流程。
 
 sing-box 使用 SagerNet 的 `geoip-cn.srs` 远程规则集，每日检查更新，复用现有缓存。首次下载或加载失败时不能完成启用，脚本会尝试恢复原状态和运行配置；后续更新下载失败时继续使用已加载的规则。Xray 使用脚本已安装的 `geoip.dat`，在应用配置时检查可用性；该数据库随 Xray 安装 / 显式升级更新，不会每日自动更新，也不会因切换开关隐式升级核心。两套数据库的分类和更新时间可能有差异，实际拦截以节点当时的解析结果及对应规则库为准。切换开关会应用配置并重启托管代理服务，现有连接可能短暂中断。
 
@@ -183,98 +174,6 @@ sbox show
 
 管理面板会先将脚本下载到临时文件，确认内容非空且通过 Bash 语法检查后再执行，结束后删除临时文件。这些脚本由第三方维护，未固定版本或内容哈希，并会继承当前 root 权限；Tcpfit 等工具还可能修改系统网络参数。运行前应自行确认上游来源和行为。“更新脚本”的仓库身份与哈希校验不适用于这些第三方入口。
 
-## 分流管理
-
-进入面板后选择“分流管理”，可以新增多个落地。每个落地拥有独立名称、代理信息和规则集，例如：
-
-```text
-us-ai  -> chatgpt, openai
-jp-ai  -> claude
-```
-
-同一个规则集只会绑定一个落地；将它添加到另一个落地时，脚本会自动从原落地解绑。存在重叠匹配时，域名后缀优先于关键词，同类规则按内容长度从长到短匹配，避免落地结果取决于创建顺序。
-
-可重复执行以下命令新增落地：
-
-```bash
-sbox split-route
-```
-
-也可以通过面板或命令编辑、停用和删除落地：
-
-```bash
-sbox edit-split-route
-sbox delete-split-route
-```
-
-每个落地可选择：
-
-- SOCKS5：填写 IP 或域名、端口；用户名和密码认证可选
-- Shadowsocks：填写 IP 或域名、端口、加密方式和密码
-
-新建或编辑 Shadowsocks 分流落地时仅提供：
-
-```text
-2022-blake3-aes-128-gcm
-2022-blake3-aes-256-gcm
-2022-blake3-chacha20-poly1305
-```
-
-升级前已经保存的传统 AEAD、`none` 或 `plain` 配置会继续保留兼容，但菜单不再允许新建这些配置。
-
-脚本不预置任何分流规则。新增落地或为已有落地追加规则时，可以选择以下四种类型：
-
-- 自定义网址 / 域名：精确匹配该域名及其子域名，优先推荐
-- GeoSite 分类：例如 `openai`、`netflix`、`youtube`
-- 远程 SRS：可信来源提供的 HTTPS `.srs` 地址
-- 关键词：按域名子串匹配，例如：
-
-```text
-chatgpt
-claude
-```
-
-每个关键词会创建一个独立的内联规则集。也可以一次输入多个名称：
-
-```bash
-sbox add-split-rule chatgpt claude
-```
-
-执行后会提示选择这些规则要绑定到哪个落地。
-
-关键词是域名子串匹配，可能覆盖名称相近的其他站点。需要精确匹配某个站点及其子域名时，优先使用“自定义网址 / 域名”。
-
-也可以在“为落地新增分流规则”中选择“自定义网址 / 域名”，直接输入：
-
-```text
-nodeseek.com
-https://www.nodeseek.com/space
-```
-
-网址可以不带 `http://` 或 `https://`。脚本会自动去除协议、`www.`、端口和路径，并让该域名及其子域名通过指定落地。
-
-GeoSite 入口使用熟悉的分类名，但不会生成已被新版 sing-box 移除的旧 `geosite` 配置字段。脚本会把分类名转换为 SagerNet 官方发布的二进制规则集，例如 `openai` 对应：
-
-```text
-https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-openai.srs
-```
-
-远程规则集每天检查更新，并使用 sing-box 缓存文件，服务重启时不必重复下载未变化的内容。自定义 SRS 只接受 HTTPS 地址；请仅使用可信来源，因为上游规则变化会直接影响流量去向。
-
-匹配优先级固定为“自定义域名 > GeoSite / 远程 SRS > 关键词”。域名和关键词规则内部按长度从长到短匹配，避免较宽泛规则抢先命中。GeoSite 与远程 SRS 的内部规则由其发布者维护，若两个远程集合存在重叠，应避免把它们绑定到不同落地。
-
-查看全部落地和分流规则：
-
-```bash
-sbox split-rules
-```
-
-删除关键词、网址、GeoSite 或远程 SRS 分流规则：
-
-```bash
-sbox delete-split-rule
-```
-
 ## 使用流程
 
 代理节点流程：
@@ -297,7 +196,7 @@ sbox delete-split-rule
 - 配置备份目录：`/etc/sing-box-manager/backups/`
 - 客户端导出目录：`/etc/sing-box-manager/clients/`
 - Hysteria2 证书目录：`/etc/sing-box-manager/certs/`
-- 远程规则集缓存：`/etc/sing-box-manager/rule-set-cache/cache.db`
+- CN IP 远程规则集缓存：`/etc/sing-box-manager/rule-set-cache/cache.db`
 - Realm 配置目录：`/etc/realm/`
 - 脚本托管 WireGuard 配置与密钥：`/etc/wireguard/sbwg*.conf`、`sbwg*.key`、`sbwg*.pub`（不会修改其他 WireGuard 配置）
 - 脚本托管防火墙状态：`/etc/sing-box-manager/firewall-managed.tsv`
@@ -328,7 +227,6 @@ sbox delete-split-rule
 - 已存在 VLESS 时可在地区菜单中保持当前 SNI，避免重新配置时意外更换伪装域名
 - 首次配置建议确认伪装域名和端口是否可访问
 - VLESS 入站会在域名解析前后拒绝本机、私网、链路本地地址和常见云元数据地址
-- 当前 SRS/GeoSite 分流由 sing-box 实现；选择 Xray 的 VLESS 不继承这些分流，其他由 sing-box 承载的协议不受影响
 
 ### Hysteria2
 
@@ -457,7 +355,7 @@ apk add --no-cache bash curl jq openssl ca-certificates git tar gzip unzip openr
 ### `sing-box` 软件包安装失败
 
 - 安装/修复时从 `sing-box` 与 `sing-box-oldstable` 的可用软件包中选择补丁号最高的 **1.13.x 稳定版**，排除 alpha、beta、rc 等预发布版本，并指定完整软件包版本安装。没有合适版本就报错，不自动改装 1.14 或其他系列；软件源可能晚于官方 Release 更新，Alpine 仍优先使用当前发行版的软件源。
-- 已有高于 1.13 的内核不会被自动降级。主菜单 11 / `sbox enable-v2ray-api` 不受安装选版限制，始终按已有内核的原版本补充 API。
+- 已有高于 1.13 的内核不会被自动降级。主菜单 10 / `sbox enable-v2ray-api` 不受安装选版限制，始终按已有内核的原版本补充 API。
 - 安装软件包后若缺少 `with_v2ray_api`，自动在 VPS 上重编译该版本；已有内核可执行 `sbox enable-v2ray-api` 或选择主菜单 **11**，不经过软件包安装/升级流程。已有此标签时直接跳过，无需 GitHub Actions 或预先发布内核。
 - 编译优先固定原 `Revision`，无 revision 时使用当前版本的官方 tag；保留原有全部标签、CGO 设置与 Go 版本，只追加 `with_v2ray_api`。无法取得对应源码或工具链时明确失败，不改用最新版，也不删减功能。自动下载的 Go SDK 会校验官方 SHA-256，不覆盖系统 Go。
 - 当前本机编译支持 amd64/arm64；含 Naive 且未使用 purego 的原内核还需下载对应 Chromium 工具链，并要求 amd64/glibc 构建主机（此类内核暂不能在 Alpine 或 ARM 主机本机编译）。大体积编译工作区默认放在 `/var/tmp`（不可用时回退到 `/tmp`）；编译前自动检查至少 2 GiB 可用空间、65536 个可用 inode，并以 `sbox-runtime` 身份实际预留后释放 2 GiB，以识别普通 `df` 看不到的用户、容器或项目配额。任一检测不满足就提示配置不足并停止，建议实际预留 4 GiB。可用 `SBOX_BUILD_TMP_DIR=/mnt/data/tmp sbox enable-v2ray-api` 指向具有独立容量/配额的本地文件系统；仅在同一文件系统内新建 `/tmp` 或 `/var/tmp` 子目录不会增加配额。编译期间原服务继续运行，结束后自动删除工作区。

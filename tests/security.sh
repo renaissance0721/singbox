@@ -110,7 +110,7 @@ cat >"$STATE_FILE" <<EOF
       "users": []
     }
   },
-  "routing": {"split": {"legacy_defaults_removed": true, "outbounds": []}}
+  "routing": {"block_cn_ip": false}
 }
 EOF
 chmod 0600 "$STATE_FILE"
@@ -573,7 +573,7 @@ test_configure_block_cn_ip() {
   migrate_realm_wireguard_schema() { :; }
   repair_sing_box_netlink_hardening() { :; }
   init_state_file
-  jq -e '.routing.block_cn_ip == false and .routing.split.outbounds == []' "$STATE_FILE" >/dev/null ||
+  jq -e '.routing == {block_cn_ip: false}' "$STATE_FILE" >/dev/null ||
     fail "首次安装没有默认关闭 CN IP 限制"
 )
 
@@ -649,6 +649,8 @@ if [[ -n "${SBOX_TEST_RENDERED_CONFIG:-}" ]]; then
 fi
 jq -e '
   .dns.servers == [{type:"local", tag:"local", prefer_go:true}]
+  and .outbounds == [{type:"direct", tag:"direct"}]
+  and ([.route.rules[] | select(.action == "sniff" or .action == "route")] == [])
   and ([.route.rules[] | select(.action == "reject" and ((.inbound // []) | index("vless-reality-in")) and .ip_is_private == true)] | length) == 2
   and ([.route.rules[] | select(.action == "reject" and ((.inbound // []) | index("vless-reality-in")) and ((.ip_cidr // []) | index("169.254.169.254/32")))] | length) == 2
   and ([.route.rules[] | select(.action == "resolve" and ((.inbound // []) | index("vless-reality-in")))] | length) == 1
@@ -678,57 +680,6 @@ jq -e '
   [.route.rules[] | select(.action == "resolve") | .strategy] == ["ipv4_only"]
 ' "$preference_rendered" >/dev/null || fail "禁用 IPv6 设置未写入域名解析规则"
 state_jq '.meta.outbound_ip_preference = "auto"'
-
-state_jq '
-  .routing.split.outbounds = [
-    {
-      id: "keyword-route", name: "keyword-route", enabled: true,
-      outbound_type: "socks", server: "127.0.0.1", port: 1080,
-      username: "", password: "", method: "2022-blake3-aes-128-gcm",
-      rule_sets: ["google", "chatgpt"]
-    },
-    {
-      id: "domain-route", name: "domain-route", enabled: true,
-      outbound_type: "socks", server: "127.0.0.2", port: 1080,
-      username: "", password: "", method: "2022-blake3-aes-128-gcm",
-      rule_sets: [
-        "domain:google.com",
-        "domain:mail.google.com",
-        "geosite:openai",
-        "srs:https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-netflix.srs"
-      ]
-    }
-  ]
-'
-split_rendered="$test_root/split-rendered.json"
-render_config >"$split_rendered"
-if [[ -n "${SBOX_TEST_SPLIT_RENDERED_CONFIG:-}" ]]; then
-  cp "$split_rendered" "$SBOX_TEST_SPLIT_RENDERED_CONFIG"
-fi
-jq -e '
-  ([.route.rules[] | select(.action == "sniff") | .timeout] == ["300ms"])
-  and ([.route.rules[] | select(.action == "route" and ((.outbound // "") | startswith("split-out:"))) | .rule_set[0]] == [
-    "split:domain-route:1",
-    "split:domain-route:0",
-    "split:domain-route:2",
-    "split:domain-route:3",
-    "split:keyword-route:1",
-    "split:keyword-route:0"
-  ])
-  and ([.route.rule_set[] | select(.tag == "split:domain-route:2")] == [{
-    type: "remote",
-    tag: "split:domain-route:2",
-    format: "binary",
-    url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-openai.srs",
-    update_interval: "1d"
-  }])
-  and ([.route.rule_set[] | select(.tag == "split:domain-route:3") | .url] == ["https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-netflix.srs"])
-  and ([.outbounds[] | select(.tag == "split-out:keyword-route") | has("username")] == [false])
-  and ([.outbounds[] | select(.tag == "split-out:keyword-route") | has("password")] == [false])
-' "$split_rendered" >/dev/null || fail "分流优先级、GeoSite/SRS、sniff 超时或无认证 SOCKS5 渲染错误"
-jq -e --arg cache_file "$RULE_SET_CACHE_FILE" '
-  .experimental.cache_file == {enabled: true, path: $cache_file}
-' "$split_rendered" >/dev/null || fail "远程规则集缓存没有启用或路径错误"
 
 test_cn_ip_render_config() {
   local STATE_FILE="$test_root/cn-ip-render-state.json"
@@ -760,12 +711,11 @@ test_cn_ip_render_config() {
         and ($blocks | all(.value.action == "reject" and .value.inbound == ["vless-reality-in"]
           and .value.rule_set_ip_cidr_match_source == false
           and (.value | has("source_ip_cidr") | not)))
-        and $blocks[0].key < ([$rules[] | select(.value.action == "sniff") | .key] | first)
-        and $blocks[1].key > ([$rules[] | select(.value.action == "resolve") | .key] | first)
-        and $blocks[1].key < ([$rules[] | select(.value.action == "route") | .key] | min))
+        and $blocks[0].key < ([$rules[] | select(.value.action == "resolve") | .key] | first)
+        and $blocks[1].key > ([$rules[] | select(.value.action == "resolve") | .key] | first))
       and ([.route.rules[] | select(.ip_is_private == true and .action == "reject")] | length) == 2
       and ([.route.rules[] | select(.action == "route")] == [$before[0].route.rules[] | select(.action == "route")])
-    ' "$cn_config" >/dev/null || fail "CN IP 阻断遗漏目标检查、影响入站或被分流提前绕过：$preference"
+    ' "$cn_config" >/dev/null || fail "CN IP 阻断遗漏解析前后目标检查或影响入站：$preference"
   done
 
   if [[ -n "${SBOX_TEST_CN_RENDERED_CONFIG:-}" ]]; then
@@ -774,7 +724,7 @@ test_cn_ip_render_config() {
   fi
   state_jq '.routing.block_cn_ip = false | .meta.outbound_ip_preference = "auto"'
   render_config >"$cn_config"
-  cmp -s "$before_config" "$cn_config" || fail "关闭 CN IP 限制没有恢复原分流与 DNS 顺序"
+  cmp -s "$before_config" "$cn_config" || fail "关闭 CN IP 限制没有恢复原路由与 DNS 顺序"
 
   state_jq '
     .routing.block_cn_ip = true |
@@ -799,33 +749,6 @@ test_cn_ip_render_config() {
 }
 (test_cn_ip_render_config)
 
-geosite_rules="$(build_split_geosite_json 'OpenAI, geolocation-!cn, bad/name')"
-jq -e '
-  length == 2
-  and index("geosite:openai") != null
-  and index("geosite:geolocation-!cn") != null
-' <<<"$geosite_rules" >/dev/null || fail "GeoSite 分类解析或校验错误"
-srs_rules="$(build_split_srs_json 'https://rules.example.com/a.srs, http://rules.example.com/b.srs, https://rules.example.com/not-json.json')"
-jq -e 'length == 1 and .[0] == "srs:https://rules.example.com/a.srs"' <<<"$srs_rules" >/dev/null ||
-  fail "远程 SRS URL 解析或 HTTPS 限制错误"
-validate_state || fail "无认证 SOCKS5 分流未通过状态校验"
-(
-  ui_show_text() { :; }
-  show_split_routing_rules
-) || fail "分流规则展示生成失败"
-
-state_jq '(.routing.split.outbounds[] | select(.id == "keyword-route") | .enabled) = false'
-(
-  ui_menu() { printf '1\n'; }
-  apply_sing_box_state_transaction() { rm -f "$1"; return 0; }
-  delete_split_routing_rule
-)
-jq -e '
-  .routing.split.outbounds[]
-  | select(.id == "keyword-route")
-  | (.enabled == false and (.rule_sets | length) == 1)
-' "$STATE_FILE" >/dev/null || fail "从停用落地删除规则后意外重新启用了落地"
-
 state_jq '.meta.log_level = "info"'
 transaction_snapshot="$(snapshot_sing_box_state_file)"
 state_jq '.meta.log_level = "debug"'
@@ -836,55 +759,28 @@ state_jq '.meta.log_level = "debug"'
     (( apply_attempt > 1 ))
   }
   ui_msg() { :; }
-  if apply_sing_box_state_transaction "$transaction_snapshot" "测试分流事务"; then
-    fail "失败的分流事务返回了成功状态"
+  if apply_sing_box_state_transaction "$transaction_snapshot" "测试配置事务"; then
+    fail "失败的配置事务返回了成功状态"
   fi
 )
-[[ "$(state_get '.meta.log_level')" == "info" ]] || fail "分流应用失败后未恢复原状态"
+[[ "$(state_get '.meta.log_level')" == "info" ]] || fail "配置应用失败后未恢复原状态"
 
 migration_snapshot="$(snapshot_sing_box_state_file)"
 state_jq '
-  .routing = {
-    ai: {
-      enabled: true,
-      outbound_type: "socks",
-      server: "127.0.0.1",
-      port: 1080,
-      password: "",
-      method: "2022-blake3-aes-128-gcm",
-      domain_suffix: ["example.com"],
-      domain_keyword: ["brand"]
-    }
-  }
+  .routing.block_cn_ip = true |
+  .routing.split = {
+    outbounds: [{server: "127.0.0.1", username: "legacy", password: "split-secret"}]
+  } |
+  .routing.ai = {server: "127.0.0.2", password: "ai-secret"}
 '
 migrate_state_schema
 jq -e '
-  (.routing.split.outbounds[0].rule_sets | index("domain:example.com")) != null
-  and (.routing.split.outbounds[0].rule_sets | index("brand")) != null
-' "$STATE_FILE" >/dev/null || fail "旧版域名后缀迁移成了不精确的关键词规则"
-
-state_jq '
-  .routing = {
-    split: {
-      enabled: true,
-      outbound_type: "socks",
-      server: "127.0.0.1",
-      port: 1080,
-      username: "",
-      password: "",
-      method: "2022-blake3-aes-128-gcm",
-      rule_sets: ["openai.com", "my-custom-rule"]
-    }
-  }
-'
-migrate_state_schema
-jq -e '
-  (.routing.split.outbounds[0].rule_sets | index("openai.com")) != null
-  and (.routing.split.outbounds[0].rule_sets | index("my-custom-rule")) != null
-' "$STATE_FILE" >/dev/null || fail "旧版迁移误删了用户自定义的常见域名规则"
+  .routing.block_cn_ip == true
+  and (.routing | has("split") | not)
+  and (.routing | has("ai") | not)
+' "$STATE_FILE" >/dev/null || fail "旧分流状态或其中的认证信息未被清理"
 install -m 0600 "$migration_snapshot" "$STATE_FILE"
 rm -f "$migration_snapshot"
-state_jq '.routing.split.outbounds = []'
 
 state_jq '
   .meta.dual_stack = true |
@@ -1054,11 +950,14 @@ grep -Fq '"12" "卸载 Realm"' "$repo_dir/index.sh" || fail "Realm 卸载选项�
 grep -Fq 'realm_install_or_reset || true' "$repo_dir/index.sh" || fail "Realm 菜单未捕获操作失败状态"
 grep -Fq 'quick_install || true' "$repo_dir/index.sh" || fail "主菜单未捕获操作失败状态"
 grep -Fq '"1" "初始化环境"' "$repo_dir/index.sh" || fail "主菜单第 1 项未改为纯环境初始化"
+if grep -Eq 'split_routing|split-route|split-rules|split-rule|ai-route|ai-menu|ai-rules' "$repo_dir/index.sh"; then
+  fail "脚本仍暴露已删除的分流管理函数或命令"
+fi
 if grep -Fq '"1" "安装 / 初始化 sing-box"' "$repo_dir/index.sh"; then
   fail "主菜单仍显示安装 sing-box"
 fi
 grep -Fq 'read -r _ || true' "$repo_dir/index.sh" || fail "按回车返回菜单仍可能把读取状态传递为脚本失败"
-grep -Fq '"8" "一键常用脚本"' "$repo_dir/index.sh" || fail "主菜单缺少一键常用脚本入口"
+grep -Fq '"7" "一键常用脚本"' "$repo_dir/index.sh" || fail "主菜单缺少一键常用脚本入口"
 grep -Fq 'run_common_script "NodeQuality" "https://run.NodeQuality.com"' "$repo_dir/index.sh" || fail "NodeQuality 入口缺失或地址错误"
 grep -Fq 'run_common_script "TcpQuality" "https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh"' "$repo_dir/index.sh" || fail "TcpQuality 入口缺失或地址错误"
 grep -Fq 'run_common_script "Tcpfit" "https://raw.githubusercontent.com/Kylin010/tcpfit/main/tcpfit.sh"' "$repo_dir/index.sh" || fail "Tcpfit 入口缺失或地址错误"
@@ -1105,7 +1004,7 @@ realm_without_jq_output="$(REPO_DIR="$repo_dir" MENU_COUNTER_FILE="$menu_counter
     count="$(cat "$MENU_COUNTER_FILE")"
     count=$((count + 1))
     printf "%s\n" "$count" >"$MENU_COUNTER_FILE"
-    if (( count == 1 )); then printf "4\n"; else printf "0\n"; fi
+    if (( count == 1 )); then printf "3\n"; else printf "0\n"; fi
   }
   main_menu
 ')"
@@ -1142,8 +1041,8 @@ main_view_test_output="$(REPO_DIR="$repo_dir" MENU_COUNTER_FILE="$menu_counter_f
     count=$((count + 1))
     printf "%s\n" "$count" >"$MENU_COUNTER_FILE"
     case "$count" in
-      1) printf "5\n" ;;
-      2) printf "6\n" ;;
+      1) printf "4\n" ;;
+      2) printf "5\n" ;;
       *) printf "0\n" ;;
     esac
   }
@@ -1914,8 +1813,7 @@ grep -Fq 'bash -n "$DOWNLOAD_TMP"' "$repo_dir/install.sh" || fail "install.sh �
     .protocols.vless_reality.public_key = "test-public-key" |
     .protocols.vless_reality.short_id = "0123456789abcdef" |
     .protocols.vless_reality.users = [{name:"vless-client-1", uuid:"00000000-0000-4000-8000-000000000001"}] |
-    .meta.outbound_ip_preference = "prefer_ipv4" |
-    .routing.split.outbounds = []
+    .meta.outbound_ip_preference = "prefer_ipv4"
   ' "$test_root/state/state.json" >"$STATE_FILE"
 
   sing_rendered="$test_root/xray-sing-box-rendered.json"

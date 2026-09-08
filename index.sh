@@ -2349,11 +2349,7 @@ init_state_file() {
     }
   },
   "routing": {
-    "block_cn_ip": false,
-    "split": {
-      "legacy_defaults_removed": true,
-      "outbounds": []
-    }
+    "block_cn_ip": false
   },
   "runtime": {
     "xray": {
@@ -2452,6 +2448,7 @@ cleanup_removed_traffic_state() {
     .meta.dual_stack = (.meta.dual_stack // false) |
     .meta.outbound_ip_preference = (.meta.outbound_ip_preference // "auto") |
     .routing.block_cn_ip = (.routing.block_cn_ip // false) |
+    del(.routing.split, .routing.ai) |
     .protocols.vless_reality.core = (.protocols.vless_reality.core // "sing-box") |
     .runtime = (if ((.runtime // {}) | type) == "object" then .runtime else {} end) |
     .runtime.xray = (if ((.runtime.xray // {}) | type) == "object" then .runtime.xray else {managed: false, version: "", binary_sha256: "", installed_at: ""} end) |
@@ -2469,192 +2466,7 @@ cleanup_removed_traffic_state() {
 }
 
 migrate_state_schema() {
-  if jq -e '
-    (.routing.split.legacy_defaults_removed? == true)
-    and (.routing.split.outbounds? | type == "array")
-  ' "$STATE_FILE" >/dev/null 2>&1; then
-    cleanup_removed_traffic_state
-    return 0
-  fi
-
-  state_jq --arg ts "$(utc_now)" '
-    def legacy_default_rules_v1:
-      [
-        "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com",
-        "anthropic.com", "claude.ai", "perplexity.ai", "poe.com",
-        "gemini.google.com", "openai", "chatgpt", "gpt", "anthropic",
-        "claude", "perplexity", "gemini"
-      ];
-    def legacy_default_rules_v2:
-      [
-        "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com",
-        "anthropic.com", "claude.ai", "perplexity.ai", "poe.com", "sora.com",
-        "x.ai", "grok.com", "deepseek.com", "deepseek.ai", "google.com",
-        "googleapis.com", "gstatic.com", "googleusercontent.com", "ggpht.com",
-        "generativelanguage.googleapis.com", "aistudio.google.com",
-        "gemini.google.com", "openai", "chatgpt", "gpt", "anthropic",
-        "claude", "perplexity", "gemini"
-      ];
-    def clean_rules:
-      map(select(type == "string") | ascii_downcase)
-      | unique
-      | . as $rules
-      | ($rules | map(ltrimstr("domain:")) | sort) as $canonical_rules
-      | if ($canonical_rules == (legacy_default_rules_v1 | sort))
-          or ($canonical_rules == (legacy_default_rules_v2 | sort)) then
-          []
-        else
-          $rules
-        end;
-    def normalize_method:
-      if . == "plain" then "none"
-      elif . == "chacha20-poly1305" then "chacha20-ietf-poly1305"
-      elif . == "xchacha20-poly1305" then "xchacha20-ietf-poly1305"
-      else . end;
-    def legacy_split:
-      {
-        id: "default",
-        name: "default",
-        enabled: (
-          (.enabled // false)
-          and (((.rule_sets // []) | clean_rules | length) > 0)
-        ),
-        outbound_type: (.outbound_type // "socks"),
-        server: (.server // ""),
-        port: (.port // 1080),
-        username: (.username // ""),
-        password: (.password // ""),
-        method: ((.method // "2022-blake3-aes-128-gcm") | normalize_method),
-        rule_sets: ((.rule_sets // []) | clean_rules)
-      };
-    def legacy_ai:
-      {
-        id: "default",
-        name: "default",
-        enabled: false,
-        outbound_type: (
-          if (.outbound_type // "") == "shadowsocks" then "shadowsocks"
-          else "socks" end
-        ),
-        server: (.server // ""),
-        port: (.port // 1080),
-        username: "",
-        password: (
-          if (.outbound_type // "") == "shadowsocks" then (.password // "")
-          else "" end
-        ),
-        method: ((.method // "2022-blake3-aes-128-gcm") | normalize_method),
-        rule_sets: (
-          (
-            ((.domain_suffix // []) | map(select(type == "string") | "domain:" + ascii_downcase))
-            + ((.domain_keyword // []) | map(select(type == "string") | ascii_downcase))
-          ) | clean_rules
-        )
-      };
-    .routing = (.routing // {}) |
-    (.routing.split // {}) as $split |
-    .routing.split = {
-      legacy_defaults_removed: true,
-      outbounds: (
-        if ($split.outbounds? | type) == "array" then
-          $split.outbounds
-        elif ($split.server // "") != "" or (($split.rule_sets // []) | length) > 0 then
-          [$split | legacy_split]
-        elif (.routing.ai? != null) then
-          [.routing.ai | legacy_ai]
-        else
-          []
-        end
-      )
-    } |
-    del(.routing.ai) |
-    .meta.updated_at = $ts
-  '
-
   cleanup_removed_traffic_state
-}
-
-format_split_rule_list() {
-  jq -r '
-    [.routing.split.outbounds[]?.rule_sets[]?]
-    | unique
-    | map(
-        if startswith("domain:") then
-          (ltrimstr("domain:") + "（网址）")
-        elif startswith("geosite:") then
-          (ltrimstr("geosite:") + "（GeoSite）")
-        elif startswith("srs:") then
-          (ltrimstr("srs:") + "（远程 SRS）")
-        else
-          .
-        end
-      )
-    | join(", ")
-  ' "$STATE_FILE"
-}
-
-split_rule_tokens_json() {
-  local input=$1 lowercase=${2:-true}
-  jq -nc --arg input "$input" --argjson lowercase "$lowercase" '
-    ($input | if $lowercase then ascii_downcase else . end)
-    | gsub("，|、|；"; ",")
-    | gsub("[,;[:space:]]+"; ",")
-    | split(",")
-    | map(gsub("^\\s+|\\s+$"; ""))
-  '
-}
-
-build_split_rules_json() {
-  local input=$1
-  split_rule_tokens_json "$input" | jq -c '
-    map(select(test("^[a-z0-9][a-z0-9._-]*$")))
-    | unique
-  '
-}
-
-build_split_domains_json() {
-  local input=$1
-  split_rule_tokens_json "$input" | jq -c '
-    map(
-        sub("^https?://"; "")
-        | sub("^//"; "")
-        | split("/")[0]
-        | split("?")[0]
-        | split("#")[0]
-        | sub("^.*@"; "")
-        | sub(":[0-9]+$"; "")
-        | sub("^www\\."; "")
-        | sub("\\.$"; "")
-      )
-    | map(select(
-        (split(".") | length) >= 2
-        and (split(".")[-1] | test("[a-z]"))
-        and all(split(".")[];
-          test("^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
-          and (length <= 63)
-        )
-      ))
-    | map("domain:" + .)
-    | unique
-  '
-}
-
-build_split_geosite_json() {
-  local input=$1
-  split_rule_tokens_json "$input" | jq -c '
-    map(select(test("^[a-z0-9][a-z0-9._@!+\\-]*$")))
-    | map("geosite:" + .)
-    | unique
-  '
-}
-
-build_split_srs_json() {
-  local input=$1
-  split_rule_tokens_json "$input" false | jq -c '
-    map(select(test("^https://[^[:space:],]+\\.srs([?#][^[:space:],]*)?$")))
-    | map("srs:" + .)
-    | unique
-  '
 }
 
 normalize_shadowsocks_method() {
@@ -2670,17 +2482,6 @@ normalize_shadowsocks_method() {
       ;;
     *)
       printf '%s\n' "$1"
-      ;;
-  esac
-}
-
-is_supported_shadowsocks_method() {
-  case "$(normalize_shadowsocks_method "$1")" in
-    aes-256-gcm|aes-128-gcm|chacha20-ietf-poly1305|xchacha20-ietf-poly1305|none|2022-blake3-aes-128-gcm|2022-blake3-aes-256-gcm|2022-blake3-chacha20-poly1305)
-      return 0
-      ;;
-    *)
-      return 1
       ;;
   esac
 }
@@ -2733,21 +2534,21 @@ shadowsocks_share_password() {
 
 select_shadowsocks_method() {
   local current_method=${1:-2022-blake3-aes-128-gcm}
-  local cancel_status=${2:-1} method_choice method
+  local method_choice method
 
-  method_choice="$(ui_split_shadowsocks_method_menu "$current_method")" || return 1
+  method_choice="$(ui_shadowsocks_method_menu "$current_method")" || return 1
   case "$method_choice" in
     1) method="2022-blake3-aes-128-gcm" ;;
     2) method="2022-blake3-aes-256-gcm" ;;
     3) method="2022-blake3-chacha20-poly1305" ;;
-    0) return "$cancel_status" ;;
+    0) return 1 ;;
     *) ui_msg "Invalid Shadowsocks method."; return 1 ;;
   esac
 
   normalize_shadowsocks_method "$method"
 }
 
-ui_split_shadowsocks_method_menu() {
+ui_shadowsocks_method_menu() {
   local current_method=${1:-2022-blake3-aes-128-gcm}
   ui_menu "Shadowsocks 加密方式" "仅允许 SS2022。当前：${current_method}" \
     "1" "2022-blake3-aes-128-gcm" \
@@ -3179,7 +2980,7 @@ validate_state() {
   local errors=""
   local ss_enabled vless_enabled hy2_enabled
   local server_address server_address_ipv6 dual_stack outbound_ip_preference vless_server_name handshake_server vless_core
-  local split_name split_enabled split_type split_server split_port split_username split_password split_method split_rule_count split_rule vless_short_id
+  local vless_short_id
 
   ss_enabled="$(state_get '.protocols.shadowsocks.enabled')"
   vless_enabled="$(state_get '.protocols.vless_reality.enabled')"
@@ -3239,59 +3040,6 @@ validate_state() {
     [[ -f "$(state_get '.protocols.hysteria2.key_path')" ]] || errors+=$'Hysteria2 私钥文件不存在。\n'
   fi
 
-  while IFS=$'\x1f' read -r split_name split_enabled split_type split_server split_port split_username split_password split_method split_rule_count; do
-    split_rule_count="${split_rule_count%$'\r'}"
-    [[ "$split_enabled" == "true" ]] || continue
-    [[ "$split_type" == "socks" || "$split_type" == "shadowsocks" ]] || errors+="分流落地 ${split_name} 类型仅支持 SOCKS5 或 Shadowsocks。"$'\n'
-    [[ -n "$split_server" && "$split_server" != "null" ]] || errors+="分流落地 ${split_name} 地址不能为空。"$'\n'
-    [[ "$split_port" =~ ^[0-9]+$ ]] || errors+="分流落地 ${split_name} 端口必须是数字。"$'\n'
-    if [[ "$split_type" == "socks" ]]; then
-      if [[ -n "$split_username" && "$split_username" != "null" ]] &&
-        [[ -z "$split_password" || "$split_password" == "null" ]]; then
-        errors+="分流落地 ${split_name} 已填写 SOCKS5 用户名，密码不能为空。"$'\n'
-      elif [[ ( -z "$split_username" || "$split_username" == "null" ) && -n "$split_password" && "$split_password" != "null" ]]; then
-        errors+="分流落地 ${split_name} 已填写 SOCKS5 密码，用户名不能为空。"$'\n'
-      fi
-    else
-      is_supported_shadowsocks_method "$split_method" || errors+="分流落地 ${split_name} 的 Shadowsocks 加密方式不受支持。"$'\n'
-      [[ -n "$split_password" && "$split_password" != "null" ]] || errors+="分流落地 ${split_name} 的 Shadowsocks 密码不能为空。"$'\n'
-    fi
-    [[ "$split_rule_count" -gt 0 ]] || errors+="分流落地 ${split_name} 至少需要一个分流规则。"$'\n'
-  done < <(jq -r '
-    .routing.split.outbounds[]? |
-    [
-      .name,
-      (.enabled // false),
-      (.outbound_type // "socks"),
-      (.server // ""),
-      (.port // 0),
-      (.username // ""),
-      (.password // ""),
-      (.method // ""),
-      ((.rule_sets // []) | length)
-    ] | map(tostring) | join("\u001f")
-  ' "$STATE_FILE")
-
-  while IFS=$'\x1f' read -r split_name split_rule; do
-    split_rule="${split_rule%$'\r'}"
-    case "$split_rule" in
-      geosite:*)
-        [[ "${split_rule#geosite:}" =~ ^[a-z0-9][a-z0-9._@!+-]*$ ]] ||
-          errors+="分流落地 ${split_name} 的 GeoSite 分类名无效：${split_rule#geosite:}"$'\n'
-        ;;
-      srs:*)
-        [[ "${split_rule#srs:}" =~ ^https://[^[:space:],]+\.srs([?#][^[:space:],]*)?$ ]] ||
-          errors+="分流落地 ${split_name} 的远程 SRS 地址无效，必须是 HTTPS .srs：${split_rule#srs:}"$'\n'
-        ;;
-    esac
-  done < <(jq -r '
-    .routing.split.outbounds[]?
-    | select(.enabled // false)
-    | .name as $name
-    | (.rule_sets // [])[]?
-    | [$name, .] | join("\u001f")
-  ' "$STATE_FILE")
-
   if [[ -n "$errors" ]]; then
     ui_show_text "配置校验失败" "$errors"
     return 1
@@ -3346,21 +3094,6 @@ render_config() {
         action: "reject"
       }
     else empty end;
-  def split_outbound_tag:
-    "split-out:" + .;
-  def split_rule_tag($id; $index):
-    "split:" + $id + ":" + ($index | tostring);
-  def split_ss_method:
-    if . == "plain" then
-      "none"
-    elif . == "chacha20-poly1305" then
-      "chacha20-ietf-poly1305"
-    elif . == "xchacha20-poly1305" then
-      "xchacha20-ietf-poly1305"
-    else
-      .
-    end;
-
   {
     log: {
       disabled: false,
@@ -3465,33 +3198,7 @@ render_config() {
       {
         type: "direct",
         tag: "direct"
-      },
-      (
-        .routing.split.outbounds[]?
-        | select((.enabled // false) and ((.rule_sets // []) | length > 0))
-        | if (.outbound_type // "socks") == "shadowsocks" then
-            {
-              type: "shadowsocks",
-              tag: (.id | split_outbound_tag),
-              server: .server,
-              server_port: .port,
-              method: (.method | split_ss_method),
-              password: .password
-            }
-          else
-            ({
-              type: "socks",
-              tag: (.id | split_outbound_tag),
-              server: .server,
-              server_port: .port,
-              version: "5"
-            } + (if ((.username // "") | length) > 0 then
-                   { username: .username, password: (.password // "") }
-                 else
-                   {}
-                 end))
-          end
-      )
+      }
     ],
     route: {
       rule_set: [
@@ -3505,104 +3212,14 @@ render_config() {
               update_interval: "1d"
             }
           else empty end
-        ),
-        (
-          .routing.split.outbounds[]?
-          | select((.enabled // false) and ((.rule_sets // []) | length > 0))
-          | . as $outbound
-          | .rule_sets
-          | to_entries[]
-          | . as $entry
-          | if $entry.value | startswith("geosite:") then
-              {
-                type: "remote",
-                tag: split_rule_tag($outbound.id; $entry.key),
-                format: "binary",
-                url: ("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-" + ($entry.value | ltrimstr("geosite:")) + ".srs"),
-                update_interval: "1d"
-              }
-            elif $entry.value | startswith("srs:") then
-              {
-                type: "remote",
-                tag: split_rule_tag($outbound.id; $entry.key),
-                format: "binary",
-                url: ($entry.value | ltrimstr("srs:")),
-                update_interval: "1d"
-              }
-            else
-              {
-                type: "inline",
-                tag: split_rule_tag($outbound.id; $entry.key),
-                rules: [
-                  if $entry.value | startswith("domain:") then
-                    { domain_suffix: [$entry.value | ltrimstr("domain:")] }
-                  else
-                    { domain_keyword: [$entry.value] }
-                  end
-                ]
-              }
-            end
         )
       ],
       rules: [
         private_destination_rules,
         cn_ip_reject_rule,
-        (
-          if ([.routing.split.outbounds[]? | select((.enabled // false) and ((.rule_sets // []) | length > 0))] | length) > 0 then
-            {
-              action: "sniff",
-              sniffer: ["http", "tls", "quic"],
-              timeout: "300ms"
-            }
-          else empty
-          end
-        ),
-        # Check resolved destinations before any split route can finish matching.
-        # With the switch off, retain the existing resolve-after-split behavior.
-        (
-          if block_cn_ip_enabled then
-            resolve_destination_rule, private_destination_rules, cn_ip_reject_rule
-          else empty end
-        ),
-        (
-          [
-            .routing.split.outbounds[]?
-            | select((.enabled // false) and ((.rule_sets // []) | length > 0))
-            | . as $outbound
-            | .rule_sets
-            | to_entries[]
-            | {
-                outbound_id: $outbound.id,
-                rule_index: .key,
-                rule: .value,
-                kind_rank: (
-                  if .value | startswith("domain:") then 0
-                  elif (.value | startswith("geosite:")) or (.value | startswith("srs:")) then 1
-                  else 2
-                  end
-                ),
-                specificity: (
-                  if (.value | startswith("domain:")) or
-                     (((.value | startswith("geosite:")) or (.value | startswith("srs:"))) | not) then
-                    (.value | length)
-                  else
-                    0
-                  end
-                )
-              }
-          ]
-          | sort_by([.kind_rank, (-.specificity), .rule, .outbound_id])[]
-          | {
-              rule_set: [split_rule_tag(.outbound_id; .rule_index)],
-              action: "route",
-              outbound: (.outbound_id | split_outbound_tag)
-            }
-        ),
-        (
-          if block_cn_ip_enabled | not then
-            resolve_destination_rule, private_destination_rules
-          else empty end
-        )
+        resolve_destination_rule,
+        private_destination_rules,
+        cn_ip_reject_rule
       ],
       final: "direct"
     },
@@ -6707,7 +6324,7 @@ repair_install() {
   if [[ "$proxy_runtime_present" != true ]]; then
     log "未检测到代理节点运行环境，已跳过代理配置重载。"
   fi
-  ui_msg "重新安装 / 修复完成。原有节点、客户端和分流规则已保留。"
+  ui_msg "重新安装 / 修复完成。原有节点和客户端已保留。"
 
   if [[ "${SBOX_REPAIR_OPEN_PANEL:-0}" == "1" && -x "$manager_target" ]]; then
     exec "$manager_target"
@@ -6824,9 +6441,6 @@ configure_vless_reality() {
   case "$core_choice" in
     1)
       core="xray"
-      if [[ "$(state_get '[.routing.split.outbounds[]? | select(.enabled == true)] | length')" -gt 0 ]]; then
-        ui_msg "提示：当前分流落地使用 sing-box SRS/GeoSite 规则，Xray 承载的 VLESS 不会套用这些分流规则；Shadowsocks/Hysteria2 的现有分流不受影响。"
-      fi
       install_xray_core
       ;;
     2)
@@ -7015,7 +6629,7 @@ block_cn_ip_label() {
 configure_block_cn_ip() {
   local current choice desired previous_state_file
   current="$(state_get '.routing.block_cn_ip // false')"
-  choice="$(ui_menu "禁止访问 CN IP" "当前：$(block_cn_ip_label)。开启后，代理请求访问中国大陆目标 IP（IPv4/IPv6）将被拒绝，优先于分流。不会禁止国内客户端连接节点，不按 .cn 域名后缀拦截，也不影响 Realm 中转。首次启用 sing-box 规则需要联网下载。" \
+  choice="$(ui_menu "禁止访问 CN IP" "当前：$(block_cn_ip_label)。开启后，代理请求访问中国大陆目标 IP（IPv4/IPv6）将被拒绝。不会禁止国内客户端连接节点，不按 .cn 域名后缀拦截，也不影响 Realm 中转。首次启用 sing-box 规则需要联网下载。" \
     "1" "开启 CN IP 出站限制" \
     "2" "关闭 CN IP 出站限制" \
     "0" "返回")" || return 1
@@ -7321,442 +6935,6 @@ delete_node() {
   if [[ "$protocol" == "hysteria2" && "$cert_path" == "$CERT_DIR/"* && "$key_path" == "$CERT_DIR/"* ]]; then
     rm -f "$cert_path" "$key_path" 2>/dev/null || true
   fi
-}
-
-split_outbound_count() {
-  state_get '(.routing.split.outbounds // []) | length'
-}
-
-select_split_outbound_id() {
-  local title=${1:-选择分流落地}
-  local prompt=${2:-请选择分流落地}
-  local choice index id name type server port enabled
-  local -a ids=()
-  local -a options=()
-
-  while IFS=$'\t' read -r id name type server port enabled; do
-    [[ -n "$id" ]] || continue
-    ids+=("$id")
-    options+=("${#ids[@]}" "${name} | ${type} | ${server}:${port} | enabled=${enabled}")
-  done < <(jq -r '.routing.split.outbounds[]? | [.id, .name, .outbound_type, .server, .port, (.enabled // false)] | @tsv' "$STATE_FILE")
-
-  (( ${#ids[@]} > 0 )) || return 1
-  options+=("0" "返回")
-  choice="$(ui_menu "$title" "$prompt" "${options[@]}")" || return 1
-  [[ "$choice" == "0" ]] && return 1
-  [[ "$choice" =~ ^[0-9]+$ ]] || return 1
-  index=$((choice - 1))
-  (( index >= 0 && index < ${#ids[@]} )) || return 1
-  printf '%s\n' "${ids[$index]}"
-}
-
-configure_split_routing() {
-  local outbound_id=${1:-}
-  local is_new=0 current_enabled current_type current_server current_port current_username current_password current_method current_rules current_special_rules
-  local type_choice outbound_type server port username password password_default method rules_input rules_json name yesno_result auth_choice previous_state_file selection_status
-  local name_attempts=0 password_attempts=0
-
-  if [[ -z "$outbound_id" ]]; then
-    is_new=1
-    while (( name_attempts < 2 )); do
-      name="$(prompt_nonempty "新增分流落地" "请输入唯一名称，只能包含字母、数字、点、下划线和连字符" "route-$(($(split_outbound_count) + 1))")" || return 1
-      name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
-      if [[ "$name" =~ ^[a-z0-9][a-z0-9._-]*$ ]] &&
-        ! jq -e --arg id "$name" '.routing.split.outbounds[]? | select(.id == $id)' "$STATE_FILE" >/dev/null; then
-        break
-      fi
-
-      name_attempts=$((name_attempts + 1))
-      if (( name_attempts >= 2 )); then
-        ui_input_error_return
-        return 1
-      fi
-      printf '落地名称格式无效或已存在，再次输错将退回菜单界面。\n' >&2
-    done
-    outbound_id="$name"
-    current_enabled="false"
-    current_type="socks"
-    current_server=""
-    current_port="1080"
-    current_username=""
-    current_password=""
-    current_method="2022-blake3-aes-128-gcm"
-    current_rules=""
-    current_special_rules="[]"
-  else
-    name="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | .name')"
-    current_enabled="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.enabled // false)')"
-    current_type="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.outbound_type // "socks")')"
-    current_server="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.server // "")')"
-    current_port="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.port // 1080)')"
-    current_username="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.username // "")')"
-    current_password="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.password // "")')"
-    current_method="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.method // "2022-blake3-aes-128-gcm")')"
-    current_rules="$(state_get --arg id "$outbound_id" '
-      .routing.split.outbounds[]
-      | select(.id == $id)
-      | (.rule_sets // [])
-      | map(select(test("^(domain|geosite|srs):") | not))
-      | join(", ")
-    ')"
-    current_special_rules="$(jq -c --arg id "$outbound_id" '
-      [.routing.split.outbounds[]
-        | select(.id == $id)
-        | (.rule_sets // [])[]
-        | select(test("^(domain|geosite|srs):"))
-      ]
-    ' "$STATE_FILE")"
-  fi
-
-  if (( ! is_new )); then
-    if ui_yesno "是否启用并编辑落地 ${name}？选择否将停用该落地。当前状态：${current_enabled}"; then
-      :
-    else
-      yesno_result=$?
-      (( yesno_result == 2 )) && return 1
-      previous_state_file="$(snapshot_sing_box_state_file)" || {
-        ui_msg "无法创建状态快照，未停用分流落地。"
-        return 1
-      }
-      if ! state_jq --arg id "$outbound_id" --arg ts "$(utc_now)" '
-        (.routing.split.outbounds[] | select(.id == $id) | .enabled) = false |
-        .meta.updated_at = $ts
-      '; then
-        rm -f "$previous_state_file"
-        return 1
-      fi
-      apply_sing_box_state_transaction "$previous_state_file" "停用分流落地" || return 1
-      return 0
-    fi
-  fi
-
-  type_choice="$(ui_menu "分流落地类型" "请选择落地代理类型。当前：${current_type}" \
-    "1" "SOCKS5" \
-    "2" "Shadowsocks" \
-    "0" "返回")" || return 1
-  case "$type_choice" in
-    1) outbound_type="socks" ;;
-    2) outbound_type="shadowsocks" ;;
-    0) return 0 ;;
-    *) ui_msg "无效选项，请重新选择。"; return 1 ;;
-  esac
-
-  server="$(prompt_nonempty "分流落地地址" "请输入落地 IP 或域名" "$current_server")" || return 1
-  port="$(prompt_number "分流落地端口" "请输入落地端口" "$current_port" 1 65535)" || return 1
-  username=""
-  password=""
-  method="$current_method"
-
-  if [[ "$outbound_type" == "socks" ]]; then
-    if [[ "$current_type" == "socks" ]]; then
-      username="$current_username"
-      password_default="$current_password"
-    else
-      password_default=""
-    fi
-    if [[ -n "$username" ]]; then
-      auth_choice="已启用"
-    else
-      auth_choice="未启用"
-    fi
-    if ui_yesno "SOCKS5 是否使用用户名/密码认证？当前：${auth_choice}"; then
-      username="$(prompt_nonempty "分流落地用户名" "请输入 SOCKS5 用户名" "$username")" || return 1
-      while (( password_attempts < 2 )); do
-        password="$(ui_password "分流落地密码" "请输入 SOCKS5 密码；留空则保留当前密码")" || return 1
-        [[ -n "$password" ]] || password="$password_default"
-        [[ -n "$password" && "$password" != "null" ]] && break
-        password_attempts=$((password_attempts + 1))
-        if (( password_attempts >= 2 )); then
-          ui_input_error_return
-          return 1
-        fi
-        printf 'SOCKS5 密码不能为空，再次输错将退回菜单界面。\n' >&2
-      done
-    else
-      yesno_result=$?
-      (( yesno_result == 2 )) && return 1
-      username=""
-      password=""
-    fi
-  else
-    username=""
-    if [[ "$current_type" == "shadowsocks" ]]; then
-      password_default="$current_password"
-    else
-      password_default=""
-    fi
-    method="$(select_shadowsocks_method "$current_method" 2)" || {
-      selection_status=$?
-      (( selection_status == 2 )) && return 0
-      return 1
-    }
-    while (( password_attempts < 2 )); do
-      password="$(ui_password "分流落地密码" "请输入 Shadowsocks 密码；留空则保留当前密码")" || return 1
-      [[ -n "$password" ]] || password="$password_default"
-      [[ -n "$password" && "$password" != "null" ]] && break
-      password_attempts=$((password_attempts + 1))
-      if (( password_attempts >= 2 )); then
-        ui_input_error_return
-        return 1
-      fi
-      printf 'Shadowsocks 密码不能为空，再次输错将退回菜单界面。\n' >&2
-    done
-  fi
-
-  rules_input="$(ui_input "落地关键词规则" "请输入该落地绑定的关键词，可用逗号或空格分隔；已有网址、GeoSite 和远程 SRS 规则会保留" "$current_rules")" || return 1
-  rules_json="$(build_split_rules_json "$rules_input")"
-
-  previous_state_file="$(snapshot_sing_box_state_file)" || {
-    ui_msg "无法创建状态快照，分流落地未保存。"
-    return 1
-  }
-  if ! state_jq --arg id "$outbound_id" --arg name "$name" --arg outbound_type "$outbound_type" \
-    --arg server "$server" --argjson port "$port" --arg username "$username" --arg password "$password" \
-    --arg method "$method" --argjson rules "$rules_json" --argjson special_rules "$current_special_rules" --arg ts "$(utc_now)" '
-    (($rules + $special_rules) | unique) as $all_rules |
-    {
-      id: $id,
-      name: $name,
-      enabled: (($all_rules | length) > 0),
-      outbound_type: $outbound_type,
-      server: $server,
-      port: $port,
-      username: $username,
-      password: $password,
-      method: $method,
-      rule_sets: $all_rules
-    } as $outbound |
-    .routing.split.outbounds |= map(
-      if .id == $id then
-        .
-      else
-        .rule_sets = ((.rule_sets // []) - $all_rules) |
-        .enabled = ((.enabled // false) and ((.rule_sets | length) > 0))
-      end
-    ) |
-    if any(.routing.split.outbounds[]?; .id == $id) then
-      .routing.split.outbounds |= map(if .id == $id then $outbound else . end)
-    else
-      .routing.split.outbounds += [$outbound]
-    end |
-    .meta.updated_at = $ts
-  '; then
-    rm -f "$previous_state_file"
-    return 1
-  fi
-
-  if [[ "$(jq -nc --argjson rules "$rules_json" --argjson special_rules "$current_special_rules" '$rules + $special_rules | length')" -eq 0 ]]; then
-    rm -f "$previous_state_file"
-    ui_msg "落地已保存但未启用，请为它添加至少一个关键词、网址、GeoSite 或远程 SRS 分流规则。"
-  else
-    apply_sing_box_state_transaction "$previous_state_file" "保存分流落地"
-  fi
-}
-
-edit_split_routing() {
-  local outbound_id
-  outbound_id="$(select_split_outbound_id "编辑分流落地" "请选择要编辑或停用的落地")" || return 0
-  configure_split_routing "$outbound_id"
-}
-
-delete_split_outbound() {
-  local outbound_id name previous_state_file
-  outbound_id="$(select_split_outbound_id "删除分流落地" "请选择要删除的落地")" || return 0
-  name="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | .name')"
-  ui_yesno "确认删除分流落地 ${name} 及其全部规则集吗？" || return 0
-  previous_state_file="$(snapshot_sing_box_state_file)" || return 1
-  if ! state_jq --arg id "$outbound_id" --arg ts "$(utc_now)" '
-    .routing.split.outbounds |= map(select(.id != $id)) |
-    .meta.updated_at = $ts
-  '; then
-    rm -f "$previous_state_file"
-    return 1
-  fi
-  apply_sing_box_state_transaction "$previous_state_file" "删除分流落地"
-}
-
-show_split_routing_rules() {
-  local summary
-  summary="$(jq -r '
-    if (.routing.split.outbounds // [] | length) == 0 then
-      "当前没有分流落地。"
-    else
-      "匹配优先级：自定义域名 > GeoSite / 远程 SRS > 关键词；域名和关键词同类规则越长越优先。\n\n"
-      + (.routing.split.outbounds
-        | map(
-          "[\(.name)]\n"
-          + "enabled = \(.enabled // false)\n"
-          + "outbound = \(.outbound_type // "socks")\n"
-          + "address = \(.server):\(.port)\n"
-          + "username = \(if ((.username // "") | length) > 0 then .username else "-" end)\n"
-          + "method = \(.method // "-")\n"
-          + "keyword_rules = \((.rule_sets // []) | map(select(test("^(domain|geosite|srs):") | not)) | join(", "))\n"
-          + "domains = \((.rule_sets // []) | map(select(startswith("domain:")) | ltrimstr("domain:")) | join(", "))\n"
-          + "geosite = \((.rule_sets // []) | map(select(startswith("geosite:")) | ltrimstr("geosite:")) | join(", "))\n"
-          + "remote_srs = \((.rule_sets // []) | map(select(startswith("srs:")) | ltrimstr("srs:")) | join(", "))"
-        )
-        | join("\n\n"))
-    end
-  ' "$STATE_FILE")"
-  ui_show_text "分流落地与分流规则" "$summary"
-}
-
-append_split_routing_rules() {
-  local outbound_id rule_type rules_input rules_json previous_state_file
-  [[ "$(split_outbound_count)" -gt 0 ]] || {
-    ui_msg "请先新增分流落地。"
-    return 0
-  }
-  outbound_id="$(select_split_outbound_id "新增分流规则" "请选择规则要绑定的落地")" || return 0
-  if (( $# > 0 )); then
-    rule_type="keyword"
-    rules_input="$*"
-  else
-    rule_type="$(ui_menu "新增分流规则" "请选择规则类型" \
-      "1" "关键词规则，例如 chatgpt" \
-      "2" "自定义网址 / 域名，例如 nodeseek.com" \
-      "3" "GeoSite 分类，例如 openai、netflix" \
-      "4" "远程 SRS 规则集（HTTPS）" \
-      "0" "返回")" || return 1
-    case "$rule_type" in
-      1)
-        rule_type="keyword"
-        rules_input="$(prompt_nonempty "新增关键词规则" "请输入关键词，可用逗号或空格分隔；例如 chatgpt, claude" "")" || return 1
-        ;;
-      2)
-        rule_type="domain"
-        rules_input="$(prompt_nonempty "新增自定义网址" "请输入网址或域名，可不带 http:// 或 https://；例如 nodeseek.com" "")" || return 1
-        ;;
-      3)
-        rule_type="geosite"
-        rules_input="$(prompt_nonempty "新增 GeoSite 分类" "请输入 SagerNet GeoSite 分类名，可用逗号或空格分隔；例如 openai, netflix" "")" || return 1
-        ;;
-      4)
-        rule_type="srs"
-        rules_input="$(prompt_nonempty "新增远程 SRS" "请输入可信来源的 HTTPS .srs 地址，可用逗号或空格分隔" "")" || return 1
-        ;;
-      0) return 0 ;;
-      *) ui_msg "无效选项，请重新选择。"; return 1 ;;
-    esac
-  fi
-  case "$rule_type" in
-    domain) rules_json="$(build_split_domains_json "$rules_input")" ;;
-    geosite) rules_json="$(build_split_geosite_json "$rules_input")" ;;
-    srs) rules_json="$(build_split_srs_json "$rules_input")" ;;
-    *) rules_json="$(build_split_rules_json "$rules_input")" ;;
-  esac
-  [[ "$(printf '%s' "$rules_json" | jq -r 'length')" -gt 0 ]] || {
-    case "$rule_type" in
-      domain) ui_msg "网址格式无效，请输入类似 nodeseek.com 的域名。" ;;
-      geosite) ui_msg "GeoSite 分类名格式无效，请输入类似 openai 或 netflix 的分类名。" ;;
-      srs) ui_msg "远程 SRS 地址无效，只接受 HTTPS 的 .srs 地址。" ;;
-      *) ui_msg "关键词规则格式无效。" ;;
-    esac
-    return 1
-  }
-  previous_state_file="$(snapshot_sing_box_state_file)" || return 1
-  if ! state_jq --arg id "$outbound_id" --argjson rules "$rules_json" --arg ts "$(utc_now)" '
-    .routing.split.outbounds |= map(
-      if .id == $id then
-        ((.rule_sets // []) | length) as $old_rule_count |
-        .rule_sets = (((.rule_sets // []) + $rules) | unique) |
-        .enabled = ((.enabled // false) or ($old_rule_count == 0))
-      else
-        .rule_sets = ((.rule_sets // []) - $rules) |
-        .enabled = ((.enabled // false) and ((.rule_sets | length) > 0))
-      end
-    ) |
-    .meta.updated_at = $ts
-  '; then
-    rm -f "$previous_state_file"
-    return 1
-  fi
-  apply_sing_box_state_transaction "$previous_state_file" "新增分流规则"
-}
-
-delete_split_routing_rule() {
-  local outbound_id total_count choice selected_index selected_rule previous_state_file
-  local -a rule_values=()
-  local -a options=()
-  outbound_id="$(select_split_outbound_id "删除分流规则" "请选择规则所属的落地")" || return 0
-  total_count="$(state_get --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | (.rule_sets // []) | length')"
-  [[ "$total_count" -gt 0 ]] || {
-    ui_msg "该落地没有可删除的规则集。"
-    return 0
-  }
-  while IFS= read -r selected_rule; do
-    rule_values+=("$selected_rule")
-    if [[ "$selected_rule" == domain:* ]]; then
-      options+=("${#rule_values[@]}" "网址：${selected_rule#domain:}")
-    elif [[ "$selected_rule" == geosite:* ]]; then
-      options+=("${#rule_values[@]}" "GeoSite：${selected_rule#geosite:}")
-    elif [[ "$selected_rule" == srs:* ]]; then
-      options+=("${#rule_values[@]}" "远程 SRS：${selected_rule#srs:}")
-    else
-      options+=("${#rule_values[@]}" "关键词：$selected_rule")
-    fi
-  done < <(jq -r --arg id "$outbound_id" '.routing.split.outbounds[] | select(.id == $id) | .rule_sets[]?' "$STATE_FILE")
-  options+=("0" "返回")
-  choice="$(ui_menu "删除分流规则" "请选择要删除的分流规则" "${options[@]}")" || return 1
-  [[ "$choice" == "0" ]] && return 0
-  [[ "$choice" =~ ^[0-9]+$ ]] || return 1
-  selected_index=$((choice - 1))
-  (( selected_index >= 0 && selected_index < ${#rule_values[@]} )) || return 1
-  selected_rule="${rule_values[$selected_index]}"
-  previous_state_file="$(snapshot_sing_box_state_file)" || return 1
-  if ! state_jq --arg id "$outbound_id" --arg rule "$selected_rule" --arg ts "$(utc_now)" '
-    .routing.split.outbounds |= map(
-      if .id == $id then
-        .rule_sets = ((.rule_sets // []) | map(select(. != $rule))) |
-        .enabled = ((.enabled // false) and ((.rule_sets | length) > 0))
-      else
-        .
-      end
-    ) |
-    .meta.updated_at = $ts
-  '; then
-    rm -f "$previous_state_file"
-    return 1
-  fi
-  apply_sing_box_state_transaction "$previous_state_file" "删除分流规则"
-}
-
-split_routing_menu_text() {
-  cat <<EOF
-分流落地数量：$(split_outbound_count)
-已启用落地数量：$(state_get '[.routing.split.outbounds[]? | select(.enabled == true)] | length')
-分流规则总数：$(state_get '[.routing.split.outbounds[]?.rule_sets[]?] | length')
-
-每个落地可绑定关键词、自定义域名、GeoSite 分类或远程 SRS。优先级：自定义域名 > GeoSite / SRS > 关键词。
-请选择要执行的操作（输入 0 返回上一级，输入 00 退出脚本）
-EOF
-}
-
-split_routing_submenu() {
-  local choice menu_text
-  while true; do
-    menu_text="$(split_routing_menu_text)"
-    choice="$(ui_menu "分流管理" "$menu_text" \
-      "1" "新增分流落地" \
-      "2" "编辑 / 停用分流落地" \
-      "3" "删除分流落地" \
-      "4" "查看全部落地与分流规则" \
-      "5" "为落地新增分流规则" \
-      "6" "删除落地分流规则" \
-      "0" "返回上一级菜单" \
-      "00" "退出脚本")" || continue
-    case "$choice" in
-      1) configure_split_routing || true ;;
-      2) edit_split_routing || true ;;
-      3) delete_split_outbound || true ;;
-      4) show_split_routing_rules || true ;;
-      5) append_split_routing_rules || true ;;
-      6) delete_split_routing_rule || true ;;
-      0) return 0 ;;
-      00) exit 0 ;;
-      *) ui_msg "无效选项，请重新选择。" ;;
-    esac
-  done
 }
 
 add_client() {
@@ -8733,7 +7911,7 @@ Realm 状态：$(realm_install_status)
 Realm转发个数：${realm_forward_count} 个
 WireGuard隧道：${wireguard_tunnel_count} 个
 
-请先选择 1 初始化管理环境；只使用 Realm 可直接选择 4
+请先选择 1 初始化管理环境；只使用 Realm 可直接选择 3
 EOF
     return 0
   fi
@@ -8749,7 +7927,6 @@ Xray 状态：$(xray_install_status)
 节点个数：$(state_get '[.protocols[]?.users[]?] | length') 个
 Realm转发个数：${realm_forward_count} 个
 WireGuard隧道：${wireguard_tunnel_count} 个
-分流落地：$(state_get '(.routing.split.outbounds // []) | length') 个
 
 请选择要执行的操作
 EOF
@@ -8883,11 +8060,6 @@ port = $(state_get '.protocols.hysteria2.port')/udp
 tls_server_name = $(state_get '.protocols.hysteria2.tls_server_name')
 obfs_password = $(state_get '.protocols.hysteria2.obfs_password')
 users = $hy2_users
-
-[Split Routing]
-outbounds = $(state_get '(.routing.split.outbounds // []) | length')
-enabled_outbounds = $(state_get '[.routing.split.outbounds[]? | select(.enabled == true)] | length')
-rule_sets = $(format_split_rule_list)
 EOF
   )
 
@@ -9069,20 +8241,19 @@ main_menu() {
     choice="$(ui_menu "$APP_TITLE" "$menu_text" \
       "1" "初始化环境" \
       "2" "代理节点管理" \
-      "3" "分流管理" \
-      "4" "Realm 中转" \
-      "5" "查看当前概览" \
-      "6" "查看服务状态" \
-      "7" "端口管理" \
-      "8" "一键常用脚本" \
-      "9" "更新脚本" \
-      "10" "卸载" \
-      "11" "为当前内核补充 V2Ray API（不升级）" \
+      "3" "Realm 中转" \
+      "4" "查看当前概览" \
+      "5" "查看服务状态" \
+      "6" "端口管理" \
+      "7" "一键常用脚本" \
+      "8" "更新脚本" \
+      "9" "卸载" \
+      "10" "为当前内核补充 V2Ray API（不升级）" \
       "0" "退出")" || continue
 
     if { ! have_cmd jq || [[ ! -s "$STATE_FILE" ]]; } &&
-      [[ "$choice" != "1" && "$choice" != "4" && "$choice" != "8" && "$choice" != "11" && "$choice" != "0" ]]; then
-      ui_msg "管理环境尚未初始化，请先选择 1 初始化环境；只使用 Realm 可直接选择 4。"
+      [[ "$choice" != "1" && "$choice" != "3" && "$choice" != "7" && "$choice" != "10" && "$choice" != "0" ]]; then
+      ui_msg "管理环境尚未初始化，请先选择 1 初始化环境；只使用 Realm 可直接选择 3。"
       continue
     fi
 
@@ -9094,34 +8265,31 @@ main_menu() {
         node_submenu || true
         ;;
       3)
-        split_routing_submenu || true
-        ;;
-      4)
         if prepare_realm_menu; then
           realm_submenu || true
         fi
         ;;
-      5)
+      4)
         show_overview
         continue
         ;;
-      6)
+      5)
         show_service_status
         continue
         ;;
-      7)
+      6)
         port_management_menu || true
         ;;
-      8)
+      7)
         common_scripts_menu || true
         ;;
-      9)
+      8)
         update_manager_script || true
         ;;
-      10)
+      9)
         uninstall_sbox || true
         ;;
-      11)
+      10)
         ensure_sing_box_v2ray_api || true
         ;;
       0)
@@ -9152,18 +8320,7 @@ usage() {
   $SCRIPT_NAME delete-node    删除已启用的协议节点
   $SCRIPT_NAME add-client     打开新增客户端流程
   $SCRIPT_NAME remove-client  打开删除客户端流程
-  $SCRIPT_NAME split          打开分流管理菜单
-  $SCRIPT_NAME split-route    新增 SOCKS5 / Shadowsocks 分流落地
-  $SCRIPT_NAME edit-split-route
-                          编辑或停用分流落地
-  $SCRIPT_NAME delete-split-route
-                          删除分流落地
-  $SCRIPT_NAME split-rules    查看全部分流落地与规则
-  $SCRIPT_NAME add-split-rule chatgpt claude
-                          新增关键词分流规则
-  $SCRIPT_NAME delete-split-rule
-                          删除关键词或网址分流规则
-  $SCRIPT_NAME repair-install 重新安装 / 修复环境并保留现有规则
+  $SCRIPT_NAME repair-install 重新安装 / 修复环境并保留现有节点和客户端
   $SCRIPT_NAME realm          打开 Realm 中转菜单（无需预先安装 sing-box）
   $SCRIPT_NAME apply          重新生成配置并重载服务
   $SCRIPT_NAME show           查看客户端信息
@@ -9176,10 +8333,9 @@ usage() {
   1. 面板使用纯命令行数字输入，不依赖方向键。
   2. Hysteria2 默认使用自签名证书。
   3. 初始化环境不会安装代理核心；搭建节点时再按所选协议安装 sing-box 或经 SHA-256 校验的 Xray-core。
-  4. 支持添加多个 SOCKS5 / Shadowsocks 分流落地，每个落地独立绑定规则集。
-  5. 新建 Shadowsocks 节点与分流仅提供 SS2022，节点端口由端口管理统一控制。
-  6. repair-install 会按现有配置修复所需核心、Realm 二进制兼容性、权限和服务；纯 Realm 环境不会安装 sing-box，也不会删除状态文件、客户端或分流规则、隐式升级 Xray。
-  7. 节点名称、出口地址和所需代理核心均在新建节点时按需配置。
+  4. 新建 Shadowsocks 节点仅提供 SS2022，节点端口由端口管理统一控制。
+  5. repair-install 会按现有配置修复所需核心、Realm 二进制兼容性、权限和服务；纯 Realm 环境不会安装 sing-box，也不会删除状态文件、客户端或隐式升级 Xray。
+  6. 节点名称、出口地址和所需代理核心均在新建节点时按需配置。
 EOF
 }
 
@@ -9236,34 +8392,6 @@ main() {
     delete-node|remove-node)
       prepare_state_command
       delete_node
-      ;;
-    split|split-menu|routing|ai|ai-menu|ai-route-menu)
-      prepare_state_command
-      split_routing_submenu
-      ;;
-    split-route|ai-route)
-      prepare_state_command
-      configure_split_routing
-      ;;
-    edit-split-route|edit-split-outbound)
-      prepare_state_command
-      edit_split_routing
-      ;;
-    delete-split-route|remove-split-route|delete-split-outbound)
-      prepare_state_command
-      delete_split_outbound
-      ;;
-    split-rules|show-split-rules|ai-rules|show-ai-rules)
-      prepare_state_command
-      show_split_routing_rules
-      ;;
-    add-split-rule|add-split-rules|append-split-rule|append-split-rules|add-ai-rule|add-ai-rules|append-ai-rule|append-ai-rules)
-      prepare_state_command
-      append_split_routing_rules "${@:2}"
-      ;;
-    delete-split-rule|remove-split-rule|delete-ai-rule|remove-ai-rule)
-      prepare_state_command
-      delete_split_routing_rule
       ;;
     repair-install|reinstall)
       repair_install

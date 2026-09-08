@@ -127,6 +127,7 @@ install -o root -g root -m 0755 "$DOWNLOAD_TMP" "$INSTALL_TMP"
 mv -f "$INSTALL_TMP" "$TARGET_PATH"
 INSTALL_TMP=""
 cleanup
+trap - EXIT
 
 log "管理脚本已安装到 $TARGET_PATH"
 

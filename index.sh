@@ -419,6 +419,58 @@ ensure_openrc_low_port_capability() {
     die "无法为 ${label} 设置低端口监听能力，已拒绝回退为 root 运行。"
 }
 
+render_systemd_common_hardening() {
+  cat <<'EOF'
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+EOF
+}
+
+write_openrc_service() {
+  local service_file=$1 service_name=$2 description=$3 command_path=$4 command_args=$5
+  local log_file=$6 dependencies=${7:-} additional_config=${8:-}
+
+  {
+    cat <<EOF
+#!/sbin/openrc-run
+
+name="${service_name}"
+description="${description}"
+command="${command_path}"
+command_args="${command_args}"
+command_user="${RUNTIME_USER}:${RUNTIME_GROUP}"
+command_background="yes"
+pidfile="/run/${service_name}.pid"
+output_log="${log_file}"
+error_log="${log_file}"
+EOF
+    [[ -z "$additional_config" ]] || printf '%s\n' "$additional_config"
+    cat <<EOF
+
+depend() {
+  need net${dependencies}
+  after firewall${dependencies}
+}
+
+start_pre() {
+  checkpath --directory --mode 0755 /run
+  checkpath --file --owner "${RUNTIME_USER}:${RUNTIME_GROUP}" --mode 0640 "${log_file}"
+}
+EOF
+  } >"$service_file"
+  chmod 0755 "$service_file"
+}
+
 ui_pause() {
   if is_interactive; then
     printf '按回车键返回菜单...' >&2
@@ -1550,18 +1602,7 @@ ExecStart=${XRAY_BIN} run -config ${XRAY_CONFIG_FILE}
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=1048576
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-ProtectClock=true
-ProtectHostname=true
-RestrictSUIDSGID=true
-RestrictRealtime=true
-LockPersonality=true
+$(render_systemd_common_hardening)
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -1574,72 +1615,112 @@ EOF
   fi
 
   ensure_openrc_low_port_capability "$XRAY_BIN" "Xray"
-  cat >"$XRAY_OPENRC_SERVICE_FILE" <<EOF
-#!/sbin/openrc-run
-
-name="sbox-xray"
-description="sbox managed Xray service"
-command="${XRAY_BIN}"
-command_args="run -config ${XRAY_CONFIG_FILE}"
-command_user="${RUNTIME_USER}:${RUNTIME_GROUP}"
-command_background="yes"
-pidfile="/run/sbox-xray.pid"
-output_log="${XRAY_OPENRC_LOG_FILE}"
-error_log="${XRAY_OPENRC_LOG_FILE}"
-export XRAY_LOCATION_ASSET="${XRAY_ASSET_DIR}"
-
-depend() {
-  need net
-  after firewall
+  write_openrc_service "$XRAY_OPENRC_SERVICE_FILE" "sbox-xray" "sbox managed Xray service" \
+    "$XRAY_BIN" "run -config ${XRAY_CONFIG_FILE}" "$XRAY_OPENRC_LOG_FILE" "" \
+    "export XRAY_LOCATION_ASSET=\"${XRAY_ASSET_DIR}\""
 }
 
-start_pre() {
-  checkpath --directory --mode 0755 /run
-  checkpath --file --owner "${RUNTIME_USER}:${RUNTIME_GROUP}" --mode 0640 "${XRAY_OPENRC_LOG_FILE}"
+service_manager() {
+  if has_systemd; then
+    printf 'systemd\n'
+  elif has_openrc; then
+    printf 'openrc\n'
+  else
+    printf 'none\n'
+  fi
 }
-EOF
-  chmod 0755 "$XRAY_OPENRC_SERVICE_FILE"
+
+managed_service_enable() {
+  local manager=$1 service_name=$2
+  case "$manager" in
+    systemd) systemctl enable "$service_name" >/dev/null 2>&1 || true ;;
+    openrc) rc-update add "$service_name" default >/dev/null 2>&1 || true ;;
+  esac
+}
+
+managed_service_disable() {
+  local manager=$1 service_name=$2
+  case "$manager" in
+    systemd) systemctl disable "$service_name" >/dev/null 2>&1 || true ;;
+    openrc) rc-update del "$service_name" default >/dev/null 2>&1 || true ;;
+  esac
+}
+
+managed_service_active() {
+  local manager=$1 service_name=$2
+  case "$manager" in
+    systemd) systemctl is-active "$service_name" 2>/dev/null ;;
+    openrc)
+      if rc-service "$service_name" status >/dev/null 2>&1; then printf 'active\n'; else printf 'inactive\n'; fi
+      ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+managed_service_enabled() {
+  local manager=$1 service_name=$2
+  case "$manager" in
+    systemd) systemctl is-enabled "$service_name" 2>/dev/null ;;
+    openrc)
+      if rc-update show default 2>/dev/null | grep -Eq "(^|[[:space:]])${service_name}([[:space:]]|$)"; then printf 'enabled\n'; else printf 'disabled\n'; fi
+      ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+managed_service_recent_logs() {
+  local manager=$1 service_name=$2 openrc_log_file=$3
+  case "$manager" in
+    systemd) journalctl -u "$service_name" -n 30 --no-pager 2>/dev/null || true ;;
+    openrc) tail -n 30 "$openrc_log_file" 2>/dev/null || true ;;
+  esac
+}
+
+managed_service_start() {
+  local manager=$1 service_name=$2
+  case "$manager" in
+    systemd) systemctl start "$service_name" ;;
+    openrc) rc-service "$service_name" start ;;
+    *) return 1 ;;
+  esac
+}
+
+managed_service_stop() {
+  local manager=$1 service_name=$2
+  case "$manager" in
+    systemd) systemctl stop "$service_name" ;;
+    openrc) rc-service "$service_name" stop ;;
+    *) return 1 ;;
+  esac
+}
+
+managed_service_restart() {
+  local manager=$1 service_name=$2
+  case "$manager" in
+    systemd) systemctl restart "$service_name" ;;
+    openrc) rc-service "$service_name" restart || rc-service "$service_name" start ;;
+    *) return 1 ;;
+  esac
 }
 
 enable_xray_service() {
-  case "$(sing_box_service_manager)" in
-    systemd) systemctl enable sbox-xray >/dev/null 2>&1 || true ;;
-    openrc) rc-update add sbox-xray default >/dev/null 2>&1 || true ;;
-  esac
+  managed_service_enable "$(sing_box_service_manager)" "sbox-xray"
 }
 
 disable_xray_service() {
-  case "$(sing_box_service_manager)" in
-    systemd) systemctl disable sbox-xray >/dev/null 2>&1 || true ;;
-    openrc) rc-update del sbox-xray default >/dev/null 2>&1 || true ;;
-  esac
+  managed_service_disable "$(sing_box_service_manager)" "sbox-xray"
 }
 
 xray_service_active() {
-  case "$(sing_box_service_manager)" in
-    systemd) systemctl is-active sbox-xray 2>/dev/null ;;
-    openrc)
-      if rc-service sbox-xray status >/dev/null 2>&1; then printf 'active\n'; else printf 'inactive\n'; fi
-      ;;
-    *) printf 'unknown\n' ;;
-  esac
+  managed_service_active "$(sing_box_service_manager)" "sbox-xray"
 }
 
 xray_service_enabled() {
-  case "$(sing_box_service_manager)" in
-    systemd) systemctl is-enabled sbox-xray 2>/dev/null ;;
-    openrc)
-      if rc-update show default 2>/dev/null | grep -Eq '(^|[[:space:]])sbox-xray([[:space:]]|$)'; then printf 'enabled\n'; else printf 'disabled\n'; fi
-      ;;
-    *) printf 'unknown\n' ;;
-  esac
+  managed_service_enabled "$(sing_box_service_manager)" "sbox-xray"
 }
 
 xray_recent_logs() {
-  case "$(sing_box_service_manager)" in
-    systemd) journalctl -u sbox-xray -n 30 --no-pager 2>/dev/null || true ;;
-    openrc) tail -n 30 "$XRAY_OPENRC_LOG_FILE" 2>/dev/null || true ;;
-  esac
+  managed_service_recent_logs "$(sing_box_service_manager)" "sbox-xray" "$XRAY_OPENRC_LOG_FILE"
 }
 
 restart_xray() {
@@ -1654,10 +1735,7 @@ restart_xray() {
 
 stop_xray() {
   xray_service_exists || return 0
-  case "$(sing_box_service_manager)" in
-    systemd) systemctl stop sbox-xray >/dev/null 2>&1 || true ;;
-    openrc) rc-service sbox-xray stop >/dev/null 2>&1 || true ;;
-  esac
+  managed_service_stop "$(sing_box_service_manager)" "sbox-xray" >/dev/null 2>&1 || true
 }
 
 has_openrc() {
@@ -1665,13 +1743,7 @@ has_openrc() {
 }
 
 sing_box_service_manager() {
-  if has_systemd; then
-    printf 'systemd\n'
-  elif has_openrc; then
-    printf 'openrc\n'
-  else
-    printf 'none\n'
-  fi
+  service_manager
 }
 
 service_exists() {
@@ -1786,18 +1858,7 @@ UMask=0077
 WorkingDirectory=/
 ExecStart=
 ExecStart=${sing_box_bin} run -c ${CONFIG_FILE}
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-ProtectClock=true
-ProtectHostname=true
-RestrictSUIDSGID=true
-RestrictRealtime=true
-LockPersonality=true
+$(render_systemd_common_hardening)
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -1809,30 +1870,8 @@ EOF
   fi
 
   ensure_openrc_low_port_capability "$sing_box_bin" "sing-box"
-  cat >"$SING_BOX_OPENRC_SERVICE_FILE" <<EOF
-#!/sbin/openrc-run
-
-name="sing-box"
-description="sing-box service"
-command="${sing_box_bin}"
-command_args="run -c ${CONFIG_FILE}"
-command_user="${RUNTIME_USER}:${RUNTIME_GROUP}"
-command_background="yes"
-pidfile="/run/sing-box.pid"
-output_log="${SING_BOX_OPENRC_LOG_FILE}"
-error_log="${SING_BOX_OPENRC_LOG_FILE}"
-
-depend() {
-  need net
-  after firewall
-}
-
-start_pre() {
-  checkpath --directory --mode 0755 /run
-  checkpath --file --owner "${RUNTIME_USER}:${RUNTIME_GROUP}" --mode 0640 "${SING_BOX_OPENRC_LOG_FILE}"
-}
-EOF
-  chmod 755 "$SING_BOX_OPENRC_SERVICE_FILE"
+  write_openrc_service "$SING_BOX_OPENRC_SERVICE_FILE" "sing-box" "sing-box service" \
+    "$sing_box_bin" "run -c ${CONFIG_FILE}" "$SING_BOX_OPENRC_LOG_FILE"
 }
 
 repair_sing_box_netlink_hardening() {
@@ -1858,68 +1897,23 @@ repair_sing_box_netlink_hardening() {
 }
 
 enable_sing_box_service() {
-  case "$(sing_box_service_manager)" in
-    systemd)
-      systemctl enable sing-box >/dev/null 2>&1 || true
-      ;;
-    openrc)
-      rc-update add sing-box default >/dev/null 2>&1 || true
-      ;;
-  esac
+  managed_service_enable "$(sing_box_service_manager)" "sing-box"
 }
 
 disable_sing_box_service() {
-  case "$(sing_box_service_manager)" in
-    systemd) systemctl disable sing-box >/dev/null 2>&1 || true ;;
-    openrc) rc-update del sing-box default >/dev/null 2>&1 || true ;;
-  esac
+  managed_service_disable "$(sing_box_service_manager)" "sing-box"
 }
 
 sing_box_service_active() {
-  case "$(sing_box_service_manager)" in
-    systemd)
-      systemctl is-active sing-box 2>/dev/null
-      ;;
-    openrc)
-      if rc-service sing-box status >/dev/null 2>&1; then
-        printf 'active\n'
-      else
-        printf 'inactive\n'
-      fi
-      ;;
-    *)
-      printf 'unknown\n'
-      ;;
-  esac
+  managed_service_active "$(sing_box_service_manager)" "sing-box"
 }
 
 sing_box_service_enabled() {
-  case "$(sing_box_service_manager)" in
-    systemd)
-      systemctl is-enabled sing-box 2>/dev/null
-      ;;
-    openrc)
-      if rc-update show default 2>/dev/null | grep -Eq '(^|[[:space:]])sing-box([[:space:]]|$)'; then
-        printf 'enabled\n'
-      else
-        printf 'disabled\n'
-      fi
-      ;;
-    *)
-      printf 'unknown\n'
-      ;;
-  esac
+  managed_service_enabled "$(sing_box_service_manager)" "sing-box"
 }
 
 sing_box_recent_logs() {
-  case "$(sing_box_service_manager)" in
-    systemd)
-      journalctl -u sing-box -n 30 --no-pager 2>/dev/null || true
-      ;;
-    openrc)
-      tail -n 30 "$SING_BOX_OPENRC_LOG_FILE" 2>/dev/null || true
-      ;;
-  esac
+  managed_service_recent_logs "$(sing_box_service_manager)" "sing-box" "$SING_BOX_OPENRC_LOG_FILE"
 }
 
 restart_sing_box() {
@@ -1946,14 +1940,7 @@ restart_sing_box() {
 
 stop_sing_box() {
   if service_exists; then
-    case "$(sing_box_service_manager)" in
-      systemd)
-        systemctl stop sing-box >/dev/null 2>&1 || true
-        ;;
-      openrc)
-        rc-service sing-box stop >/dev/null 2>&1 || true
-        ;;
-    esac
+    managed_service_stop "$(sing_box_service_manager)" "sing-box" >/dev/null 2>&1 || true
   fi
 }
 
@@ -1974,13 +1961,7 @@ realm_service_exists() {
 }
 
 realm_service_manager() {
-  if has_systemd; then
-    printf 'systemd\n'
-  elif has_openrc; then
-    printf 'openrc\n'
-  else
-    printf 'none\n'
-  fi
+  service_manager
 }
 
 ensure_realm_service() {
@@ -2017,18 +1998,7 @@ ExecStart=${REALM_BIN} -c ${REALM_CONFIG_FILE}
 Restart=always
 RestartSec=5s
 LimitNOFILE=1048576
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-ProtectClock=true
-ProtectHostname=true
-RestrictSUIDSGID=true
-RestrictRealtime=true
-LockPersonality=true
+$(render_systemd_common_hardening)
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -2042,123 +2012,36 @@ EOF
   fi
 
   ensure_openrc_low_port_capability "$REALM_BIN" "Realm"
-  cat >"$REALM_OPENRC_SERVICE_FILE" <<EOF
-#!/sbin/openrc-run
-
-name="realm"
-description="Realm relay service"
-command="${REALM_BIN}"
-command_args="-c ${REALM_CONFIG_FILE}"
-command_user="${RUNTIME_USER}:${RUNTIME_GROUP}"
-command_background="yes"
-pidfile="/run/realm.pid"
-output_log="${REALM_OPENRC_LOG_FILE}"
-error_log="${REALM_OPENRC_LOG_FILE}"
-
-depend() {
-  need net${wg_openrc_services}
-  after firewall${wg_openrc_services}
-}
-
-start_pre() {
-  checkpath --directory --mode 0755 /run
-  checkpath --file --owner "${RUNTIME_USER}:${RUNTIME_GROUP}" --mode 0640 "${REALM_OPENRC_LOG_FILE}"
-}
-EOF
-  chmod 755 "$REALM_OPENRC_SERVICE_FILE"
+  write_openrc_service "$REALM_OPENRC_SERVICE_FILE" "realm" "Realm relay service" \
+    "$REALM_BIN" "-c ${REALM_CONFIG_FILE}" "$REALM_OPENRC_LOG_FILE" "$wg_openrc_services"
 }
 
 enable_realm_service() {
-  case "$(realm_service_manager)" in
-    systemd)
-      systemctl enable realm >/dev/null 2>&1 || true
-      ;;
-    openrc)
-      rc-update add realm default >/dev/null 2>&1 || true
-      ;;
-  esac
+  managed_service_enable "$(realm_service_manager)" "realm"
 }
 
 disable_realm_service() {
-  case "$(realm_service_manager)" in
-    systemd)
-      systemctl disable realm >/dev/null 2>&1 || true
-      ;;
-    openrc)
-      rc-update del realm default >/dev/null 2>&1 || true
-      ;;
-  esac
+  managed_service_disable "$(realm_service_manager)" "realm"
 }
 
 realm_service_active() {
-  case "$(realm_service_manager)" in
-    systemd)
-      systemctl is-active realm 2>/dev/null
-      ;;
-    openrc)
-      if rc-service realm status >/dev/null 2>&1; then
-        printf 'active\n'
-      else
-        printf 'inactive\n'
-      fi
-      ;;
-    *)
-      printf 'unknown\n'
-      ;;
-  esac
+  managed_service_active "$(realm_service_manager)" "realm"
 }
 
 realm_recent_logs() {
-  case "$(realm_service_manager)" in
-    systemd)
-      journalctl -u realm -n 30 --no-pager 2>/dev/null || true
-      ;;
-    openrc)
-      tail -n 30 "$REALM_OPENRC_LOG_FILE" 2>/dev/null || true
-      ;;
-  esac
+  managed_service_recent_logs "$(realm_service_manager)" "realm" "$REALM_OPENRC_LOG_FILE"
 }
 
 start_realm_service_raw() {
-  case "$(realm_service_manager)" in
-    systemd)
-      systemctl start realm
-      ;;
-    openrc)
-      rc-service realm start
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  managed_service_start "$(realm_service_manager)" "realm"
 }
 
 stop_realm_service_raw() {
-  case "$(realm_service_manager)" in
-    systemd)
-      systemctl stop realm
-      ;;
-    openrc)
-      rc-service realm stop
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  managed_service_stop "$(realm_service_manager)" "realm"
 }
 
 restart_realm_service_raw() {
-  case "$(realm_service_manager)" in
-    systemd)
-      systemctl restart realm
-      ;;
-    openrc)
-      rc-service realm restart || rc-service realm start
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  managed_service_restart "$(realm_service_manager)" "realm"
 }
 
 detect_realm_arch() {
@@ -2490,26 +2373,45 @@ EOF
   repair_sing_box_netlink_hardening
 }
 
-state_get() {
-  jq -r "$@" "$STATE_FILE"
+json_state_get() {
+  local state_file=$1
+  shift
+  jq -r "$@" "$state_file"
 }
 
-state_jq() {
-  local tmp_file
-  tmp_file="$(mktemp "$TMP_DIR/singbox-state.XXXXXX")"
-  jq "$@" "$STATE_FILE" >"$tmp_file"
-  install -m 0600 "$tmp_file" "$STATE_FILE"
+json_state_jq() {
+  local state_file=$1 temp_prefix=$2 tmp_file
+  shift 2
+
+  tmp_file="$(mktemp "$TMP_DIR/${temp_prefix}.XXXXXX")" || return 1
+  if ! jq "$@" "$state_file" >"$tmp_file" ||
+    ! install -m 0600 "$tmp_file" "$state_file"; then
+    rm -f "$tmp_file"
+    return 1
+  fi
   rm -f "$tmp_file"
 }
 
-snapshot_sing_box_state_file() {
-  local snapshot_file
-  snapshot_file="$(mktemp "$TMP_DIR/singbox-state-backup.XXXXXX")" || return 1
-  install -m 0600 "$STATE_FILE" "$snapshot_file" || {
+snapshot_state_file() {
+  local state_file=$1 temp_prefix=$2 snapshot_file
+  snapshot_file="$(mktemp "$TMP_DIR/${temp_prefix}.XXXXXX")" || return 1
+  if ! install -m 0600 "$state_file" "$snapshot_file"; then
     rm -f "$snapshot_file"
     return 1
-  }
+  fi
   printf '%s\n' "$snapshot_file"
+}
+
+state_get() {
+  json_state_get "$STATE_FILE" "$@"
+}
+
+state_jq() {
+  json_state_jq "$STATE_FILE" "singbox-state" "$@"
+}
+
+snapshot_sing_box_state_file() {
+  snapshot_state_file "$STATE_FILE" "singbox-state-backup"
 }
 
 apply_sing_box_state_transaction() {
@@ -2691,29 +2593,30 @@ format_split_rule_list() {
   ' "$STATE_FILE"
 }
 
-build_split_rules_json() {
-  local input=$1
-  jq -nc --arg input "$input" '
-    ($input | ascii_downcase)
+split_rule_tokens_json() {
+  local input=$1 lowercase=${2:-true}
+  jq -nc --arg input "$input" --argjson lowercase "$lowercase" '
+    ($input | if $lowercase then ascii_downcase else . end)
     | gsub("，|、|；"; ",")
     | gsub("[,;[:space:]]+"; ",")
     | split(",")
     | map(gsub("^\\s+|\\s+$"; ""))
-    | map(select(test("^[a-z0-9][a-z0-9._-]*$")))
+  '
+}
+
+build_split_rules_json() {
+  local input=$1
+  split_rule_tokens_json "$input" | jq -c '
+    map(select(test("^[a-z0-9][a-z0-9._-]*$")))
     | unique
   '
 }
 
 build_split_domains_json() {
   local input=$1
-  jq -nc --arg input "$input" '
-    ($input | ascii_downcase)
-    | gsub("，|、|；"; ",")
-    | gsub("[,;[:space:]]+"; ",")
-    | split(",")
-    | map(
-        gsub("^\\s+|\\s+$"; "")
-        | sub("^https?://"; "")
+  split_rule_tokens_json "$input" | jq -c '
+    map(
+        sub("^https?://"; "")
         | sub("^//"; "")
         | split("/")[0]
         | split("?")[0]
@@ -2738,13 +2641,8 @@ build_split_domains_json() {
 
 build_split_geosite_json() {
   local input=$1
-  jq -nc --arg input "$input" '
-    ($input | ascii_downcase)
-    | gsub("，|、|；"; ",")
-    | gsub("[,;[:space:]]+"; ",")
-    | split(",")
-    | map(gsub("^\\s+|\\s+$"; ""))
-    | map(select(test("^[a-z0-9][a-z0-9._@!+\\-]*$")))
+  split_rule_tokens_json "$input" | jq -c '
+    map(select(test("^[a-z0-9][a-z0-9._@!+\\-]*$")))
     | map("geosite:" + .)
     | unique
   '
@@ -2752,13 +2650,8 @@ build_split_geosite_json() {
 
 build_split_srs_json() {
   local input=$1
-  jq -nc --arg input "$input" '
-    $input
-    | gsub("，|、|；"; ",")
-    | gsub("[,;[:space:]]+"; ",")
-    | split(",")
-    | map(gsub("^\\s+|\\s+$"; ""))
-    | map(select(test("^https://[^[:space:],]+\\.srs([?#][^[:space:],]*)?$")))
+  split_rule_tokens_json "$input" false | jq -c '
+    map(select(test("^https://[^[:space:],]+\\.srs([?#][^[:space:],]*)?$")))
     | map("srs:" + .)
     | unique
   '
@@ -2790,10 +2683,6 @@ is_supported_shadowsocks_method() {
       return 1
       ;;
   esac
-}
-
-is_supported_split_shadowsocks_method() {
-  is_supported_shadowsocks_method "$1"
 }
 
 is_shadowsocks_2022_method() {
@@ -2844,14 +2733,14 @@ shadowsocks_share_password() {
 
 select_shadowsocks_method() {
   local current_method=${1:-2022-blake3-aes-128-gcm}
-  local method_choice method
+  local cancel_status=${2:-1} method_choice method
 
   method_choice="$(ui_split_shadowsocks_method_menu "$current_method")" || return 1
   case "$method_choice" in
     1) method="2022-blake3-aes-128-gcm" ;;
     2) method="2022-blake3-aes-256-gcm" ;;
     3) method="2022-blake3-chacha20-poly1305" ;;
-    0) return 1 ;;
+    0) return "$cancel_status" ;;
     *) ui_msg "Invalid Shadowsocks method."; return 1 ;;
   esac
 
@@ -2860,7 +2749,7 @@ select_shadowsocks_method() {
 
 ui_split_shadowsocks_method_menu() {
   local current_method=${1:-2022-blake3-aes-128-gcm}
-  ui_menu "Shadowsocks 加密方式" "公网节点仅允许 SS2022。当前：${current_method}" \
+  ui_menu "Shadowsocks 加密方式" "仅允许 SS2022。当前：${current_method}" \
     "1" "2022-blake3-aes-128-gcm" \
     "2" "2022-blake3-aes-256-gcm" \
     "3" "2022-blake3-chacha20-poly1305" \
@@ -2902,18 +2791,11 @@ EOF
 }
 
 realm_state_get() {
-  jq -r "$1" "$REALM_STATE_FILE"
+  json_state_get "$REALM_STATE_FILE" "$@"
 }
 
 realm_state_jq() {
-  local tmp_file
-  tmp_file="$(mktemp "$TMP_DIR/realm-state.XXXXXX")" || return 1
-  if ! jq "$@" "$REALM_STATE_FILE" >"$tmp_file" ||
-    ! install -m 0600 "$tmp_file" "$REALM_STATE_FILE"; then
-    rm -f "$tmp_file"
-    return 1
-  fi
-  rm -f "$tmp_file"
+  json_state_jq "$REALM_STATE_FILE" "realm-state" "$@"
 }
 
 migrate_realm_wireguard_schema() {
@@ -2943,13 +2825,7 @@ migrate_realm_wireguard_schema() {
 }
 
 snapshot_realm_state_file() {
-  local snapshot_file
-  snapshot_file="$(mktemp "$TMP_DIR/realm-state-backup.XXXXXX")" || return 1
-  if ! install -m 0600 "$REALM_STATE_FILE" "$snapshot_file"; then
-    rm -f "$snapshot_file"
-    return 1
-  fi
-  printf '%s\n' "$snapshot_file"
+  snapshot_state_file "$REALM_STATE_FILE" "realm-state-backup"
 }
 
 uri_encode() {
@@ -3125,68 +3001,6 @@ is_valid_ip_or_cidr() {
   is_valid_ipv4_or_cidr "$1" || is_valid_ipv6_or_cidr "$1"
 }
 
-realm_prompt_nonempty_limited() {
-  local counter_var=$1
-  local title=$2
-  local text=$3
-  local default_value=${4:-}
-  local value=""
-  local attempts=${!counter_var:-0}
-
-  while true; do
-    value="$(ui_input "$title" "$text" "$default_value")" || return 1
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
-
-    if [[ -n "$value" ]]; then
-      printf -v "$counter_var" '%s' 0
-      printf '%s\n' "$value"
-      return 0
-    fi
-
-    attempts=$((attempts + 1))
-    printf -v "$counter_var" '%s' "$attempts"
-
-    if (( attempts >= 2 )); then
-      ui_input_error_return
-      return 1
-    fi
-
-    printf '输入不能为空，再次输错将退回菜单界面。\n' >&2
-  done
-}
-
-realm_prompt_number_limited() {
-  local counter_var=$1
-  local title=$2
-  local text=$3
-  local default_value=$4
-  local min_value=$5
-  local max_value=$6
-  local value=""
-  local attempts=${!counter_var:-0}
-
-  while true; do
-    value="$(ui_input "$title" "$text" "$default_value")" || return 1
-
-    if [[ "$value" =~ ^[0-9]+$ ]] && (( value >= min_value && value <= max_value )); then
-      printf -v "$counter_var" '%s' 0
-      printf '%s\n' "$value"
-      return 0
-    fi
-
-    attempts=$((attempts + 1))
-    printf -v "$counter_var" '%s' "$attempts"
-
-    if (( attempts >= 2 )); then
-      ui_input_error_return
-      return 1
-    fi
-
-    printf '请输入 %s-%s 范围内的数字，再次输错将退回菜单界面。\n' "$min_value" "$max_value" >&2
-  done
-}
-
 realm_prompt_rule_name() {
   local default_value=${1:-} value attempts=0
 
@@ -3214,6 +3028,25 @@ user_exists() {
   local protocol=$1
   local name=$2
   jq -e --arg name "$name" ".protocols.${protocol}.users[]? | select(.name == \$name)" "$STATE_FILE" >/dev/null 2>&1
+}
+
+prompt_unique_client_name() {
+  local protocol=$1 protocol_label=$2 default_name=$3 name attempts=0
+
+  while (( attempts < 2 )); do
+    name="$(prompt_nonempty "新增客户端" "请输入 ${protocol_label} 客户端名称" "$default_name")" || return 1
+    if ! user_exists "$protocol" "$name"; then
+      printf '%s\n' "$name"
+      return 0
+    fi
+
+    attempts=$((attempts + 1))
+    if (( attempts >= 2 )); then
+      ui_input_error_return
+      return 1
+    fi
+    printf '该客户端名称已存在，再次输错将退回菜单界面。\n' >&2
+  done
 }
 
 append_ss_user() {
@@ -3420,7 +3253,7 @@ validate_state() {
         errors+="分流落地 ${split_name} 已填写 SOCKS5 密码，用户名不能为空。"$'\n'
       fi
     else
-      is_supported_split_shadowsocks_method "$split_method" || errors+="分流落地 ${split_name} 的 Shadowsocks 加密方式不受支持。"$'\n'
+      is_supported_shadowsocks_method "$split_method" || errors+="分流落地 ${split_name} 的 Shadowsocks 加密方式不受支持。"$'\n'
       [[ -n "$split_password" && "$split_password" != "null" ]] || errors+="分流落地 ${split_name} 的 Shadowsocks 密码不能为空。"$'\n'
     fi
     [[ "$split_rule_count" -gt 0 ]] || errors+="分流落地 ${split_name} 至少需要一个分流规则。"$'\n'
@@ -4649,10 +4482,6 @@ remove_all_managed_firewall_rules() {
   rm -f "$FIREWALL_STATE_FILE"
 }
 
-apply_firewall_rules() {
-  sync_managed_firewall_rules
-}
-
 port_is_listening() {
   local protocol=$1 port=$2
   have_cmd ss || return 1
@@ -4713,17 +4542,18 @@ validate_sing_box_listener_ports_available() {
   done <<<"$rows"
 }
 
-verify_xray_service_ready() {
+verify_proxy_service_ready() {
+  local exists_function=$1 active_function=$2 listeners_function=$3
   local protocol port label ready
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     ready=true
-    if ! xray_service_exists || [[ "$(xray_service_active 2>/dev/null || true)" != "active" ]]; then
+    if ! "$exists_function" || [[ "$("$active_function" 2>/dev/null || true)" != "active" ]]; then
       ready=false
     fi
     while IFS=$'\t' read -r protocol port label; do
       [[ -n "$protocol" && -n "$port" ]] || continue
       port_is_listening "$protocol" "$port" || ready=false
-    done < <(desired_xray_listeners)
+    done < <("$listeners_function")
     if [[ "$ready" == "true" ]]; then
       return 0
     fi
@@ -4732,23 +4562,12 @@ verify_xray_service_ready() {
   return 1
 }
 
+verify_xray_service_ready() {
+  verify_proxy_service_ready xray_service_exists xray_service_active desired_xray_listeners
+}
+
 verify_sing_box_service_ready() {
-  local protocol port label ready
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    ready=true
-    if ! service_exists || [[ "$(sing_box_service_active 2>/dev/null || true)" != "active" ]]; then
-      ready=false
-    fi
-    while IFS=$'\t' read -r protocol port label; do
-      [[ -n "$protocol" && -n "$port" ]] || continue
-      port_is_listening "$protocol" "$port" || ready=false
-    done < <(desired_sing_box_listeners)
-    if [[ "$ready" == "true" ]]; then
-      return 0
-    fi
-    sleep 0.5
-  done
-  return 1
+  verify_proxy_service_ready service_exists sing_box_service_active desired_sing_box_listeners
 }
 
 validate_realm_listener_ports_available() {
@@ -5731,21 +5550,20 @@ ${invitation}
 
 create_wireguard_landing_profile() {
   local name endpoint_host endpoint_port listen_port allowed_source interface id addresses relay_address landing_address public_key invitation
-  local error_count=0
   install_wireguard_tools || return 1
   ensure_wireguard_dirs
   init_realm_state_file
-  name="$(realm_prompt_nonempty_limited error_count "WireGuard 落地端" "请输入隧道名称" "WG落地-$(( $(wireguard_profile_count) + 1 ))")" || return 1
+  name="$(prompt_nonempty "WireGuard 落地端" "请输入隧道名称" "WG落地-$(( $(wireguard_profile_count) + 1 ))")" || return 1
   (( ${#name} <= 80 )) || { ui_msg "WireGuard 隧道名称不能超过 80 个字符。"; return 1; }
-  endpoint_host="$(realm_prompt_nonempty_limited error_count "WireGuard 落地端" "请输入落地 VPS 公网 IP 或域名" "$(detect_public_address)")" || return 1
+  endpoint_host="$(prompt_nonempty "WireGuard 落地端" "请输入落地 VPS 公网 IP 或域名" "$(detect_public_address)")" || return 1
   wireguard_valid_endpoint_host "$endpoint_host" || { ui_msg "落地 Endpoint 地址无效。"; return 1; }
-  listen_port="$(realm_prompt_number_limited error_count "WireGuard 落地端" "请输入本机 WireGuard UDP 监听端口" "$(generate_random_service_port)" 1024 65535)" || return 1
-  endpoint_port="$(realm_prompt_number_limited error_count "WireGuard 落地端" "请输入公网 Endpoint UDP 端口；普通 VPS 与本机监听端口相同" "$listen_port" 1 65535)" || return 1
+  listen_port="$(prompt_number "WireGuard 落地端" "请输入本机 WireGuard UDP 监听端口" "$(generate_random_service_port)" 1024 65535)" || return 1
+  endpoint_port="$(prompt_number "WireGuard 落地端" "请输入公网 Endpoint UDP 端口；普通 VPS 与本机监听端口相同" "$listen_port" 1 65535)" || return 1
   if port_is_listening udp "$listen_port" || jq -e --argjson port "$listen_port" '.wireguard.profiles[]? | select(.role == "landing" and .listen_port == $port)' "$REALM_STATE_FILE" >/dev/null 2>&1; then
     ui_msg "UDP/${listen_port} 已被占用，请选择其他 WireGuard 监听端口。"
     return 1
   fi
-  allowed_source="$(realm_prompt_nonempty_limited error_count "WireGuard 落地端" "请输入中转 VPS 公网来源 IP/CIDR" "")" || return 1
+  allowed_source="$(prompt_nonempty "WireGuard 落地端" "请输入中转 VPS 公网来源 IP/CIDR" "")" || return 1
   wireguard_valid_allowed_source "$allowed_source" || { ui_msg "中转来源 IP/CIDR 无效；WireGuard 监听不允许设置为全网来源。"; return 1; }
   interface="$(wireguard_next_interface)" || { ui_msg "没有可用的 WireGuard 接口名称。"; return 1; }
   addresses="$(wireguard_generate_address_pair)" || { ui_msg "无法分配无冲突的 WireGuard 私网地址。"; return 1; }
@@ -5794,11 +5612,10 @@ ${invitation}
 
 join_wireguard_relay_profile() {
   local code payload id name interface landing_public_key endpoint_host endpoint_port relay_address landing_address mtu public_key response addresses
-  local error_count=0
   install_wireguard_tools || return 1
   ensure_wireguard_dirs
   init_realm_state_file
-  code="$(realm_prompt_nonempty_limited error_count "WireGuard 中转端" "请粘贴落地端配对信息" "")" || return 1
+  code="$(prompt_nonempty "WireGuard 中转端" "请粘贴落地端配对信息" "")" || return 1
   payload="$(wireguard_decode_pairing_code "$code")" || { ui_msg "WireGuard 配对信息无法解析。"; return 1; }
   [[ "$(jq -r '.kind // empty' <<<"$payload")" == "sbox-wireguard-invite-v1" ]] || { ui_msg "配对信息类型不正确。"; return 1; }
   id="$(jq -r '.tunnel_id // empty' <<<"$payload")"
@@ -5869,9 +5686,8 @@ ${response}
 
 complete_wireguard_landing_pairing() {
   local code payload id relay_public_key relay_address landing_address expected_relay expected_landing interface previous_state address_notice=""
-  local error_count=0
   init_realm_state_file
-  code="$(realm_prompt_nonempty_limited error_count "完成 WireGuard 配对" "请粘贴中转端响应信息" "")" || return 1
+  code="$(prompt_nonempty "完成 WireGuard 配对" "请粘贴中转端响应信息" "")" || return 1
   payload="$(wireguard_decode_pairing_code "$code")" || { ui_msg "WireGuard 响应信息无法解析。"; return 1; }
   [[ "$(jq -r '.kind // empty' <<<"$payload")" == "sbox-wireguard-response-v1" ]] || { ui_msg "响应信息类型不正确。"; return 1; }
   id="$(jq -r '.tunnel_id // empty' <<<"$payload")"
@@ -5974,31 +5790,31 @@ test_wireguard_profile() {
 }
 
 modify_wireguard_profile() {
-  local id role name endpoint_host endpoint_port listen_port current_endpoint_port allowed_source mtu keepalive previous_state error_count=0
+  local id role name endpoint_host endpoint_port listen_port current_endpoint_port allowed_source mtu keepalive previous_state
   local update_ok=true
   id="$(select_wireguard_profile any)" || return 0
   role="$(wireguard_profile_field "$id" role)"
-  name="$(realm_prompt_nonempty_limited error_count "修改 WireGuard 隧道" "请输入隧道名称" "$(wireguard_profile_field "$id" name)")" || return 1
+  name="$(prompt_nonempty "修改 WireGuard 隧道" "请输入隧道名称" "$(wireguard_profile_field "$id" name)")" || return 1
   (( ${#name} <= 80 )) || { ui_msg "WireGuard 隧道名称不能超过 80 个字符。"; return 1; }
-  mtu="$(realm_prompt_number_limited error_count "修改 WireGuard 隧道" "请输入 MTU" "$(wireguard_profile_field "$id" mtu)" 1280 1500)" || return 1
+  mtu="$(prompt_number "修改 WireGuard 隧道" "请输入 MTU" "$(wireguard_profile_field "$id" mtu)" 1280 1500)" || return 1
   if [[ "$role" == "relay" ]]; then
-    endpoint_host="$(realm_prompt_nonempty_limited error_count "修改 WireGuard 中转端" "请输入落地公网 IP 或域名" "$(wireguard_profile_field "$id" endpoint_host)")" || return 1
+    endpoint_host="$(prompt_nonempty "修改 WireGuard 中转端" "请输入落地公网 IP 或域名" "$(wireguard_profile_field "$id" endpoint_host)")" || return 1
     wireguard_valid_endpoint_host "$endpoint_host" || { ui_msg "Endpoint 地址无效。"; return 1; }
-    endpoint_port="$(realm_prompt_number_limited error_count "修改 WireGuard 中转端" "请输入落地 WireGuard UDP 端口" "$(wireguard_profile_field "$id" endpoint_port)" 1 65535)" || return 1
-    keepalive="$(realm_prompt_number_limited error_count "修改 WireGuard 中转端" "请输入 PersistentKeepalive，0 表示关闭" "$(wireguard_profile_field "$id" persistent_keepalive)" 0 65535)" || return 1
+    endpoint_port="$(prompt_number "修改 WireGuard 中转端" "请输入落地 WireGuard UDP 端口" "$(wireguard_profile_field "$id" endpoint_port)" 1 65535)" || return 1
+    keepalive="$(prompt_number "修改 WireGuard 中转端" "请输入 PersistentKeepalive，0 表示关闭" "$(wireguard_profile_field "$id" persistent_keepalive)" 0 65535)" || return 1
   else
-    endpoint_host="$(realm_prompt_nonempty_limited error_count "修改 WireGuard 落地端" "请输入本机公网 IP 或域名（用于后续配对信息）" "$(wireguard_profile_field "$id" endpoint_host)")" || return 1
+    endpoint_host="$(prompt_nonempty "修改 WireGuard 落地端" "请输入本机公网 IP 或域名（用于后续配对信息）" "$(wireguard_profile_field "$id" endpoint_host)")" || return 1
     wireguard_valid_endpoint_host "$endpoint_host" || { ui_msg "Endpoint 地址无效。"; return 1; }
-    listen_port="$(realm_prompt_number_limited error_count "修改 WireGuard 落地端" "请输入 WireGuard UDP 监听端口" "$(wireguard_profile_field "$id" listen_port)" 1 65535)" || return 1
+    listen_port="$(prompt_number "修改 WireGuard 落地端" "请输入 WireGuard UDP 监听端口" "$(wireguard_profile_field "$id" listen_port)" 1 65535)" || return 1
     current_endpoint_port="$(wireguard_profile_field "$id" endpoint_port)"
     current_endpoint_port="${current_endpoint_port:-$listen_port}"
-    endpoint_port="$(realm_prompt_number_limited error_count "修改 WireGuard 落地端" "请输入公网 Endpoint UDP 端口" "$current_endpoint_port" 1 65535)" || return 1
+    endpoint_port="$(prompt_number "修改 WireGuard 落地端" "请输入公网 Endpoint UDP 端口" "$current_endpoint_port" 1 65535)" || return 1
     if [[ "$listen_port" != "$(wireguard_profile_field "$id" listen_port)" ]] &&
       { port_is_listening udp "$listen_port" || jq -e --arg id "$id" --argjson port "$listen_port" '.wireguard.profiles[]? | select(.id != $id and .role == "landing" and .listen_port == $port)' "$REALM_STATE_FILE" >/dev/null 2>&1; }; then
       ui_msg "UDP/${listen_port} 已被占用。"
       return 1
     fi
-    allowed_source="$(realm_prompt_nonempty_limited error_count "修改 WireGuard 落地端" "请输入中转 VPS 公网来源 IP/CIDR" "$(wireguard_profile_field "$id" allowed_source)")" || return 1
+    allowed_source="$(prompt_nonempty "修改 WireGuard 落地端" "请输入中转 VPS 公网来源 IP/CIDR" "$(wireguard_profile_field "$id" allowed_source)")" || return 1
     wireguard_valid_allowed_source "$allowed_source" || { ui_msg "中转来源 IP/CIDR 无效；WireGuard 监听不允许设置为全网来源。"; return 1; }
   fi
 
@@ -6776,7 +6592,7 @@ apply_config() {
     ui_msg "配置未应用，防火墙未修改。${port_error}"
     return 1
   fi
-  if ! apply_firewall_rules; then
+  if ! sync_managed_firewall_rules; then
     cleanup_apply_temp_configs "$tmp_config" "$tmp_xray_config" "$tmp_xray_dir"
     restore_managed_runtime_configs "$sing_snapshot" "$sing_config_existed" "$xray_snapshot" "$xray_config_existed" "$service_was_active" "$xray_was_active"
     rm -f "$sing_snapshot" "$xray_snapshot"
@@ -7537,7 +7353,7 @@ select_split_outbound_id() {
 configure_split_routing() {
   local outbound_id=${1:-}
   local is_new=0 current_enabled current_type current_server current_port current_username current_password current_method current_rules current_special_rules
-  local type_choice outbound_type server port username password password_default method_choice method rules_input rules_json name yesno_result auth_choice previous_state_file
+  local type_choice outbound_type server port username password password_default method rules_input rules_json name yesno_result auth_choice previous_state_file selection_status
   local name_attempts=0 password_attempts=0
 
   if [[ -z "$outbound_id" ]]; then
@@ -7669,15 +7485,11 @@ configure_split_routing() {
     else
       password_default=""
     fi
-    method_choice="$(ui_split_shadowsocks_method_menu "$current_method")" || return 1
-    case "$method_choice" in
-      1) method="2022-blake3-aes-128-gcm" ;;
-      2) method="2022-blake3-aes-256-gcm" ;;
-      3) method="2022-blake3-chacha20-poly1305" ;;
-      0) return 0 ;;
-      *) ui_msg "无效加密方式，请重新选择。"; return 1 ;;
-    esac
-    method="$(normalize_shadowsocks_method "$method")"
+    method="$(select_shadowsocks_method "$current_method" 2)" || {
+      selection_status=$?
+      (( selection_status == 2 )) && return 0
+      return 1
+    }
     while (( password_attempts < 2 )); do
       password="$(ui_password "分流落地密码" "请输入 Shadowsocks 密码；留空则保留当前密码")" || return 1
       [[ -n "$password" ]] || password="$password_default"
@@ -7948,7 +7760,7 @@ split_routing_submenu() {
 }
 
 add_client() {
-  local protocol_choice name value ss_method duplicate_attempts=0
+  local protocol_choice name value ss_method
   protocol_choice="$(ui_protocol_menu)" || return 1
 
   case "$protocol_choice" in
@@ -7957,19 +7769,7 @@ add_client() {
         ui_msg "Shadowsocks 当前未启用，请先完成协议配置。"
         return 0
       }
-      while true; do
-        name="$(prompt_nonempty "新增客户端" "请输入 Shadowsocks 客户端名称" "ss-client-$(date +%H%M%S)")" || return 1
-        if user_exists "shadowsocks" "$name"; then
-          duplicate_attempts=$((duplicate_attempts + 1))
-          if (( duplicate_attempts >= 2 )); then
-            ui_input_error_return
-            return 1
-          fi
-          printf '该客户端名称已存在，再次输错将退回菜单界面。\n' >&2
-          continue
-        fi
-        break
-      done
+      name="$(prompt_unique_client_name "shadowsocks" "Shadowsocks" "ss-client-$(date +%H%M%S)")" || return 1
       ss_method="$(state_get '.protocols.shadowsocks.method // "2022-blake3-aes-128-gcm"')"
       value="$(generate_shadowsocks_password "$ss_method")"
       append_ss_user "$name" "$value"
@@ -7980,19 +7780,7 @@ add_client() {
         ui_msg "VLESS + Reality 当前未启用，请先完成协议配置。"
         return 0
       }
-      while true; do
-        name="$(prompt_nonempty "新增客户端" "请输入 VLESS 客户端名称" "vless-client-$(date +%H%M%S)")" || return 1
-        if user_exists "vless_reality" "$name"; then
-          duplicate_attempts=$((duplicate_attempts + 1))
-          if (( duplicate_attempts >= 2 )); then
-            ui_input_error_return
-            return 1
-          fi
-          printf '该客户端名称已存在，再次输错将退回菜单界面。\n' >&2
-          continue
-        fi
-        break
-      done
+      name="$(prompt_unique_client_name "vless_reality" "VLESS" "vless-client-$(date +%H%M%S)")" || return 1
       value="$(generate_uuid)"
       append_vless_user "$name" "$value"
       apply_config
@@ -8002,19 +7790,7 @@ add_client() {
         ui_msg "Hysteria2 当前未启用，请先完成协议配置。"
         return 0
       }
-      while true; do
-        name="$(prompt_nonempty "新增客户端" "请输入 Hysteria2 客户端名称" "hy2-client-$(date +%H%M%S)")" || return 1
-        if user_exists "hysteria2" "$name"; then
-          duplicate_attempts=$((duplicate_attempts + 1))
-          if (( duplicate_attempts >= 2 )); then
-            ui_input_error_return
-            return 1
-          fi
-          printf '该客户端名称已存在，再次输错将退回菜单界面。\n' >&2
-          continue
-        fi
-        break
-      done
+      name="$(prompt_unique_client_name "hysteria2" "Hysteria2" "hy2-client-$(date +%H%M%S)")" || return 1
       value="$(generate_password)"
       append_hy2_user "$name" "$value"
       apply_config
@@ -8177,7 +7953,7 @@ select_realm_forward_mode() {
 }
 
 add_realm_forward_rule() {
-  local name listen_port remote_host remote_port rule_id description entries_json previous_state_file mode_choice mode tunnel_id="" tunnel_name="" error_count=0
+  local name listen_port remote_host remote_port rule_id description entries_json previous_state_file mode_choice mode tunnel_id="" tunnel_name=""
 
   ensure_realm_dirs
   init_realm_state_file
@@ -8188,12 +7964,12 @@ add_realm_forward_rule() {
   }
 
   name="$(realm_prompt_rule_name)" || return 1
-  listen_port="$(realm_prompt_number_limited error_count "本地端口" "请输入需要监听的本地端口" "$(generate_random_service_port)" 1 65535)" || return 1
+  listen_port="$(prompt_number "本地端口" "请输入需要监听的本地端口" "$(generate_random_service_port)" 1 65535)" || return 1
   mode_choice="$(select_realm_forward_mode)" || return 1
   case "$mode_choice" in
     1)
       mode="direct"
-      remote_host="$(realm_prompt_nonempty_limited error_count "落地地址" "请输入目标地址【落地机的 IP 或域名】" "")" || return 1
+      remote_host="$(prompt_nonempty "落地地址" "请输入目标地址【落地机的 IP 或域名】" "")" || return 1
       ;;
     2)
       mode="wireguard"
@@ -8208,7 +7984,7 @@ add_realm_forward_rule() {
     0) return 0 ;;
     *) return 1 ;;
   esac
-  remote_port="$(realm_prompt_number_limited error_count "落地端口" "请输入目标端口【落地节点的端口】" "443" 1 65535)" || return 1
+  remote_port="$(prompt_number "落地端口" "请输入目标端口【落地节点的端口】" "443" 1 65535)" || return 1
 
   if [[ "$mode" == "wireguard" ]]; then
     if ! wireguard_profile_route_ready "$tunnel_id"; then
@@ -8258,8 +8034,8 @@ add_realm_range_rule() {
 
   name="$(realm_prompt_rule_name)" || return 1
   while true; do
-    listen_start="$(realm_prompt_number_limited error_count "起始端口" "请输入本地起始端口" "$(generate_random_service_port)" 1 65535)" || return 1
-    listen_end="$(realm_prompt_number_limited error_count "结束端口" "请输入本地结束端口" "$listen_start" 1 65535)" || return 1
+    listen_start="$(prompt_number "起始端口" "请输入本地起始端口" "$(generate_random_service_port)" 1 65535)" || return 1
+    listen_end="$(prompt_number "结束端口" "请输入本地结束端口" "$listen_start" 1 65535)" || return 1
     if (( listen_end >= listen_start )); then
       break
     fi
@@ -8276,7 +8052,7 @@ add_realm_range_rule() {
   case "$mode_choice" in
     1)
       mode="direct"
-      remote_host="$(realm_prompt_nonempty_limited error_count "落地地址" "请输入目标地址【落地机的 IP 或域名】" "")" || return 1
+      remote_host="$(prompt_nonempty "落地地址" "请输入目标地址【落地机的 IP 或域名】" "")" || return 1
       ;;
     2)
       mode="wireguard"
@@ -8292,8 +8068,8 @@ add_realm_range_rule() {
     *) return 1 ;;
   esac
   while true; do
-    remote_start="$(realm_prompt_number_limited error_count "落地起始端口" "请输入目标起始端口【落地节点的端口】" "$listen_start" 1 65535)" || return 1
-    remote_end="$(realm_prompt_number_limited error_count "落地结束端口" "请输入目标结束端口【落地节点的端口】" "$((remote_start + listen_end - listen_start))" 1 65535)" || return 1
+    remote_start="$(prompt_number "落地起始端口" "请输入目标起始端口【落地节点的端口】" "$listen_start" 1 65535)" || return 1
+    remote_end="$(prompt_number "落地结束端口" "请输入目标结束端口【落地节点的端口】" "$((remote_start + listen_end - listen_start))" 1 65535)" || return 1
     if (( remote_end >= remote_start )); then
       count=$((listen_end - listen_start))
       if (( count == (remote_end - remote_start) )); then
@@ -8436,7 +8212,7 @@ modify_realm_rule() {
 }
 
 change_realm_rule_transport() {
-  local id=${1:-} mode_choice mode tunnel_id="" tunnel_name="" remote_host first_port last_port old_description left description previous_state_file error_count=0
+  local id=${1:-} mode_choice mode tunnel_id="" tunnel_name="" remote_host first_port last_port old_description left description previous_state_file
   init_realm_state_file
   if [[ -z "$id" ]]; then
     id="$(select_realm_rule_id)" || return 0
@@ -8447,7 +8223,7 @@ change_realm_rule_transport() {
   case "$mode_choice" in
     1)
       mode="direct"
-      remote_host="$(realm_prompt_nonempty_limited error_count "切换为直接转发" "请输入落地公网 IP 或域名" "")" || return 1
+      remote_host="$(prompt_nonempty "切换为直接转发" "请输入落地公网 IP 或域名" "")" || return 1
       ;;
     2)
       mode="wireguard"
@@ -9407,6 +9183,21 @@ usage() {
 EOF
 }
 
+prepare_root_command() {
+  require_linux
+  require_root
+}
+
+prepare_manager_command() {
+  prepare_root_command
+  ensure_dirs
+}
+
+prepare_state_command() {
+  prepare_manager_command
+  init_state_file
+}
+
 main() {
   setup_terminal_env
 
@@ -9415,106 +9206,63 @@ main() {
       quick_install
       ;;
     enable-v2ray-api)
-      require_linux
-      require_root
+      prepare_root_command
       ensure_sing_box_v2ray_api
       ;;
     apply)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
+      prepare_state_command
       apply_config
       ;;
     show)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
+      prepare_state_command
       show_client_info
       ;;
     add-client)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
+      prepare_state_command
       add_client
       ;;
     remove-client)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
+      prepare_state_command
       remove_client
       ;;
     node|nodes|manage-node)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
+      prepare_state_command
       node_submenu
       ;;
     change-address|edit-address)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
+      prepare_state_command
       change_node_address
       ;;
     delete-node|remove-node)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
+      prepare_state_command
       delete_node
       ;;
     split|split-menu|routing|ai|ai-menu|ai-route-menu)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
+      prepare_state_command
       split_routing_submenu
       ;;
     split-route|ai-route)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
+      prepare_state_command
       configure_split_routing
       ;;
     edit-split-route|edit-split-outbound)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
+      prepare_state_command
       edit_split_routing
       ;;
     delete-split-route|remove-split-route|delete-split-outbound)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
+      prepare_state_command
       delete_split_outbound
       ;;
     split-rules|show-split-rules|ai-rules|show-ai-rules)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
+      prepare_state_command
       show_split_routing_rules
       ;;
     add-split-rule|add-split-rules|append-split-rule|append-split-rules|add-ai-rule|add-ai-rules|append-ai-rule|append-ai-rules)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
+      prepare_state_command
       append_split_routing_rules "${@:2}"
       ;;
     delete-split-rule|remove-split-rule|delete-ai-rule|remove-ai-rule)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
+      prepare_state_command
       delete_split_routing_rule
       ;;
     repair-install|reinstall)
@@ -9524,47 +9272,32 @@ main() {
       prepare_realm_menu && realm_submenu
       ;;
     ports|port|port-menu)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
+      prepare_state_command
       port_management_menu
       ;;
     tools|tool|common-scripts)
-      require_linux
-      require_root
+      prepare_root_command
       common_scripts_menu
       ;;
     firewall-sync)
-      require_linux
-      require_root
-      ensure_dirs
+      prepare_manager_command
       have_cmd jq || die "缺少 jq，无法恢复托管防火墙规则。"
       sync_managed_firewall_rules
       ;;
     migrate-realm-tcp-only)
-      require_linux
-      require_root
-      ensure_dirs
+      prepare_manager_command
       migrate_realm_tcp_only
       ;;
     overview)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
+      prepare_state_command
       show_overview
       ;;
     status)
-      require_linux
-      require_root
-      ensure_dirs
-      init_state_file
+      prepare_state_command
       show_service_status
       ;;
     uninstall)
-      require_linux
-      require_root
+      prepare_root_command
       uninstall_sbox
       ;;
     version|-v|--version)
@@ -9574,9 +9307,7 @@ main() {
       usage
       ;;
     panel|"")
-      require_linux
-      require_root
-      ensure_dirs
+      prepare_manager_command
       if have_cmd jq && [[ -s "$STATE_FILE" ]]; then
         init_state_file
       fi

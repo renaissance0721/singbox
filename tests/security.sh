@@ -950,6 +950,11 @@ grep -Fq '"12" "卸载 Realm"' "$repo_dir/index.sh" || fail "Realm 卸载选项�
 grep -Fq 'realm_install_or_reset || true' "$repo_dir/index.sh" || fail "Realm 菜单未捕获操作失败状态"
 grep -Fq 'quick_install || true' "$repo_dir/index.sh" || fail "主菜单未捕获操作失败状态"
 grep -Fq '"1" "初始化环境"' "$repo_dir/index.sh" || fail "主菜单第 1 项未改为纯环境初始化"
+grep -Fq '"9" "为当前内核补充 V2Ray API（不升级）"' "$repo_dir/index.sh" ||
+  fail "代理节点管理缺少补充 V2Ray API 入口"
+if grep -Fq '"10" "为当前内核补充 V2Ray API（不升级）"' "$repo_dir/index.sh"; then
+  fail "补充 V2Ray API 入口仍残留在主菜单"
+fi
 if grep -Eq 'split_routing|split-route|split-rules|split-rule|ai-route|ai-menu|ai-rules' "$repo_dir/index.sh"; then
   fail "脚本仍暴露已删除的分流管理函数或命令"
 fi

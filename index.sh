@@ -6798,6 +6798,7 @@ node_submenu() {
       "6" "更改节点地址" \
       "7" "设置出站 IPv4 / IPv6 策略" \
       "8" "设置禁止访问 CN IP" \
+      "9" "为当前内核补充 V2Ray API（不升级）" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || continue
 
@@ -6825,6 +6826,9 @@ node_submenu() {
         ;;
       8)
         configure_block_cn_ip || true
+        ;;
+      9)
+        ensure_sing_box_v2ray_api || true
         ;;
       0)
         return 0
@@ -8248,11 +8252,10 @@ main_menu() {
       "7" "一键常用脚本" \
       "8" "更新脚本" \
       "9" "卸载" \
-      "10" "为当前内核补充 V2Ray API（不升级）" \
       "0" "退出")" || continue
 
     if { ! have_cmd jq || [[ ! -s "$STATE_FILE" ]]; } &&
-      [[ "$choice" != "1" && "$choice" != "3" && "$choice" != "7" && "$choice" != "10" && "$choice" != "0" ]]; then
+      [[ "$choice" != "1" && "$choice" != "3" && "$choice" != "7" && "$choice" != "0" ]]; then
       ui_msg "管理环境尚未初始化，请先选择 1 初始化环境；只使用 Realm 可直接选择 3。"
       continue
     fi
@@ -8288,9 +8291,6 @@ main_menu() {
         ;;
       9)
         uninstall_sbox || true
-        ;;
-      10)
-        ensure_sing_box_v2ray_api || true
         ;;
       0)
         break

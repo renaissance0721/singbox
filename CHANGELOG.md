@@ -12,7 +12,7 @@
 - 节点管理新增第 8 项“设置禁止访问 CN IP”，默认关闭并持久保存；支持 sing-box / Xray 的中国大陆目标 IPv4/IPv6 阻断，保留国内客户端入站连接，不影响纯 Realm / WireGuard 中转。
 - 开启 CN IP 限制时，在转发前解析并检查目标，保留原有私网和云元数据防护；sing-box 复用远程规则缓存和每日更新，Xray 使用现有 `geoip.dat`，应用失败沿用状态及运行配置回滚流程。
 - 默认安装限定为软件源中可用的最新 sing-box 1.13 系列稳定版，兼容 `sing-box-oldstable` 软件包，排除预发布版并避免自动跨到 1.14；补充 V2Ray API 仍保留原内核版本，已有更高系列不会被隐式降级。
-- 新增主菜单 10 和 `sbox enable-v2ray-api`：在本机按当前版本重编译 sing-box，保留原标签并补充 `with_v2ray_api`，不升级内核；安装时也自动补齐，替换前预检并保留原内核备份，移除独立的 GitHub 内核构建工作流。
+- 新增“代理节点管理”第 9 项和 `sbox enable-v2ray-api`：在本机按当前版本重编译 sing-box，保留原标签并补充 `with_v2ray_api`，不升级内核；安装时也自动补齐，替换前预检并保留原内核备份，移除独立的 GitHub 内核构建工作流。
 - 节点管理在已搭建 VLESS + Reality 时新增独立的核心类型显示，明确标注 `xray` 或 `sing-box`；未启用 VLESS 时隐藏该行，旧状态默认识别为 `sing-box`。
 - 修复旧版 glibc 系统安装新版 Realm 后因缺少 `GLIBC_2.32` 至 `GLIBC_2.38` 而无法启动：Linux 统一使用经 GitHub SHA-256 校验并通过本机自检的便携 musl 构建；进入 Realm 菜单或执行 `repair-install` 时会自动替换已识别的不兼容二进制并保留规则。
 - 修复 Alpine 未启用 `community` 或旧稳定版尚未收录 sing-box 时的安装失败：依次尝试当前版本与 `edge/community` 的 Alpine 官方签名软件包，并继续拒绝未校验脚本或二进制后备安装。

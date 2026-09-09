@@ -219,7 +219,7 @@ sbox show
 - 默认端口在 `10000-60000` 范围内随机生成，并避开 Shadowsocks 默认端口
 - 创建时可选择 Xray-core 或 sing-box；客户端仍使用同一种 `vless://` Reality 链接
 - Xray 安装在 `/usr/local/lib/sbox-xray/` 并使用独立 `sbox-xray` 服务，不占用或覆盖 `/usr/local/bin/xray` 与 `xray.service`
-- Xray 首次安装只选择 GitHub 标记的官方稳定版，校验 `.dgst` SHA-256 后记录版本和二进制摘要；配置操作不会自动升级
+- Xray 首次安装固定使用官方稳定版 `v26.3.27`，校验发布标签和 `.dgst` SHA-256 后记录版本与二进制摘要；配置操作不会自动升级或降级已有内核
 - 默认流控为 `xtls-rprx-vision`
 - 会自动生成 Reality 密钥对和 `short_id`
 - 创建时可按服务器地区选择默认 SNI：美西使用 `www.cartoonbrew.com`，香港使用 `ani-com.hk`，日本可选 `shin-ei-animation.jp` 或 `www.ritao.co`，其他地区使用 `www.tesla.com`；选定后仍可手动修改

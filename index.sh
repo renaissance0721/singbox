@@ -69,6 +69,8 @@ SING_BOX_HARDENING_DROPIN_FILE="${SING_BOX_HARDENING_DROPIN_FILE:-$SING_BOX_FIRE
 RUNTIME_USER="${RUNTIME_USER:-sbox-runtime}"
 RUNTIME_GROUP="${RUNTIME_GROUP:-sbox-runtime}"
 SAGERNET_GPG_FINGERPRINT="2C317FBD5D886B4E89BAE8DA6D9152172A2B2F0C"
+XRAY_PINNED_VERSION="26.3.27"
+XRAY_PINNED_TAG="v${XRAY_PINNED_VERSION}"
 MANAGER_SCRIPT_PATH="${MANAGER_SCRIPT_PATH:-/usr/local/bin/sbox}"
 PROJECT_INSTALL_DIR="${PROJECT_INSTALL_DIR:-/usr/local/share/sbox}"
 SCRIPT_REPO_OWNER="renaissance0721"
@@ -1484,18 +1486,18 @@ install_xray_core() {
     die "无法创建 Xray 解压临时目录。"
   }
 
-  log "获取 Xray 官方最新稳定版信息（不会选择 prerelease）..."
-  download_to_file "$api_file" "https://api.github.com/repos/XTLS/Xray-core/releases/latest" || {
+  log "获取 Xray ${XRAY_PINNED_TAG} 官方发布信息..."
+  download_to_file "$api_file" "https://api.github.com/repos/XTLS/Xray-core/releases/tags/${XRAY_PINNED_TAG}" || {
     rm -f "$api_file" "$archive_file" "$digest_file"
     cleanup_xray_work_dir "$work_dir"
-    die "无法获取 Xray 官方稳定版信息。"
+    die "无法获取 Xray ${XRAY_PINNED_TAG} 官方发布信息。"
   }
 
-  tag="$(jq -r 'select(.draft == false and .prerelease == false) | .tag_name // empty' "$api_file")"
-  [[ "$tag" =~ ^v[0-9][0-9A-Za-z._-]*$ ]] || {
+  tag="$(jq -r --arg expected_tag "$XRAY_PINNED_TAG" 'select(.draft == false and .prerelease == false and .tag_name == $expected_tag) | .tag_name // empty' "$api_file")"
+  [[ "$tag" == "$XRAY_PINNED_TAG" ]] || {
     rm -f "$api_file" "$archive_file" "$digest_file"
     cleanup_xray_work_dir "$work_dir"
-    die "Xray 发布信息无效或不是稳定版，已拒绝安装。"
+    die "Xray 发布信息无效、版本不匹配或不是稳定版，已拒绝安装。"
   }
   asset_url="$(jq -r --arg name "$asset_name" '.assets[]? | select(.name == $name) | .browser_download_url' "$api_file" | head -n 1)"
   digest_url="$(jq -r --arg name "${asset_name}.dgst" '.assets[]? | select(.name == $name) | .browser_download_url' "$api_file" | head -n 1)"
@@ -1543,6 +1545,12 @@ install_xray_core() {
     cleanup_xray_work_dir "$work_dir"
     die "下载的 Xray 二进制自检失败，已拒绝安装。"
   fi
+  version="$(awk '{print $2; exit}' <<<"$version_line")"
+  if [[ "$version" != "$XRAY_PINNED_VERSION" ]]; then
+    rm -f "$api_file" "$archive_file" "$digest_file"
+    cleanup_xray_work_dir "$work_dir"
+    die "下载的 Xray 二进制版本不是 ${XRAY_PINNED_VERSION}，已拒绝安装。"
+  fi
 
   install -d -m 0755 "$XRAY_INSTALL_DIR" "$XRAY_ASSET_DIR"
   install -o root -g root -m 0644 /dev/null "$XRAY_MANAGED_MARKER"
@@ -1551,8 +1559,7 @@ install_xray_core() {
   # Install the executable last. Its presence is the completion marker used by
   # subsequent runs, so an interrupted asset copy is repaired by a new download.
   install -o root -g root -m 0755 "$work_dir/xray" "$XRAY_BIN"
-  version="$(awk '{print $2; exit}' <<<"$version_line")"
-  record_xray_runtime "${version:-$tag}" "$(utc_now)" "$(sha256_file "$XRAY_BIN")" || die "Xray 已安装，但无法记录版本状态。"
+  record_xray_runtime "$version" "$(utc_now)" "$(sha256_file "$XRAY_BIN")" || die "Xray 已安装，但无法记录版本状态。"
 
   rm -f "$api_file" "$archive_file" "$digest_file"
   cleanup_xray_work_dir "$work_dir"
@@ -7867,8 +7874,17 @@ realm_submenu() {
 }
 
 sing_box_install_status() {
-  if have_cmd sing-box; then
-    printf '已安装\n'
+  local bin version_line version
+
+  bin="$(sing_box_check_bin 2>/dev/null || true)"
+  if [[ -n "$bin" && -x "$bin" ]]; then
+    version_line="$("$bin" version 2>/dev/null | head -n 1 || true)"
+    version="$(awk '/^sing-box version / {print $3; exit}' <<<"$version_line")"
+    if [[ -n "$version" ]]; then
+      printf '已安装（%s）\n' "$version"
+    else
+      printf '已安装（版本读取失败）\n'
+    fi
   else
     printf '未安装\n'
   fi

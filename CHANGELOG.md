@@ -4,6 +4,7 @@
 
 ## [Unreleased]
 
+- Xray 首次安装固定为官方稳定版 `v26.3.27`，不再随 GitHub `latest` 漂移；主菜单与节点管理中的 sing-box 安装状态会同时显示实际内核版本。
 - 移除 SOCKS5 / Shadowsocks 分流落地、关键词/域名/GeoSite/SRS 规则管理及全部兼容命令；升级时清理状态文件中的旧 `routing.split` 和 `routing.ai` 数据。
 - 主菜单第 1 项改为“初始化环境”，只安装通用依赖和创建管理状态，不再安装或操作 sing-box；Shadowsocks、Hysteria2 及选择 sing-box 内核的 VLESS 改为在新建节点时按需询问安装。
 - Realm 支持在未初始化管理环境时从主菜单或 `sbox realm` 直接按需安装基础依赖，且 `repair-install` 在纯 Realm 环境中不再强制安装 sing-box 或重载代理配置。
@@ -25,7 +26,7 @@
 
 ### 新增
 
-- VLESS + Reality 新增 Xray-core / sing-box 内核选择；Xray 首次选用时按架构下载官方最新稳定版，两个内核共用端口、用户、Reality 参数和分享链接
+- VLESS + Reality 新增 Xray-core / sing-box 内核选择；Xray 首次选用时按架构下载固定的官方稳定版 `v26.3.27`，两个内核共用端口、用户、Reality 参数和分享链接
 - 新增脚本隔离的 `sbox-xray` systemd/OpenRC 服务、Xray 配置渲染、日志/状态展示及旧 VLESS 状态自动迁移
 - 节点管理新增出站 IPv4 / IPv6 策略设置，支持 IPv4 优先、IPv6 优先、禁用 IPv4、禁用 IPv6 及跟随系统，并在应用失败时自动恢复原设置
 - 新建节点时分别探测公网 IPv4 与 IPv6；检测到双栈网络后自动启用双栈监听，客户端仅生成一个主地址链接，不再额外生成 IPv6 节点
@@ -62,7 +63,7 @@
 
 ### 安全
 
-- Xray 下载仅接受 XTLS 官方 `releases/latest` 的非 draft/非 prerelease 固定命名资产，要求官方 `.dgst` SHA-256 校验通过，并在隔离目录安装，绝不执行远程安装脚本或覆盖系统已有 Xray
+- Xray 下载仅接受 XTLS 官方 `v26.3.27` Release 的非 draft/非 prerelease 固定命名资产，要求标签匹配且官方 `.dgst` SHA-256 校验通过，并在隔离目录安装，绝不执行远程安装脚本或覆盖系统已有 Xray
 - Xray 以 `sbox-runtime` 低权限用户和最小 systemd/OpenRC 权限运行；完整卸载只删除脚本托管的 `sbox-xray` 组件，不触碰 `/usr/local/bin/xray` 或用户已有 `xray.service`
 - VLESS、Hysteria2 与 Shadowsocks 统一阻断本机、私网、链路本地和云元数据目标，并在域名解析后再次检查
 - sing-box 与 Realm 改由无登录权限的 `sbox-runtime` 用户运行，systemd 服务增加最小权限沙箱，OpenRC 使用最小文件能力兼容低端口

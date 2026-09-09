@@ -135,6 +135,15 @@ chmod 0600 "$STATE_FILE"
 )
 
 (
+  status_bin="$test_root/status-sing-box"
+  printf '#!/usr/bin/env sh\nprintf "%%s\\n" "sing-box version 1.13.21"\n' >"$status_bin"
+  chmod 0755 "$status_bin"
+  sing_box_check_bin() { printf '%s\n' "$status_bin"; }
+  [[ "$(sing_box_install_status)" == '已安装（1.13.21）' ]] ||
+    fail "sing-box 安装状态未显示实际内核版本"
+)
+
+(
   ALPINE_RELEASE_FILE="$test_root/alpine-release"
   apk_log="$test_root/sing-box-apk-install.log"
   printf '3.21.4\n' >"$ALPINE_RELEASE_FILE"
@@ -1905,10 +1914,12 @@ grep -Fq 'bash -n "$DOWNLOAD_TMP"' "$repo_dir/install.sh" || fail "install.sh �
     fail "Xray 旧版 x25519 PublicKey 输出未被兼容解析"
 )
 
-grep -Fq 'https://api.github.com/repos/XTLS/Xray-core/releases/latest' "$repo_dir/index.sh" ||
-  fail "Xray 安装未限定官方 latest stable API"
-grep -Fq 'select(.draft == false and .prerelease == false)' "$repo_dir/index.sh" ||
-  fail "Xray 安装未拒绝 draft/prerelease"
+grep -Fq 'XRAY_PINNED_VERSION="26.3.27"' "$repo_dir/index.sh" ||
+  fail "Xray 安装版本未固定为 26.3.27"
+grep -Fq 'https://api.github.com/repos/XTLS/Xray-core/releases/tags/${XRAY_PINNED_TAG}' "$repo_dir/index.sh" ||
+  fail "Xray 安装未限定到官方固定版本 API"
+grep -Fq '.draft == false and .prerelease == false and .tag_name == $expected_tag' "$repo_dir/index.sh" ||
+  fail "Xray 安装未拒绝 draft、prerelease 或非固定标签"
 grep -Fq 'Xray 发布包 SHA-256 校验失败' "$repo_dir/index.sh" ||
   fail "Xray 安装缺少失败关闭的 SHA-256 校验"
 grep -Fq 'run -test -config "$tmp_xray_config"' "$repo_dir/index.sh" ||

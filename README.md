@@ -1,16 +1,16 @@
-# Sing-box / Xray 一键安装与管理面板
+# Sing-box 一键安装与管理面板
 
 ![CI](https://github.com/renaissance0721/singbox/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/github/license/renaissance0721/singbox)
 
-一个只面向 Linux VPS、支持按需管理 `sing-box`、`Xray-core`、Realm 与 WireGuard 的一键脚本；只使用 Realm 中转时无需安装 `sing-box`。
+一个只面向 Linux VPS、支持按需管理 `sing-box`、Realm 与 WireGuard 的一键脚本；只使用 Realm 中转时无需安装 `sing-box`。
 
 ## 功能特性
 
 - 只支持 Linux VPS
 - 输入安装命令后先进入终端管理面板
 - 主菜单“初始化环境”只安装通用依赖并创建管理状态，不安装任何代理核心
-- 在代理节点管理中搭建 Shadowsocks、Hysteria2 或 sing-box 内核的 VLESS 时，才询问并安装软件源可用的最新 sing-box **1.13 系列稳定版**，同时确保内核包含 `with_v2ray_api`
+- 在代理节点管理中搭建 Shadowsocks、Hysteria2 或 sing-box 内核的 VLESS 时，才询问并安装软件源可用的最新 sing-box **1.13 系列稳定版**
 - Realm 使用独立的按需初始化流程，可从主菜单直接进入并安装自身依赖，不会强制安装 sing-box
 - 退出后可直接输入 `sbox` 重新打开面板
 - 支持输入 `sbox uninstall` 一键卸载
@@ -19,8 +19,7 @@
 - 支持在节点管理中设置 VPS 出站 IPv4/IPv6 优先级、禁用其中一个地址族或跟随系统
 - 支持在节点管理中开启 CN IP 出站限制，阻止代理请求访问中国大陆目标 IP，默认关闭，不限制国内客户端入站连接
 - 支持 `Shadowsocks`、`VLESS + Reality`、`Hysteria2`
-- VLESS + Reality 可选择 Xray-core 或 sing-box；两种内核共用相同的搭建、客户端和分享链接流程
-- Xray 使用隔离的脚本托管路径和独立 `sbox-xray` 服务，不覆盖系统已有 Xray；管理脚本更新和配置重载不会隐式升级核心
+- VLESS + Reality 固定使用 sing-box，与 Shadowsocks、Hysteria2 共用同一服务
 - 支持客户端新增、删除、导出
 - 自动生成 Reality 密钥、随机密码和 Hysteria2 自签名证书
 - 新建 Shadowsocks 节点仅提供 SS2022；监听端口由端口与防火墙管理统一控制
@@ -41,7 +40,6 @@
 - `systemd` 或 OpenRC
 - `root` 或具备 `sudo` 权限的用户
 - Realm 自动安装支持 `x86_64/amd64` 与 `aarch64/arm64`，并自动区分 glibc 和 musl
-- Xray 自动安装支持 `x86_64/amd64`、`aarch64/arm64`、`armv7` 与 32 位 x86
 - 云厂商安全组或 NAT 映射已允许协议对应端口；脚本只能管理 VPS 本机防火墙
 
 ## 快速开始
@@ -87,10 +85,9 @@ bash install.sh
 - 安装管理命令到 `/usr/local/bin/sbox`
 - 在安装前校验 `index.sh` 的内置 SHA-256，并使用临时文件原子替换
 - 自动打开管理面板
-- 由用户选择“初始化环境”后安装通用依赖并创建管理状态，不预装 sing-box 或 Xray-core
+- 由用户选择“初始化环境”后安装通用依赖并创建管理状态，不预装 sing-box
 - 进入“代理节点管理 → 新建节点”后，脚本才按所选协议询问或安装所需代理核心
 - 只使用 Realm/WireGuard 时可直接选择“Realm 中转”，脚本只补齐该功能所需的基础依赖
-- 选择 Xray-core 搭建 VLESS 时，按需下载 XTLS 官方稳定版并校验官方 SHA-256 摘要；不会执行远程 Xray 安装脚本
 - 自动创建无登录权限的 `sbox-runtime` 用户，代理服务不以 root 运行
 - systemd/OpenRC 均保留低端口监听能力，不需要手动设置权限或 capabilities
 
@@ -115,8 +112,7 @@ sbox change-address
 | 命令 | 说明 |
 | --- | --- |
 | `sbox` | 打开主菜单 |
-| `sbox quick-install` | 初始化通用管理环境，不安装 sing-box、Xray-core 或 Realm |
-| `sbox enable-v2ray-api` | 按当前版本在本机重编译，只补充 `with_v2ray_api`，不升级内核；也可在“代理节点管理”中执行 |
+| `sbox quick-install` | 初始化通用管理环境，不安装 sing-box 或 Realm |
 | `sbox node` | 打开代理节点管理菜单 |
 | `sbox change-address` | 更改所有协议共用的节点出口 IP 或域名 |
 | `sbox delete-node` | 删除一个已经启用的协议节点及其客户端 |
@@ -136,19 +132,17 @@ sbox change-address
 
 ## 节点与客户端管理
 
-“初始化环境”只安装通用依赖、创建状态文件和防火墙恢复环境，不安装任何代理核心。进入“代理节点管理 → 新建节点”后，Shadowsocks 和 Hysteria2 会在本机缺少 sing-box 时询问是否安装；VLESS + Reality 会先选择 Xray-core 或 sing-box，再按选择安装对应核心。Xray 仅在第一次选择时安装，后续配置和用户操作不会隐式升级。三个协议可以分别启用，并共用节点名称与出口地址。新建节点时会分别探测公网 IPv4 和 IPv6；同时检测到两种地址后会自动启用双栈监听，不再额外询问。双栈只生成一个使用主地址的客户端链接，默认主地址为探测到的 IPv4，不再额外生成 IPv6 节点。
-
-节点管理会在 VLESS + Reality 已启用时单独显示“VLESS 核心类型”，值为 `xray` 或 `sing-box`；未启用 VLESS 时不显示该行。
+“初始化环境”只安装通用依赖、创建状态文件和防火墙恢复环境，不安装代理核心。进入“代理节点管理 → 新建节点”后，Shadowsocks、VLESS + Reality 和 Hysteria2 都会在本机缺少 sing-box 时询问是否安装。三个协议可以分别启用，并共用节点名称与出口地址。新建节点时会分别探测公网 IPv4 和 IPv6；同时检测到两种地址后会自动启用双栈监听，不再额外询问。双栈只生成一个使用主地址的客户端链接，默认主地址为探测到的 IPv4，不再额外生成 IPv6 节点。
 
 节点管理中的“设置出站 IPv4 / IPv6 策略”控制 VPS 访问目标域名时的地址选择，可设为 IPv4 优先、IPv6 优先、禁用 IPv4、禁用 IPv6 或跟随系统。该设置不改变客户端连接节点所用的地址；“优先”模式在首选地址族不可用时仍允许使用另一地址族，“禁用”模式则只允许指定的单一地址族。
 
-节点管理中的第 8 项“设置禁止访问 CN IP”提供开启和关闭选项，节点菜单及概览会显示当前状态。新安装和旧配置迁移默认关闭；设置保存在 `state.json` 的 `routing.block_cn_ip`，更新脚本或重启后保留。开关对本机所有已启用的 Shadowsocks、Hysteria2 和 VLESS 节点生效，VLESS 的 sing-box / Xray 两种核心均支持。
+节点管理中的第 8 项“设置禁止访问 CN IP”提供开启和关闭选项，节点菜单及概览会显示当前状态。新安装和旧配置迁移默认关闭；设置保存在 `state.json` 的 `routing.block_cn_ip`，更新脚本或重启后保留。开关对本机所有已启用的 Shadowsocks、Hysteria2 和 VLESS 节点生效。
 
 开启后，只拒绝代理请求访问规则库中标记为 CN 的中国大陆目标 IP，包括 IPv4 和 IPv6。不会按 `.cn` 后缀或国内域名分类拦截，也不额外封锁 HK/MO/TW 地址段；国内客户端仍能连接节点，SSH、系统自身联网及 Realm / WireGuard 中转不受这条代理规则影响。“系统代理 / TUN + 国内直连”中没有经过节点的请求不受限制。纯 Realm 中转不需要开启，应在实际处理代理请求的落地节点开启；此功能是访问限制，不承诺降低 IP 被墙概率。
 
 直接输入的目标 IP 会在转发前检查；域名会先按当前地址族策略解析，再检查解析结果。只要候选地址中包含 CN 地址就会拒绝整个请求，因此混合境内外地址的域名也可能被拒绝。原有私网和云元数据保护继续保留，关闭开关后恢复普通解析和直连流程。
 
-sing-box 使用 SagerNet 的 `geoip-cn.srs` 远程规则集，每日检查更新，复用现有缓存。首次下载或加载失败时不能完成启用，脚本会尝试恢复原状态和运行配置；后续更新下载失败时继续使用已加载的规则。Xray 使用脚本已安装的 `geoip.dat`，在应用配置时检查可用性；该数据库随 Xray 安装 / 显式升级更新，不会每日自动更新，也不会因切换开关隐式升级核心。两套数据库的分类和更新时间可能有差异，实际拦截以节点当时的解析结果及对应规则库为准。切换开关会应用配置并重启托管代理服务，现有连接可能短暂中断。
+sing-box 使用 SagerNet 的 `geoip-cn.srs` 远程规则集，每日检查更新并复用现有缓存。首次下载或加载失败时不能完成启用，脚本会尝试恢复原状态和运行配置；后续更新下载失败时继续使用已加载的规则。切换开关会应用配置并重启 sing-box，现有连接可能短暂中断。
 
 首次创建某个协议节点时，脚本会自动创建一个默认客户端并立即生成服务端配置、客户端参数和订阅链接。之后可以通过“管理客户端”或以下命令继续增删客户端：
 
@@ -158,7 +152,7 @@ sbox remove-client
 sbox show
 ```
 
-每次创建、删除或修改节点后，脚本会分别调用目标内核检查配置，再检查监听端口、同步本机防火墙并切换服务。任一服务启动失败时会恢复原配置和原服务状态。若没有启用任何协议，sing-box 与脚本托管的 Xray 服务都会停止，但状态文件会保留。
+每次创建、删除或修改节点后，脚本会调用 sing-box 检查配置，再检查监听端口、同步本机防火墙并切换服务。服务启动失败时会恢复原配置和原服务状态。若没有启用任何协议，sing-box 服务会停止，但状态文件会保留。
 
 ## 一键常用脚本
 
@@ -180,7 +174,7 @@ sbox show
 
 1. 执行安装命令，脚本会先打开管理面板。
 2. 选择“初始化环境”，等待脚本安装通用依赖；此时不会安装代理核心。
-3. 进入“代理节点管理 → 新建节点”，选择协议；脚本会按需询问并安装 sing-box，或在 VLESS 中按选择安装 Xray-core。
+3. 进入“代理节点管理 → 新建节点”，选择协议；脚本会按需询问并安装 sing-box。
 4. 确认监听端口、节点地址及协议参数。
 5. 保存后检查脚本输出的订阅链接，并在云厂商安全组或 NAT 面板放行、映射对应端口。
 6. 使用客户端连接并测试；需要增加用户时进入“管理客户端”。
@@ -217,13 +211,11 @@ sbox show
 ### VLESS + Reality
 
 - 默认端口在 `10000-60000` 范围内随机生成，并避开 Shadowsocks 默认端口
-- 创建时可选择 Xray-core 或 sing-box；客户端仍使用同一种 `vless://` Reality 链接
-- Xray 安装在 `/usr/local/lib/sbox-xray/` 并使用独立 `sbox-xray` 服务，不占用或覆盖 `/usr/local/bin/xray` 与 `xray.service`
-- Xray 首次安装固定使用官方稳定版 `v26.3.27`，校验发布标签和 `.dgst` SHA-256 后记录版本与二进制摘要；配置操作不会自动升级或降级已有内核
+- 服务端固定使用 sing-box，客户端使用标准 `vless://` Reality 链接
 - 默认流控为 `xtls-rprx-vision`
 - 会自动生成 Reality 密钥对和 `short_id`
 - 创建时可按服务器地区选择默认 SNI：美西使用 `www.cartoonbrew.com`，香港使用 `ani-com.hk`，日本可选 `shin-ei-animation.jp` 或 `www.ritao.co`，其他地区使用 `www.tesla.com`；选定后仍可手动修改
-- 已存在 VLESS 时重新选择内核会复用 UUID、Reality 密钥和 `short_id`，避免现有客户端链接失效
+- 已存在 VLESS 时重新配置会复用 UUID、Reality 密钥和 `short_id`，避免现有客户端链接失效
 - 已存在 VLESS 时可在地区菜单中保持当前 SNI，避免重新配置时意外更换伪装域名
 - 首次配置建议确认伪装域名和端口是否可访问
 - VLESS 入站会在域名解析前后拒绝本机、私网、链路本地地址和常见云元数据地址
@@ -270,16 +262,15 @@ sbox show
 - UFW/firewalld 自动开关按脚本状态文件处理托管端口；相同端口/协议的同形人工规则仍可能受到同步影响
 - 不要把节点或 Realm 监听端口设置成 SSH、Web 服务或其他程序已经占用的端口
 - UFW 或 firewalld 已启用时优先使用对应后端，否则使用 iptables/ip6tables
-- systemd 使用 `sbox-firewall.service` 在 sing-box、sbox-xray、Realm 启动前恢复规则；Alpine/OpenRC 在对应 iptables/ip6tables 服务存在时保存规则
+- systemd 使用 `sbox-firewall.service` 在 sing-box、Realm 启动前恢复规则；Alpine/OpenRC 在对应 iptables/ip6tables 服务存在时保存规则
 - NAT VPS 的客户端使用商家分配的公网端口；sing-box 监听的是 NAT 映射后的内部端口，两者可能不同
 - 本页面不检测也不修改云厂商安全组、外部防火墙或 NAT 控制面板
 
 ## 更新、修复与卸载
 
-- “更新脚本”只更新管理脚本项目。更新成功后会重新打开面板；sing-box、Xray、节点和规则不会因此被删除或升级。
-- `sbox repair-install` 使用当前已经安装的管理脚本重新检查依赖，并按现有配置修复所需核心、Realm 二进制兼容性、运行用户、文件权限、服务与防火墙恢复环境。纯 Realm 环境不会因此安装 sing-box；已有 Xray 保持记录版本，不会隐式升级。
-- `sbox uninstall` 会在确认后停止并禁用 sing-box、脚本托管的 `sbox-xray`、Realm 和脚本托管的 `sbwg*` WireGuard 隧道，清理托管防火墙规则，卸载 sing-box 软件包，并删除本项目的配置、状态、密钥、客户端导出和管理命令。
-- 完整卸载不会删除 `/usr/local/bin/xray`、用户已有的 `xray.service`、非 `sbwg*` WireGuard 配置，也不会修改云安全组、外部防火墙或 NAT 映射。
+- “更新脚本”只更新管理脚本项目。更新成功后会重新打开面板；sing-box、节点和规则不会因此被删除或升级。
+- `sbox repair-install` 使用当前已经安装的管理脚本重新检查依赖，并按现有配置修复 sing-box、Realm 二进制兼容性、运行用户、文件权限、服务与防火墙恢复环境。纯 Realm 环境不会因此安装 sing-box。
+- `sbox uninstall` 会在确认后停止并禁用 sing-box、Realm 和脚本托管的 `sbwg*` WireGuard 隧道，清理托管防火墙规则，卸载 sing-box 软件包，并删除本项目的配置、状态、密钥、客户端导出和管理命令。
 - 完整卸载不会删除非 `sbwg*` 的用户 WireGuard 配置，也不会修改云安全组、外部防火墙或 NAT 映射。卸载前请自行备份需要保留的客户端信息和配置。
 
 ## 故障排查
@@ -288,12 +279,6 @@ sbox show
 
 ```bash
 journalctl -u sing-box -n 50 --no-pager
-```
-
-### 脚本托管的 Xray 启动失败
-
-```bash
-journalctl -u sbox-xray -n 50 --no-pager
 ```
 
 ### Realm 提示缺少 `GLIBC_x.x`
@@ -343,24 +328,20 @@ sbox repair-install
 ```bash
 # Debian / Ubuntu
 sudo apt update
-sudo apt install curl jq openssl ca-certificates git tar gzip unzip iproute2 iptables util-linux
+sudo apt install curl jq openssl ca-certificates git tar gzip iproute2 iptables util-linux
 
 # RHEL / CentOS
-sudo yum install curl jq openssl ca-certificates git tar gzip unzip iproute iptables util-linux
+sudo yum install curl jq openssl ca-certificates git tar gzip iproute iptables util-linux
 
 # Alpine Linux
-apk add --no-cache bash curl jq openssl ca-certificates git tar gzip unzip openrc coreutils findutils iproute2 iptables iptables-openrc su-exec libcap-setcap
+apk add --no-cache bash curl jq openssl ca-certificates git tar gzip openrc coreutils findutils iproute2 iptables iptables-openrc su-exec libcap-setcap
 ```
 
 ### `sing-box` 软件包安装失败
 
 - 安装/修复时从 `sing-box` 与 `sing-box-oldstable` 的可用软件包中选择补丁号最高的 **1.13.x 稳定版**，排除 alpha、beta、rc 等预发布版本，并指定完整软件包版本安装。没有合适版本就报错，不自动改装 1.14 或其他系列；软件源可能晚于官方 Release 更新，Alpine 仍优先使用当前发行版的软件源。
-- 已有高于 1.13 的内核不会被自动降级。“代理节点管理”中的补充 V2Ray API 功能和 `sbox enable-v2ray-api` 不受安装选版限制，始终按已有内核的原版本补充 API。
-- 安装软件包后若缺少 `with_v2ray_api`，自动在 VPS 上重编译该版本；已有内核可执行 `sbox enable-v2ray-api` 或进入“代理节点管理”选择 **9**，不经过软件包安装/升级流程。已有此标签时直接跳过，无需 GitHub Actions 或预先发布内核。
-- 编译优先固定原 `Revision`，无 revision 时使用当前版本的官方 tag；保留原有全部标签、CGO 设置与 Go 版本，只追加 `with_v2ray_api`。无法取得对应源码或工具链时明确失败，不改用最新版，也不删减功能。自动下载的 Go SDK 会校验官方 SHA-256，不覆盖系统 Go。
-- 当前本机编译支持 amd64/arm64；含 Naive 且未使用 purego 的原内核还需下载对应 Chromium 工具链，并要求 amd64/glibc 构建主机（此类内核暂不能在 Alpine 或 ARM 主机本机编译）。大体积编译工作区默认放在 `/var/tmp`（不可用时回退到 `/tmp`）；编译前自动检查至少 2 GiB 可用空间、65536 个可用 inode，并以 `sbox-runtime` 身份实际预留后释放 2 GiB，以识别普通 `df` 看不到的用户、容器或项目配额。任一检测不满足就提示配置不足并停止，建议实际预留 4 GiB。可用 `SBOX_BUILD_TMP_DIR=/mnt/data/tmp sbox enable-v2ray-api` 指向具有独立容量/配额的本地文件系统；仅在同一文件系统内新建 `/tmp` 或 `/var/tmp` 子目录不会增加配额。编译期间原服务继续运行，结束后自动删除工作区。
-- 新内核通过版本、revision、全部标签、V2Ray API 和现有配置检查后才替换，运行中的服务会短暂重启；启动失败会回退。原内核备份保留在 `/etc/sing-box-manager/backups/sing-box-before-v2ray-api-*.bin`。不修改 Agent、节点、客户端或 API 配置；启用 API 监听仍由后续配置完成。
-- 1.13 选版限制仅作用于本脚本的安装流程；系统包管理器单独升级仍遵循系统的软件源策略，也可能覆盖自编译内核。之后执行 `sbox enable-v2ray-api` 可按升级后的当前版本重新补齐。
+- 已有高于 1.13 的内核不会被自动降级；脚本不会为了追加功能标签在 VPS 上重编译内核。
+- 安装完成后直接使用软件源提供的官方软件包，不下载 Go 工具链或 sing-box 源码，也不需要额外预留编译空间。
 - Alpine 会先使用当前已配置的软件源，再显式尝试当前版本的官方 `community` 仓库；旧稳定版没有该软件包时，最后尝试由 `apk` 验签的官方 `edge/community` 软件包
 - Debian / Ubuntu 请检查错误上方的 `apt-get update` 输出，以及 `https://sing-box.app/gpg.key`、`https://deb.sagernet.org/` 是否可访问
 - RHEL / CentOS 请检查错误上方的 DNF/YUM 输出，以及 `https://sing-box.app/sing-box.repo` 是否可访问
@@ -373,7 +354,7 @@ apk add --no-cache bash curl jq openssl ca-certificates git tar gzip unzip openr
 - 对外分享客户端配置前，请确认端口、域名、证书和密码都已按预期生成
 - Shadowsocks、VLESS 和 Hysteria2 入站都依赖各自的认证信息，请妥善保管客户端配置
 - 私网、链路本地地址和元数据阻断应用于 Shadowsocks、VLESS 与 Hysteria2 全部代理入站
-- 客户端订阅、状态、备份和私钥使用最小文件权限；sing-box、脚本托管的 Xray 与 Realm 使用 `sbox-runtime` 低权限用户运行
+- 客户端订阅、状态、备份和私钥使用最小文件权限；sing-box 与 Realm 使用 `sbox-runtime` 低权限用户运行
 - “更新脚本”无需手动输入哈希：脚本会固定校验 GitHub 仓库数字 ID，将 `main` 解析为不可变 commit，并核对提交身份、Git blob 哈希、SHA-256 与 Bash 语法；任一失败都不会覆盖当前脚本
 - “一键常用脚本”运行的是未固定版本的第三方代码，并以当前 root 权限执行；语法检查不等于代码安全审计，使用前请确认来源可信
 - 自动校验无法抵御 GitHub 所有者账号本身被完全接管；请为仓库所有者账号启用双重验证或 Passkey，并妥善保管访问令牌

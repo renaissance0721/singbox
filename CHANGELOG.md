@@ -4,17 +4,15 @@
 
 ## [Unreleased]
 
-- Xray 首次安装固定为官方稳定版 `v26.3.27`，不再随 GitHub `latest` 漂移；主菜单与节点管理中的 sing-box 安装状态会同时显示实际内核版本。
+- 移除 Xray-core 下载、配置、服务和双核心切换；VLESS + Reality 固定使用 sing-box，旧状态中的核心选择和运行记录会在迁移时清理。
 - 移除 SOCKS5 / Shadowsocks 分流落地、关键词/域名/GeoSite/SRS 规则管理及全部兼容命令；升级时清理状态文件中的旧 `routing.split` 和 `routing.ai` 数据。
 - 主菜单第 1 项改为“初始化环境”，只安装通用依赖和创建管理状态，不再安装或操作 sing-box；Shadowsocks、Hysteria2 及选择 sing-box 内核的 VLESS 改为在新建节点时按需询问安装。
 - Realm 支持在未初始化管理环境时从主菜单或 `sbox realm` 直接按需安装基础依赖，且 `repair-install` 在纯 Realm 环境中不再强制安装 sing-box 或重载代理配置。
 - Realm 新建单端口和端口段规则时必填名称，所有规则列表统一显示名称和转发地址；第 5 项调整为“修改配置”，支持旧规则补名、已有规则改名及切换转发链路，单独改名无需重启服务。
-- 修复本机补充 `with_v2ray_api` 时把 Go SDK、模块和编译缓存全部写入容量受限的 `/tmp`，导致 Alpine 上出现 `disk quota exceeded` 及连锁标准库缺失报错：编译工作区改用 `/var/tmp`、检查可用空间和 inode，并以低权限构建用户实际预留 2 GiB 来识别 `df` 不可见的用户/容器/项目配额；配置不足时在下载编译前明确停止。解压后删除 SDK 压缩包，并支持通过 `SBOX_BUILD_TMP_DIR` 指定具有独立配额的大容量目录。
-- 节点管理新增第 8 项“设置禁止访问 CN IP”，默认关闭并持久保存；支持 sing-box / Xray 的中国大陆目标 IPv4/IPv6 阻断，保留国内客户端入站连接，不影响纯 Realm / WireGuard 中转。
-- 开启 CN IP 限制时，在转发前解析并检查目标，保留原有私网和云元数据防护；sing-box 复用远程规则缓存和每日更新，Xray 使用现有 `geoip.dat`，应用失败沿用状态及运行配置回滚流程。
-- 默认安装限定为软件源中可用的最新 sing-box 1.13 系列稳定版，兼容 `sing-box-oldstable` 软件包，排除预发布版并避免自动跨到 1.14；补充 V2Ray API 仍保留原内核版本，已有更高系列不会被隐式降级。
-- 新增“代理节点管理”第 9 项和 `sbox enable-v2ray-api`：在本机按当前版本重编译 sing-box，保留原标签并补充 `with_v2ray_api`，不升级内核；安装时也自动补齐，替换前预检并保留原内核备份，移除独立的 GitHub 内核构建工作流。
-- 节点管理在已搭建 VLESS + Reality 时新增独立的核心类型显示，明确标注 `xray` 或 `sing-box`；未启用 VLESS 时隐藏该行，旧状态默认识别为 `sing-box`。
+- 移除 sing-box 本机重编译与额外功能标签补丁流程；安装及已有核心直接使用发行版软件包，不再下载 Go 工具链和源码，也不再要求额外编译空间。
+- 节点管理新增第 8 项“设置禁止访问 CN IP”，默认关闭并持久保存；支持 sing-box 的中国大陆目标 IPv4/IPv6 阻断，保留国内客户端入站连接，不影响纯 Realm / WireGuard 中转。
+- 开启 CN IP 限制时，在转发前解析并检查目标，保留原有私网和云元数据防护；sing-box 复用远程规则缓存和每日更新，应用失败沿用状态及运行配置回滚流程。
+- 默认安装限定为软件源中可用的最新 sing-box 1.13 系列稳定版，兼容 `sing-box-oldstable` 软件包，排除预发布版并避免自动跨到 1.14；已有更高系列不会被隐式降级。
 - 修复旧版 glibc 系统安装新版 Realm 后因缺少 `GLIBC_2.32` 至 `GLIBC_2.38` 而无法启动：Linux 统一使用经 GitHub SHA-256 校验并通过本机自检的便携 musl 构建；进入 Realm 菜单或执行 `repair-install` 时会自动替换已识别的不兼容二进制并保留规则。
 - 修复 Alpine 未启用 `community` 或旧稳定版尚未收录 sing-box 时的安装失败：依次尝试当前版本与 `edge/community` 的 Alpine 官方签名软件包，并继续拒绝未校验脚本或二进制后备安装。
 - VLESS + Reality 创建流程新增地区化 SNI 预设：美西、香港、日本使用对应候选域名，其他地区继续默认 `www.tesla.com`；日本提供两个候选项，已有节点可保持当前 SNI，选定后仍允许手动修改。
@@ -26,8 +24,6 @@
 
 ### 新增
 
-- VLESS + Reality 新增 Xray-core / sing-box 内核选择；Xray 首次选用时按架构下载固定的官方稳定版 `v26.3.27`，两个内核共用端口、用户、Reality 参数和分享链接
-- 新增脚本隔离的 `sbox-xray` systemd/OpenRC 服务、Xray 配置渲染、日志/状态展示及旧 VLESS 状态自动迁移
 - 节点管理新增出站 IPv4 / IPv6 策略设置，支持 IPv4 优先、IPv6 优先、禁用 IPv4、禁用 IPv6 及跟随系统，并在应用失败时自动恢复原设置
 - 新建节点时分别探测公网 IPv4 与 IPv6；检测到双栈网络后自动启用双栈监听，客户端仅生成一个主地址链接，不再额外生成 IPv6 节点
 - 主菜单新增“一键常用脚本”，可直接运行 NodeQuality、TcpQuality、Tcpfit、流媒体解锁和 IP 质量体检
@@ -39,9 +35,7 @@
 ### 变更
 
 - Realm 单端口和端口段转发允许手动监听 `1-65535` 范围内的任意 TCP 端口，随机推荐端口仍保持在 `10000-60000`
-- Xray 只承载选择 Xray 内核的 VLESS；Shadowsocks/Hysteria2 仍由 sing-box 承载，两个服务可在不同端口共存
-- 配置应用改为分别预检 sing-box/Xray，统一停止托管服务检查端口，任一核心启动失败时恢复两份原配置和原服务状态
-- 管理脚本更新、客户端增删和配置重载不会隐式升级 Xray；已安装版本及二进制 SHA-256 会写入状态并在后续使用前核对
+- 配置应用会预检 sing-box、停止旧服务检查端口，并在新服务启动失败时恢复原配置和服务状态
 - 移除 Shadowsocks 来源 IP/CIDR 白名单及 WireGuard 配对联动；新建和已有 SS 节点均改为由端口管理统一控制防火墙放行
 - 手动关闭端口会持久覆盖节点自动放行并创建明确拒绝规则；重新应用配置或重启后不会自动重新开放
 - 旧 Realm 规则自动迁移为 `direct`，不会因升级改变原转发路径
@@ -50,7 +44,6 @@
 
 ### 修复
 
-- Xray 配置预检改用私有临时目录中的 `config.json`，修复 Xray 26.3.27 无法从无扩展名临时文件识别配置格式的问题
 - Debian/Ubuntu 与 RHEL 系列显式安装提供 `runuser` 的 `util-linux`；节点配置检查会自动补装缺失的低权限执行工具，并能识别不在原始 `PATH` 中的 `/usr/sbin/runuser` 或 `/sbin/su-exec`
 - OpenRC 服务准备阶段自动补装并定位 `setcap`，不再因绕过初始化安装流程而阻止新建 sing-box 节点
 - Alpine 初始化依赖补充 `iptables-openrc`；节点应用时会自动补装缺失的 iptables/OpenRC 持久化组件和 `ss` 端口检查工具，不再要求先手动执行 `repair-install`
@@ -63,8 +56,6 @@
 
 ### 安全
 
-- Xray 下载仅接受 XTLS 官方 `v26.3.27` Release 的非 draft/非 prerelease 固定命名资产，要求标签匹配且官方 `.dgst` SHA-256 校验通过，并在隔离目录安装，绝不执行远程安装脚本或覆盖系统已有 Xray
-- Xray 以 `sbox-runtime` 低权限用户和最小 systemd/OpenRC 权限运行；完整卸载只删除脚本托管的 `sbox-xray` 组件，不触碰 `/usr/local/bin/xray` 或用户已有 `xray.service`
 - VLESS、Hysteria2 与 Shadowsocks 统一阻断本机、私网、链路本地和云元数据目标，并在域名解析后再次检查
 - sing-box 与 Realm 改由无登录权限的 `sbox-runtime` 用户运行，systemd 服务增加最小权限沙箱，OpenRC 使用最小文件能力兼容低端口
 - 状态、客户端订阅、备份和密钥目录强制使用最小权限

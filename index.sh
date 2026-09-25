@@ -37,14 +37,6 @@ BACKUP_DIR="${BACKUP_DIR:-$STATE_DIR/backups}"
 CLIENT_DIR="${CLIENT_DIR:-$STATE_DIR/clients}"
 CERT_DIR="${CERT_DIR:-$STATE_DIR/certs}"
 CONFIG_FILE="${CONFIG_FILE:-/etc/sing-box/config.json}"
-XRAY_INSTALL_DIR="${XRAY_INSTALL_DIR:-/usr/local/lib/sbox-xray}"
-XRAY_BIN="${XRAY_BIN:-$XRAY_INSTALL_DIR/xray}"
-XRAY_ASSET_DIR="${XRAY_ASSET_DIR:-$XRAY_INSTALL_DIR/assets}"
-XRAY_MANAGED_MARKER="${XRAY_MANAGED_MARKER:-$XRAY_INSTALL_DIR/.managed-by-sbox}"
-XRAY_CONFIG_FILE="${XRAY_CONFIG_FILE:-$STATE_DIR/xray/config.json}"
-XRAY_SYSTEMD_SERVICE_FILE="${XRAY_SYSTEMD_SERVICE_FILE:-/etc/systemd/system/sbox-xray.service}"
-XRAY_OPENRC_SERVICE_FILE="${XRAY_OPENRC_SERVICE_FILE:-/etc/init.d/sbox-xray}"
-XRAY_OPENRC_LOG_FILE="${XRAY_OPENRC_LOG_FILE:-/var/log/sbox-xray.log}"
 SING_BOX_OPENRC_SERVICE_FILE="${SING_BOX_OPENRC_SERVICE_FILE:-/etc/init.d/sing-box}"
 SING_BOX_OPENRC_LOG_FILE="${SING_BOX_OPENRC_LOG_FILE:-/var/log/sing-box.log}"
 REALM_DIR="${REALM_DIR:-/etc/realm}"
@@ -63,14 +55,11 @@ IPTABLES_MIGRATION_MARKER="${IPTABLES_MIGRATION_MARKER:-$STATE_DIR/iptables-comm
 IPTABLES_RULE_COMMENT="${IPTABLES_RULE_COMMENT:-sbox-managed}"
 FIREWALL_SYSTEMD_SERVICE_FILE="${FIREWALL_SYSTEMD_SERVICE_FILE:-/etc/systemd/system/sbox-firewall.service}"
 SING_BOX_FIREWALL_DROPIN_DIR="${SING_BOX_FIREWALL_DROPIN_DIR:-/etc/systemd/system/sing-box.service.d}"
-XRAY_FIREWALL_DROPIN_DIR="${XRAY_FIREWALL_DROPIN_DIR:-/etc/systemd/system/sbox-xray.service.d}"
 REALM_FIREWALL_DROPIN_DIR="${REALM_FIREWALL_DROPIN_DIR:-/etc/systemd/system/realm.service.d}"
 SING_BOX_HARDENING_DROPIN_FILE="${SING_BOX_HARDENING_DROPIN_FILE:-$SING_BOX_FIREWALL_DROPIN_DIR/20-sbox-hardening.conf}"
 RUNTIME_USER="${RUNTIME_USER:-sbox-runtime}"
 RUNTIME_GROUP="${RUNTIME_GROUP:-sbox-runtime}"
 SAGERNET_GPG_FINGERPRINT="2C317FBD5D886B4E89BAE8DA6D9152172A2B2F0C"
-XRAY_PINNED_VERSION="26.3.27"
-XRAY_PINNED_TAG="v${XRAY_PINNED_VERSION}"
 MANAGER_SCRIPT_PATH="${MANAGER_SCRIPT_PATH:-/usr/local/bin/sbox}"
 PROJECT_INSTALL_DIR="${PROJECT_INSTALL_DIR:-/usr/local/share/sbox}"
 SCRIPT_REPO_OWNER="renaissance0721"
@@ -79,9 +68,6 @@ SCRIPT_REPO_BRANCH="main"
 SCRIPT_REPO_ID="1210354428"
 SCRIPT_REPO_OWNER_ID="197479185"
 TMP_DIR="${TMP_DIR:-/tmp}"
-SBOX_BUILD_TMP_DIR="${SBOX_BUILD_TMP_DIR:-}"
-SING_BOX_BUILD_MIN_FREE_KIB=2097152
-SING_BOX_BUILD_MIN_FREE_INODES=65536
 SSHD_CONFIG_FILE="${SSHD_CONFIG_FILE:-/etc/ssh/sshd_config}"
 
 PKG_MANAGER=""
@@ -236,12 +222,12 @@ utc_now() {
 }
 
 ensure_dirs() {
-  install -d -m 0750 "$STATE_DIR" "$CERT_DIR" "$(dirname "$CONFIG_FILE")" "$(dirname "$XRAY_CONFIG_FILE")"
+  install -d -m 0750 "$STATE_DIR" "$CERT_DIR" "$(dirname "$CONFIG_FILE")"
   install -d -m 0700 "$BACKUP_DIR" "$CLIENT_DIR"
   install -d -m 0700 "$CLIENT_DIR/shadowsocks" "$CLIENT_DIR/vless-reality" "$CLIENT_DIR/hysteria2"
 
   if runtime_account_exists; then
-    chown root:"$RUNTIME_GROUP" "$STATE_DIR" "$CERT_DIR" "$(dirname "$CONFIG_FILE")" "$(dirname "$XRAY_CONFIG_FILE")"
+    chown root:"$RUNTIME_GROUP" "$STATE_DIR" "$CERT_DIR" "$(dirname "$CONFIG_FILE")"
   fi
 }
 
@@ -813,7 +799,7 @@ install_dependencies() {
 
     case "$PKG_MANAGER" in
       apk)
-      apk add --no-cache bash curl jq openssl ca-certificates tar gzip unzip openrc coreutils findutils iptables iptables-openrc iproute2 su-exec libcap-setcap
+      apk add --no-cache bash curl jq openssl ca-certificates tar gzip openrc coreutils findutils iptables iptables-openrc iproute2 su-exec libcap-setcap
       ;;
     apt)
       export DEBIAN_FRONTEND=noninteractive
@@ -823,17 +809,17 @@ install_dependencies() {
       install -d -m 0755 /etc/apt/keyrings || die "无法修复 APT 密钥目录权限。"
       normalize_debian_apt_sources || warn "Debian apt 源自动修复失败，将继续尝试 apt-get update。"
       apt-get update -y
-      apt-get install -y curl jq openssl ca-certificates tar gzip unzip iproute2 iptables gnupg util-linux
+      apt-get install -y curl jq openssl ca-certificates tar gzip iproute2 iptables gnupg util-linux
       ;;
     dnf)
-      dnf install -y curl jq openssl ca-certificates tar gzip unzip iproute iptables gnupg2 util-linux
+      dnf install -y curl jq openssl ca-certificates tar gzip iproute iptables gnupg2 util-linux
       ;;
     yum)
       yum install -y epel-release || true
-      yum install -y curl jq openssl ca-certificates tar gzip unzip iproute iptables gnupg2 util-linux
+      yum install -y curl jq openssl ca-certificates tar gzip iproute iptables gnupg2 util-linux
       ;;
     *)
-      die "暂不支持自动安装依赖，请手动安装 bash、curl、jq、openssl、ca-certificates、tar、gzip、unzip 后再运行。"
+      die "暂不支持自动安装依赖，请手动安装 bash、curl、jq、openssl、ca-certificates、tar、gzip 后再运行。"
       ;;
   esac
 }
@@ -1010,309 +996,6 @@ install_sing_box_rpm_repo() {
   return 1
 }
 
-sing_box_build_tmp_parent() {
-  local parent
-
-  if [[ -n "$SBOX_BUILD_TMP_DIR" ]]; then
-    parent="$SBOX_BUILD_TMP_DIR"
-  elif [[ "$TMP_DIR" != /tmp ]]; then
-    parent="$TMP_DIR"
-  else
-    parent=/var/tmp
-    if [[ ! -d "$parent" || ! -w "$parent" ]]; then
-      parent="$TMP_DIR"
-    fi
-  fi
-  [[ "$parent" == /* ]] || die "sing-box 编译目录必须是绝对路径：$parent"
-  [[ -d "$parent" && -w "$parent" ]] ||
-    die "sing-box 编译目录不存在或不可写：$parent。请先创建可用目录，或通过 SBOX_BUILD_TMP_DIR 指定。"
-  printf '%s\n' "$parent"
-}
-
-check_sing_box_build_space() {
-  local build=$1 available_kib available_mib inode_stats total_inodes available_inodes
-  available_kib="$(LC_ALL=C df -Pk "$build" 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ {print $4; exit}')"
-  if [[ ! "$available_kib" =~ ^[0-9]+$ ]]; then
-    warn "无法读取编译目录的可用空间：$build；将继续尝试编译。"
-  else
-    available_mib=$(( available_kib / 1024 ))
-    log "编译工作目录：$build（当前可用 ${available_mib} MiB）"
-    if (( available_kib < SING_BOX_BUILD_MIN_FREE_KIB )); then
-      die "编译环境不满足：sing-box 完整功能编译至少需要 2 GiB 可用空间，当前仅 ${available_mib} MiB，无法编译。请清理或扩容，或将 SBOX_BUILD_TMP_DIR 指向具有独立容量/配额的本地文件系统。"
-    fi
-    if (( available_kib < 4194304 )); then
-      warn "编译目录可用空间低于建议的 4 GiB；不同标签和工具链可能需要更多空间。"
-    fi
-  fi
-
-  inode_stats="$(LC_ALL=C df -Pki "$build" 2>/dev/null | awk 'NR == 2 && $2 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {print $2, $4; exit}')"
-  read -r total_inodes available_inodes <<<"$inode_stats"
-  if [[ ! "$total_inodes" =~ ^[0-9]+$ || ! "$available_inodes" =~ ^[0-9]+$ || "$total_inodes" == 0 ]]; then
-    warn "无法读取编译目录的可用 inode 数；稍后仍会执行实际配额检测。"
-  elif (( available_inodes < SING_BOX_BUILD_MIN_FREE_INODES )); then
-    die "编译环境不满足：编译目录至少需要 ${SING_BOX_BUILD_MIN_FREE_INODES} 个可用 inode，当前仅 ${available_inodes} 个，无法编译。请清理小文件、提高 inode 配额或改用其他文件系统。"
-  fi
-}
-
-probe_sing_box_build_quota() {
-  local build=$1 result=0 probe_bytes=$(( SING_BOX_BUILD_MIN_FREE_KIB * 1024 ))
-
-  # df may report the host filesystem's free space instead of a container,
-  # project, or per-user quota. Reserve and immediately release the minimum
-  # space as the actual unprivileged builder so EDQUOT is caught up front.
-  run_as_runtime python3 - "$build/.sbox-capacity-probe" "$probe_bytes" <<'PY' || result=$?
-import errno
-import os
-import sys
-
-path = sys.argv[1]
-size = int(sys.argv[2])
-fd = None
-status = 0
-try:
-    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    os.posix_fallocate(fd, 0, size)
-except OSError as error:
-    if error.errno in (errno.EDQUOT, errno.ENOSPC, errno.EFBIG):
-        status = 73
-    elif error.errno in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
-        status = 74
-    else:
-        status = 75
-except (AttributeError, ValueError):
-    status = 74
-finally:
-    if fd is not None:
-        os.close(fd)
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        pass
-    except OSError:
-        status = 75
-sys.exit(status)
-PY
-
-  case "$result" in
-    0)
-      log "实际磁盘/用户/容器配额检测通过（可预留至少 2 GiB）。"
-      ;;
-    73)
-      die "编译环境不满足：sbox-runtime 用户或当前容器/文件系统无法实际预留 2 GiB，磁盘容量、inode 或配额不足，无法编译。仅改用 /tmp 或 /var/tmp 的其他子目录无效；请扩容或挂载具有独立配额的文件系统。"
-      ;;
-    74)
-      die "当前文件系统不支持可靠的容量预留检测，无法确认是否满足编译要求；为避免编译途中耗尽配额，已停止编译。请将 SBOX_BUILD_TMP_DIR 指向支持 fallocate 的本地文件系统。"
-      ;;
-    *)
-      die "无法以 sbox-runtime 用户完成编译容量检测，已停止编译；请检查编译目录权限和文件系统状态。"
-      ;;
-  esac
-}
-
-build_sing_box_v2ray_api() (
-  local build=$1 original=$2 version_text=$3 tags=$4
-  local version revision go_version arch sdk_file digest build_info cgo ref commit ldflags=""
-  local cronet_ref libc=glibc key value needs_naive=false
-  local -a build_env=() cgo_env=()
-  version="$(awk '/^sing-box version / {print $3; exit}' <<<"$version_text")"
-  revision="$(sed -n 's/^Revision: //p' <<<"$version_text")"
-  go_version="$(awk '/^Environment: / {print $2; exit}' <<<"$version_text")"
-  arch="$(awk '/^Environment: / {sub(/^linux\//, "", $3); print $3; exit}' <<<"$version_text")"
-  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+.][0-9A-Za-z.-]+)?$ &&
-     "$go_version" =~ ^go[0-9]+\.[0-9]+(\.[0-9]+)?$ &&
-     ( "$arch" == amd64 || "$arch" == arm64 ) &&
-     ( -z "$revision" || "$revision" =~ ^[0-9a-f]{40}$ ) ]] ||
-    die "无法确定原内核的版本/Go 工具链，或架构不是 amd64/arm64；未替换内核。"
-  if [[ ",$tags," == *,with_naive_outbound,* && ",$tags," != *,with_purego,* ]]; then
-    needs_naive=true
-    if [[ "$arch" != amd64 ]] || ! getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
-      die "Naive 的上游编译工具链需要 amd64/glibc 构建主机；当前系统不能直接编译，原内核保持不变。"
-    fi
-  fi
-  check_sing_box_build_space "$build"
-
-  detect_pkg_manager
-  log "安装本机编译依赖（不会安装或升级 sing-box 软件包）..."
-  case "$PKG_MANAGER" in
-    apt)
-      repair_dpkg_state || return 1
-      apt-get update -y || return 1
-      DEBIAN_FRONTEND=noninteractive apt-get install -y git curl jq ca-certificates tar gzip unzip xz-utils python3 build-essential gnupg || return 1
-      if [[ "$needs_naive" == true ]]; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y python3-requests file || return 1
-      fi
-      ;;
-    dnf|yum)
-      "$PKG_MANAGER" install -y git curl jq ca-certificates tar gzip unzip xz python3 gcc gcc-c++ make gnupg2 || return 1
-      if [[ "$needs_naive" == true ]]; then
-        "$PKG_MANAGER" install -y python3-requests dpkg file which || return 1
-      fi
-      ;;
-    apk)
-      apk add --no-cache git curl jq ca-certificates tar gzip xz python3 build-base gnupg || return 1
-      ;;
-    *) die "无法自动安装编译依赖，未替换内核。" ;;
-  esac
-  probe_sing_box_build_quota "$build"
-
-  # Use a private SDK matching the original binary, without changing system Go.
-  sdk_file="${go_version}.linux-${arch}.tar.gz"
-  download_to_file "$build/go-releases.json" 'https://go.dev/dl/?mode=json&include=all' || return 1
-  digest="$(jq -er --arg file "$sdk_file" '.[] | .files[] | select(.filename == $file) | .sha256' "$build/go-releases.json")" ||
-    die "找不到原内核使用的 ${go_version} 官方工具链，未替换内核。"
-  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
-  download_to_file "$build/go.tar.gz" "https://go.dev/dl/$sdk_file" || return 1
-  [[ "$(sha256_file "$build/go.tar.gz")" == "$digest" ]] || die "Go 工具链 SHA-256 校验失败。"
-  chmod 0644 "$build/go.tar.gz" || return 1
-  run_as_runtime tar -xzf "$build/go.tar.gz" -C "$build" || return 1
-  rm -f "$build/go.tar.gz" "$build/go-releases.json" || return 1
-  build_env=(env -i "PATH=$build/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    "GOPATH=$build/gopath" "GOCACHE=$build/cache" "TMPDIR=$build" "GOTOOLCHAIN=local"
-    "GOMAXPROCS=2" "GOFLAGS=-p=1" "GIT_CONFIG_NOSYSTEM=1" "GIT_CONFIG_GLOBAL=/dev/null"
-    "GNUPGHOME=$build/gnupg")
-  build_info="$(run_as_runtime "${build_env[@]}" go version -m "$original")" || return 1
-  if grep -Eq 'vcs.modified=true|^[[:space:]]*=>' <<<"$build_info"; then
-    die "原内核包含本地源码修改或模块替换，不能安全重现；未替换内核。"
-  fi
-  cgo="$(sed -n 's/^[[:space:]]*build[[:space:]]*CGO_ENABLED=//p' <<<"$build_info")"
-  [[ "$cgo" == 0 || "$cgo" == 1 ]] || die "无法识别原内核的 CGO 设置，未替换内核。"
-  cgo_env=("CGO_ENABLED=$cgo" "GOOS=linux" "GOARCH=$arch")
-  while IFS='=' read -r key value; do
-    case "$key" in
-      GOAMD64|GOARM64|GOEXPERIMENT) cgo_env+=("$key=$value") ;;
-    esac
-  done < <(sed -n 's/^[[:space:]]*build[[:space:]]*//p' <<<"$build_info")
-
-  ref="${revision:-refs/tags/v$version}"
-  log "下载原版本源码：${version}（${ref}），保留原标签并追加 with_v2ray_api..."
-  run_as_runtime "${build_env[@]}" git init -q "$build/source" || return 1
-  run_as_runtime "${build_env[@]}" git -C "$build/source" remote add origin https://github.com/SagerNet/sing-box.git || return 1
-  run_as_runtime "${build_env[@]}" git -C "$build/source" fetch --depth=1 origin "$ref" ||
-    die "无法取得原内核对应源码；不会改用最新版。"
-  run_as_runtime "${build_env[@]}" git -C "$build/source" checkout -q --detach FETCH_HEAD || return 1
-  commit="$(run_as_runtime "${build_env[@]}" git -C "$build/source" rev-parse HEAD)" || return 1
-  [[ -z "$revision" || "$commit" == "$revision" ]] || die "源码 revision 不匹配，未替换内核。"
-
-  # Naive with CGO needs the toolchain pinned by that sing-box source revision.
-  # Never drop Naive or change musl/purego tags just to make compilation succeed.
-  if [[ "$needs_naive" == true ]]; then
-    [[ "$cgo" == 1 ]] || die "原 Naive 内核的 CGO 设置异常，未替换。"
-    cronet_ref="$(tr -d '\r\n' <"$build/source/.github/CRONET_GO_VERSION")" || return 1
-    [[ "$cronet_ref" =~ ^[0-9a-f]{40}$ ]] || die "原版本缺少可识别的 Naive 工具链，未替换内核。"
-    [[ ",$tags," != *,with_musl,* ]] || libc=musl
-    log "准备原版本 Naive/${libc} 工具链，下载和编译可能较久..."
-    run_as_runtime "${build_env[@]}" git init -q "$build/cronet" || return 1
-    run_as_runtime "${build_env[@]}" git -C "$build/cronet" remote add origin https://github.com/SagerNet/cronet-go.git || return 1
-    run_as_runtime "${build_env[@]}" git -C "$build/cronet" sparse-checkout set --no-cone '/*' '!/lib' || return 1
-    run_as_runtime "${build_env[@]}" git -C "$build/cronet" fetch --depth=1 --filter=blob:none origin "$cronet_ref" || return 1
-    run_as_runtime "${build_env[@]}" git -C "$build/cronet" checkout -q --detach FETCH_HEAD || return 1
-    run_as_runtime "${build_env[@]}" git -C "$build/cronet" submodule update --init --recursive --depth=1 || return 1
-    cd "$build/cronet" || return 1
-    run_as_runtime mkdir -p "$build/gnupg" || return 1
-    run_as_runtime rm -f naiveproxy/src/build/linux/sysroot_scripts/keyring.gpg || return 1
-    run_as_runtime "${build_env[@]}" GPG_TTY=/dev/null bash naiveproxy/src/build/linux/sysroot_scripts/generate_keyring.sh || return 1
-    run_as_runtime "${build_env[@]}" go run ./cmd/build-naive --target="linux/$arch" --libc="$libc" download-toolchain || return 1
-    run_as_runtime "${build_env[@]}" go run ./cmd/build-naive --target="linux/$arch" --libc="$libc" env >"$build/cgo.env" || return 1
-    while IFS='=' read -r key value; do
-      case "$key" in
-        CC|CXX|CGO_LDFLAGS) cgo_env+=("$key=$value") ;;
-      esac
-    done <"$build/cgo.env"
-  fi
-
-  cd "$build/source" || return 1
-  [[ ! -f release/LDFLAGS ]] || ldflags="$(cat release/LDFLAGS)"
-  log "本机编译 sing-box ${version}，编译期间不停止现有服务..."
-  run_as_runtime "${build_env[@]}" "${cgo_env[@]}" go build -mod=readonly -trimpath -buildvcs=true \
-    -tags "$tags" -ldflags "$ldflags -X github.com/sagernet/sing-box/constant.Version=$version -s -w -buildid=" \
-    -o "$build/sing-box" ./cmd/sing-box || return 1
-)
-
-ensure_sing_box_v2ray_api() (
-  local bin work build_tmp_parent version_text tags new_text tag original_hash backup="" staged=""
-  local was_active=false replaced=false complete=false
-  local -a required_tags=()
-  bin="$(sing_box_check_bin)" || die "尚未安装 sing-box，请先安装内核。"
-  bin="$(readlink -f "$bin")" || return 1
-  version_text="$(run_as_runtime "$bin" version)" || die "现有内核无法运行，未进行修改。"
-  tags="$(sed -n 's/^Tags: *//p' <<<"$version_text" | tr ' ' ',')"
-  if [[ ",$tags," == *,with_v2ray_api,* ]]; then
-    log "当前 sing-box 已包含 with_v2ray_api，无需重新编译。"
-    return 0
-  fi
-  [[ -z "$tags" || "$tags" =~ ^[a-zA-Z0-9_.,]+$ ]] || die "无法识别原内核标签，未替换内核。"
-  tags="${tags:+$tags,}with_v2ray_api"
-  build_tmp_parent="$(sing_box_build_tmp_parent)" || return 1
-  work="$(mktemp -d "$build_tmp_parent/sbox-v2ray-core.XXXXXX")" || return 1
-  # shellcheck disable=SC2329
-  cleanup_v2ray_core() {
-    if [[ "$replaced" == true && "$complete" != true ]]; then
-      if install -m 0755 "$work/original" "$staged" && mv -f "$staged" "$bin"; then
-        if [[ "$(sing_box_service_manager)" == openrc ]]; then
-          ensure_openrc_low_port_capability "$bin" sing-box || true
-        fi
-        if [[ "$was_active" == true ]]; then
-          restart_sing_box || warn "旧内核已恢复，但服务未能启动，请检查日志。"
-        fi
-        warn "补充失败，已恢复原内核。"
-      else
-        warn "自动恢复失败，原内核备份位于：$backup"
-      fi
-    fi
-    [[ -z "$staged" ]] || rm -f "$staged"
-    rm -rf -- "$work"
-  }
-  trap cleanup_v2ray_core EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  chown root:"$RUNTIME_GROUP" "$work" || return 1
-  chmod 0750 "$work" || return 1
-  cp -p "$bin" "$work/original" || return 1
-  chown root:"$RUNTIME_GROUP" "$work/original" || return 1
-  chmod 0750 "$work/original" || return 1
-  original_hash="$(sha256_file "$work/original")" || return 1
-  install -d -o "$RUNTIME_USER" -g "$RUNTIME_GROUP" -m 0700 "$work/build" || return 1
-  build_sing_box_v2ray_api "$work/build" "$work/original" "$version_text" "$tags" ||
-    die "同版本内核编译失败，原内核保持不变。若上方出现 disk quota exceeded 或 no space left，请清理磁盘，或将 SBOX_BUILD_TMP_DIR 指向至少有 2 GiB（建议 4 GiB）可用空间的本地文件系统后重试。"
-  # Validate a root-owned candidate beside the installed binary (also keeps
-  # relative shared-library lookup working for existing purego installations).
-  staged="$(mktemp "$(dirname "$bin")/.sing-box.XXXXXX")" || return 1
-  install -m 0755 "$work/build/sing-box" "$staged" || return 1
-  new_text="$(run_as_runtime "$staged" version)" || die "编译出的内核无法运行，未替换。"
-  [[ "$(head -n 1 <<<"$new_text")" == "$(head -n 1 <<<"$version_text")" ]] || die "编译后的版本发生变化，未替换。"
-  if grep -q '^Revision: ' <<<"$version_text"; then
-    [[ "$(sed -n 's/^Revision: //p' <<<"$new_text")" == "$(sed -n 's/^Revision: //p' <<<"$version_text")" ]] ||
-      die "编译后的源码 revision 发生变化，未替换。"
-  fi
-  IFS=',' read -r -a required_tags <<<"$tags"
-  for tag in "${required_tags[@]}"; do
-    [[ ",$(sed -n 's/^Tags: *//p' <<<"$new_text" | tr ' ' ',')," == *",$tag,"* ]] ||
-      die "编译后的内核缺少标签 ${tag}，未替换。"
-  done
-  printf '%s\n' '{"experimental":{"v2ray_api":{"listen":"127.0.0.1:10086","stats":{"enabled":true}}}}' >"$work/v2ray-check.json" || return 1
-  chmod 0644 "$work/v2ray-check.json" || return 1
-  run_as_runtime "$staged" check -c "$work/v2ray-check.json" || die "V2Ray API 功能检查失败，未替换。"
-  if [[ -s "$CONFIG_FILE" ]]; then
-    run_as_runtime "$staged" check -c "$CONFIG_FILE" || die "新内核不兼容现有配置，未替换。"
-  fi
-  [[ "$(sha256_file "$bin")" == "$original_hash" ]] || die "编译期间原内核被其他进程修改，请重新执行；未覆盖。"
-  backup="$BACKUP_DIR/sing-box-before-v2ray-api-$(date +%Y%m%d-%H%M%S)-$$.bin"
-  install -m 0700 "$work/original" "$backup" || return 1
-  [[ "$(sing_box_service_active 2>/dev/null || true)" != active ]] || was_active=true
-  mv -f "$staged" "$bin" || return 1
-  replaced=true
-  if [[ "$(sing_box_service_manager)" == openrc ]]; then
-    ensure_openrc_low_port_capability "$bin" sing-box || return 1
-  fi
-  if [[ "$was_active" == true ]]; then
-    restart_sing_box || return 1
-    sleep 1
-    [[ "$(sing_box_service_active 2>/dev/null || true)" == active ]] || return 1
-  fi
-  complete=true
-  log "已为当前内核补充 with_v2ray_api，版本不变。原内核备份：$backup"
-)
-
 install_sing_box() {
   local installed=0 version_text=""
 
@@ -1320,7 +1003,7 @@ install_sing_box() {
     version_text="$(run_as_runtime sing-box version 2>/dev/null | head -n 1 || true)"
     if [[ "$version_text" =~ ^sing-box\ version\ ([0-9]+)\.([0-9]+)\. ]]; then
       if (( BASH_REMATCH[1] > 1 || (BASH_REMATCH[1] == 1 && BASH_REMATCH[2] > 13) )); then
-        die "当前内核高于 1.13 系列，为避免现有配置不兼容，不会自动降级。仅补充 API 请使用 sbox enable-v2ray-api。"
+        die "当前内核高于 1.13 系列，为避免现有配置不兼容，不会自动降级。"
       fi
     fi
   fi
@@ -1353,9 +1036,8 @@ install_sing_box() {
   have_cmd sing-box || die "安装完成后仍未找到 sing-box 命令。"
   version_text="$(run_as_runtime sing-box version 2>/dev/null | head -n 1 || true)"
   [[ "$version_text" =~ ^sing-box\ version\ 1\.13\.[0-9]+$ ]] ||
-    die "软件包安装后实际内核不是 1.13 稳定版，请检查 PATH 或软件包冲突；未继续编译或启用服务。"
+    die "软件包安装后实际内核不是 1.13 稳定版，请检查 PATH 或软件包冲突；未启用服务。"
   ensure_sing_box_service
-  ensure_sing_box_v2ray_api || die "无法安装带 with_v2ray_api 的 sing-box，安装未完成。"
   enable_sing_box_service
 
   version_text="$(run_as_runtime sing-box version 2>/dev/null | head -n 1 || true)"
@@ -1367,7 +1049,6 @@ ensure_sing_box_for_node() {
 
   if have_cmd sing-box; then
     ensure_sing_box_service || return 1
-    ensure_sing_box_v2ray_api || return 1
     return 0
   fi
 
@@ -1375,256 +1056,8 @@ ensure_sing_box_for_node() {
   install_sing_box
 }
 
-xray_release_arch() {
-  case "$(uname -m)" in
-    x86_64|amd64) printf '64\n' ;;
-    aarch64|arm64) printf 'arm64-v8a\n' ;;
-    armv7l|armv7) printf 'arm32-v7a\n' ;;
-    i386|i486|i586|i686) printf '32\n' ;;
-    *) return 1 ;;
-  esac
-}
-
-xray_version_text() {
-  [[ -x "$XRAY_BIN" ]] || return 1
-  "$XRAY_BIN" version 2>/dev/null | head -n 1
-}
-
-cleanup_xray_work_dir() {
-  local work_dir=${1:-}
-  [[ -n "$work_dir" ]] || return 0
-  case "$work_dir" in
-    "$TMP_DIR"/sbox-xray.*)
-      rm -rf -- "$work_dir"
-      ;;
-    *)
-      warn "拒绝清理不属于 Xray 安装流程的临时目录：$work_dir"
-      return 1
-      ;;
-  esac
-}
-
-record_xray_runtime() {
-  local version=$1 installed_at=${2:-} binary_sha256=${3:-}
-  [[ -s "$STATE_FILE" ]] || return 0
-  jq -e . "$STATE_FILE" >/dev/null 2>&1 || return 1
-  [[ -n "$installed_at" ]] || installed_at="$(state_get '.runtime.xray.installed_at // ""')"
-  [[ -n "$installed_at" ]] || installed_at="$(utc_now)"
-  [[ -n "$binary_sha256" ]] || binary_sha256="$(sha256_file "$XRAY_BIN" || true)"
-  [[ "$binary_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
-  state_jq --arg version "$version" --arg installed_at "$installed_at" --arg binary_sha256 "$binary_sha256" '
-    .runtime = (.runtime // {}) |
-    .runtime.xray = {
-      managed: true,
-      version: $version,
-      binary_sha256: $binary_sha256,
-      installed_at: $installed_at
-    }
-  '
-}
-
-install_xray_core() {
-  local arch asset_name api_file archive_file digest_file work_dir
-  local tag asset_url digest_url expected_digest actual_digest version_line version recorded_digest
-
-  [[ "$(sing_box_service_manager)" != "none" ]] || die "Xray 服务管理需要 systemd 或 OpenRC 环境。"
-  if xray_service_exists && [[ ! -f "$XRAY_MANAGED_MARKER" && "$(state_get '.runtime.xray.managed // false' 2>/dev/null || true)" != "true" ]]; then
-    die "检测到已有的 sbox-xray 服务但没有本脚本的托管记录。为避免覆盖用户服务，已拒绝安装。"
-  fi
-  if [[ ( -e "$XRAY_INSTALL_DIR" || -L "$XRAY_INSTALL_DIR" ) && ! -f "$XRAY_MANAGED_MARKER" && "$(state_get '.runtime.xray.managed // false' 2>/dev/null || true)" != "true" ]]; then
-    die "Xray 隔离安装目录已存在但不属于本脚本：$XRAY_INSTALL_DIR。为避免覆盖用户文件，已拒绝安装。"
-  fi
-
-  if [[ -x "$XRAY_BIN" ]]; then
-    if [[ ! -f "$XRAY_MANAGED_MARKER" && "$(state_get '.runtime.xray.managed // false' 2>/dev/null || true)" != "true" ]]; then
-      die "检测到未被本脚本认领的 Xray 文件：$XRAY_BIN。为避免覆盖用户文件，已拒绝接管。"
-    fi
-    actual_digest="$(sha256_file "$XRAY_BIN" || true)"
-    recorded_digest="$(state_get '.runtime.xray.binary_sha256 // ""' 2>/dev/null || true)"
-    if [[ -n "$recorded_digest" && "$recorded_digest" != "$actual_digest" ]]; then
-      die "脚本托管的 Xray 二进制摘要与安装记录不一致，已拒绝运行。请确认文件未被替换后再修复安装。"
-    fi
-    version_line="$(xray_version_text || true)"
-    [[ -n "$version_line" ]] || die "脚本托管的 Xray 二进制无法运行：$XRAY_BIN"
-    version="$(awk '{print $2; exit}' <<<"$version_line")"
-    record_xray_runtime "${version:-unknown}" "" "$actual_digest" || die "无法记录 Xray 安装状态。"
-    install -o root -g root -m 0644 /dev/null "$XRAY_MANAGED_MARKER"
-    ensure_xray_service || die "无法创建或修复 Xray 服务。"
-    log "Xray 已安装并保持当前版本：$version_line"
-    return 0
-  fi
-
-  if ! have_cmd unzip; then
-    detect_pkg_manager
-    case "$PKG_MANAGER" in
-      apk) apk add --no-cache unzip || die "安装 unzip 失败，无法安装 Xray。" ;;
-      apt)
-        export DEBIAN_FRONTEND=noninteractive
-        repair_dpkg_state || die "无法恢复 dpkg 状态，无法安装 unzip。"
-        if ! apt-get update -y || ! apt-get install -y unzip; then
-          die "安装 unzip 失败，无法安装 Xray。"
-        fi
-        ;;
-      dnf) dnf install -y unzip || die "安装 unzip 失败，无法安装 Xray。" ;;
-      yum) yum install -y unzip || die "安装 unzip 失败，无法安装 Xray。" ;;
-      *) die "缺少 unzip，无法安全解压 Xray 官方发布包。" ;;
-    esac
-  fi
-  arch="$(xray_release_arch)" || die "Xray 自动安装暂不支持当前架构：$(uname -m)"
-  asset_name="Xray-linux-${arch}.zip"
-  api_file="$(mktemp "$TMP_DIR/sbox-xray-release.XXXXXX")" || die "无法创建 Xray 发布信息临时文件。"
-  archive_file="$(mktemp "$TMP_DIR/sbox-xray-archive.XXXXXX")" || {
-    rm -f "$api_file"
-    die "无法创建 Xray 下载临时文件。"
-  }
-  digest_file="$(mktemp "$TMP_DIR/sbox-xray-digest.XXXXXX")" || {
-    rm -f "$api_file" "$archive_file"
-    die "无法创建 Xray 校验临时文件。"
-  }
-  work_dir="$(mktemp -d "$TMP_DIR/sbox-xray.XXXXXX")" || {
-    rm -f "$api_file" "$archive_file" "$digest_file"
-    die "无法创建 Xray 解压临时目录。"
-  }
-
-  log "获取 Xray ${XRAY_PINNED_TAG} 官方发布信息..."
-  download_to_file "$api_file" "https://api.github.com/repos/XTLS/Xray-core/releases/tags/${XRAY_PINNED_TAG}" || {
-    rm -f "$api_file" "$archive_file" "$digest_file"
-    cleanup_xray_work_dir "$work_dir"
-    die "无法获取 Xray ${XRAY_PINNED_TAG} 官方发布信息。"
-  }
-
-  tag="$(jq -r --arg expected_tag "$XRAY_PINNED_TAG" 'select(.draft == false and .prerelease == false and .tag_name == $expected_tag) | .tag_name // empty' "$api_file")"
-  [[ "$tag" == "$XRAY_PINNED_TAG" ]] || {
-    rm -f "$api_file" "$archive_file" "$digest_file"
-    cleanup_xray_work_dir "$work_dir"
-    die "Xray 发布信息无效、版本不匹配或不是稳定版，已拒绝安装。"
-  }
-  asset_url="$(jq -r --arg name "$asset_name" '.assets[]? | select(.name == $name) | .browser_download_url' "$api_file" | head -n 1)"
-  digest_url="$(jq -r --arg name "${asset_name}.dgst" '.assets[]? | select(.name == $name) | .browser_download_url' "$api_file" | head -n 1)"
-  [[ "$asset_url" == "https://github.com/XTLS/Xray-core/releases/download/${tag}/${asset_name}" ]] || {
-    rm -f "$api_file" "$archive_file" "$digest_file"
-    cleanup_xray_work_dir "$work_dir"
-    die "Xray 发布包下载地址不符合预期，已拒绝安装。"
-  }
-  [[ "$digest_url" == "${asset_url}.dgst" ]] || {
-    rm -f "$api_file" "$archive_file" "$digest_file"
-    cleanup_xray_work_dir "$work_dir"
-    die "Xray 发布包缺少官方摘要文件，已拒绝安装。"
-  }
-
-  log "下载 Xray ${tag} 官方发布包并校验 SHA-256..."
-  if ! download_to_file "$archive_file" "$asset_url" || ! download_to_file "$digest_file" "$digest_url"; then
-    rm -f "$api_file" "$archive_file" "$digest_file"
-    cleanup_xray_work_dir "$work_dir"
-    die "Xray 发布包或摘要文件下载失败。"
-  fi
-  expected_digest="$(awk -F '= ' '/256=/ {print tolower($2); exit}' "$digest_file" | tr -d '[:space:]')"
-  actual_digest="$(sha256_file "$archive_file" || true)"
-  if [[ ! "$expected_digest" =~ ^[0-9a-f]{64}$ || "$actual_digest" != "$expected_digest" ]]; then
-    rm -f "$api_file" "$archive_file" "$digest_file"
-    cleanup_xray_work_dir "$work_dir"
-    die "Xray 发布包 SHA-256 校验失败，已拒绝安装。"
-  fi
-
-  if ! unzip -q "$archive_file" xray geoip.dat geosite.dat -d "$work_dir"; then
-    rm -f "$api_file" "$archive_file" "$digest_file"
-    cleanup_xray_work_dir "$work_dir"
-    die "Xray 官方发布包解压失败。"
-  fi
-  if [[ ! -f "$work_dir/xray" || -L "$work_dir/xray" ||
-    ! -f "$work_dir/geoip.dat" || -L "$work_dir/geoip.dat" ||
-    ! -f "$work_dir/geosite.dat" || -L "$work_dir/geosite.dat" ]]; then
-    rm -f "$api_file" "$archive_file" "$digest_file"
-    cleanup_xray_work_dir "$work_dir"
-    die "Xray 发布包不包含有效的核心或资源文件。"
-  fi
-  chmod 0755 "$work_dir/xray"
-  version_line="$("$work_dir/xray" version 2>/dev/null | head -n 1 || true)"
-  if [[ -z "$version_line" ]]; then
-    rm -f "$api_file" "$archive_file" "$digest_file"
-    cleanup_xray_work_dir "$work_dir"
-    die "下载的 Xray 二进制自检失败，已拒绝安装。"
-  fi
-  version="$(awk '{print $2; exit}' <<<"$version_line")"
-  if [[ "$version" != "$XRAY_PINNED_VERSION" ]]; then
-    rm -f "$api_file" "$archive_file" "$digest_file"
-    cleanup_xray_work_dir "$work_dir"
-    die "下载的 Xray 二进制版本不是 ${XRAY_PINNED_VERSION}，已拒绝安装。"
-  fi
-
-  install -d -m 0755 "$XRAY_INSTALL_DIR" "$XRAY_ASSET_DIR"
-  install -o root -g root -m 0644 /dev/null "$XRAY_MANAGED_MARKER"
-  install -o root -g root -m 0644 "$work_dir/geoip.dat" "$XRAY_ASSET_DIR/geoip.dat"
-  install -o root -g root -m 0644 "$work_dir/geosite.dat" "$XRAY_ASSET_DIR/geosite.dat"
-  # Install the executable last. Its presence is the completion marker used by
-  # subsequent runs, so an interrupted asset copy is repaired by a new download.
-  install -o root -g root -m 0755 "$work_dir/xray" "$XRAY_BIN"
-  record_xray_runtime "$version" "$(utc_now)" "$(sha256_file "$XRAY_BIN")" || die "Xray 已安装，但无法记录版本状态。"
-
-  rm -f "$api_file" "$archive_file" "$digest_file"
-  cleanup_xray_work_dir "$work_dir"
-  ensure_xray_service || die "Xray 已安装，但服务创建失败。"
-  log "Xray 已按固定版本安装：$version_line"
-}
-
 has_systemd() {
   have_cmd systemctl && [[ -d /run/systemd/system ]]
-}
-
-xray_service_exists() {
-  case "$(sing_box_service_manager)" in
-    systemd)
-      systemctl cat sbox-xray >/dev/null 2>&1 || [[ -f "$XRAY_SYSTEMD_SERVICE_FILE" ]]
-      ;;
-    openrc)
-      [[ -x "$XRAY_OPENRC_SERVICE_FILE" ]]
-      ;;
-    *) return 1 ;;
-  esac
-}
-
-ensure_xray_service() {
-  local service_manager
-  [[ -x "$XRAY_BIN" ]] || return 1
-  ensure_runtime_account
-  ensure_dirs
-  service_manager="$(sing_box_service_manager)"
-  [[ "$service_manager" != "none" ]] || return 1
-
-  if [[ "$service_manager" == "systemd" ]]; then
-    cat >"$XRAY_SYSTEMD_SERVICE_FILE" <<EOF
-[Unit]
-Description=sbox managed Xray service
-Documentation=https://github.com/XTLS/Xray-core
-After=network-online.target nss-lookup.target sbox-firewall.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=${RUNTIME_USER}
-Group=${RUNTIME_GROUP}
-UMask=0077
-Environment=XRAY_LOCATION_ASSET=${XRAY_ASSET_DIR}
-ExecStart=${XRAY_BIN} run -config ${XRAY_CONFIG_FILE}
-Restart=on-failure
-RestartSec=5s
-LimitNOFILE=1048576
-$(render_systemd_common_hardening)
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload >/dev/null 2>&1 || return 1
-    return 0
-  fi
-
-  ensure_openrc_low_port_capability "$XRAY_BIN" "Xray"
-  write_openrc_service "$XRAY_OPENRC_SERVICE_FILE" "sbox-xray" "sbox managed Xray service" \
-    "$XRAY_BIN" "run -config ${XRAY_CONFIG_FILE}" "$XRAY_OPENRC_LOG_FILE" "" \
-    "export XRAY_LOCATION_ASSET=\"${XRAY_ASSET_DIR}\""
 }
 
 service_manager() {
@@ -1708,41 +1141,6 @@ managed_service_restart() {
     openrc) rc-service "$service_name" restart || rc-service "$service_name" start ;;
     *) return 1 ;;
   esac
-}
-
-enable_xray_service() {
-  managed_service_enable "$(sing_box_service_manager)" "sbox-xray"
-}
-
-disable_xray_service() {
-  managed_service_disable "$(sing_box_service_manager)" "sbox-xray"
-}
-
-xray_service_active() {
-  managed_service_active "$(sing_box_service_manager)" "sbox-xray"
-}
-
-xray_service_enabled() {
-  managed_service_enabled "$(sing_box_service_manager)" "sbox-xray"
-}
-
-xray_recent_logs() {
-  managed_service_recent_logs "$(sing_box_service_manager)" "sbox-xray" "$XRAY_OPENRC_LOG_FILE"
-}
-
-restart_xray() {
-  xray_service_exists || return 1
-  enable_xray_service
-  case "$(sing_box_service_manager)" in
-    systemd) systemctl restart sbox-xray ;;
-    openrc) rc-service sbox-xray restart >/dev/null 2>&1 || rc-service sbox-xray start >/dev/null 2>&1 ;;
-    *) return 1 ;;
-  esac
-}
-
-stop_xray() {
-  xray_service_exists || return 0
-  managed_service_stop "$(sing_box_service_manager)" "sbox-xray" >/dev/null 2>&1 || true
 }
 
 has_openrc() {
@@ -2263,23 +1661,12 @@ generate_base64_bytes() {
 }
 
 generate_reality_keypair() {
-  local core=${1:-sing-box} output private_key public_key
-  case "$core" in
-    xray)
-      [[ -x "$XRAY_BIN" ]] || die "Xray 尚未安装，无法生成 Reality 密钥对。"
-      output="$(run_as_runtime "$XRAY_BIN" x25519 2>/dev/null || true)"
-      private_key="$(printf '%s\n' "$output" | awk -F': ' '/PrivateKey/ {print $2; exit}')"
-      public_key="$(printf '%s\n' "$output" | awk -F': ' '/PublicKey|Password/ {print $2; exit}')"
-      ;;
-    sing-box)
-      output="$(run_as_runtime sing-box generate reality-keypair 2>/dev/null || true)"
-      private_key="$(printf '%s\n' "$output" | awk -F': ' '/PrivateKey/ {print $2; exit}')"
-      public_key="$(printf '%s\n' "$output" | awk -F': ' '/PublicKey/ {print $2; exit}')"
-      ;;
-    *) die "未知的 Reality 内核：$core" ;;
-  esac
+  local output private_key public_key
+  output="$(run_as_runtime sing-box generate reality-keypair 2>/dev/null || true)"
+  private_key="$(printf '%s\n' "$output" | awk -F': ' '/PrivateKey/ {print $2; exit}')"
+  public_key="$(printf '%s\n' "$output" | awk -F': ' '/PublicKey/ {print $2; exit}')"
 
-  [[ -n "$private_key" && -n "$public_key" ]] || die "无法使用 ${core} 生成 Reality 密钥对。"
+  [[ -n "$private_key" && -n "$public_key" ]] || die "无法使用 sing-box 生成 Reality 密钥对。"
 
   printf '%s\t%s\n' "$private_key" "$public_key"
 }
@@ -2330,7 +1717,6 @@ init_state_file() {
     },
     "vless_reality": {
       "enabled": false,
-      "core": "sing-box",
       "listen": "0.0.0.0",
       "port": $vless_default_port,
       "server_name": "www.tesla.com",
@@ -2357,14 +1743,6 @@ init_state_file() {
   },
   "routing": {
     "block_cn_ip": false
-  },
-  "runtime": {
-    "xray": {
-      "managed": false,
-      "version": "",
-      "binary_sha256": "",
-      "installed_at": ""
-    }
   }
 }
 EOF
@@ -2456,13 +1834,8 @@ cleanup_removed_traffic_state() {
     .meta.outbound_ip_preference = (.meta.outbound_ip_preference // "auto") |
     .routing.block_cn_ip = (.routing.block_cn_ip // false) |
     del(.routing.split, .routing.ai) |
-    .protocols.vless_reality.core = (.protocols.vless_reality.core // "sing-box") |
-    .runtime = (if ((.runtime // {}) | type) == "object" then .runtime else {} end) |
-    .runtime.xray = (if ((.runtime.xray // {}) | type) == "object" then .runtime.xray else {managed: false, version: "", binary_sha256: "", installed_at: ""} end) |
-    .runtime.xray.managed = (.runtime.xray.managed // false) |
-    .runtime.xray.version = (.runtime.xray.version // "") |
-    .runtime.xray.binary_sha256 = (.runtime.xray.binary_sha256 // "") |
-    .runtime.xray.installed_at = (.runtime.xray.installed_at // "") |
+    del(.protocols.vless_reality.core, .runtime.xray) |
+    if ((.runtime // {}) | length) == 0 then del(.runtime) else . end |
     del(.protocols.shadowsocks.allowed_sources) |
     .protocols.shadowsocks.users = ((.protocols.shadowsocks.users // []) | cleanup_users) |
     .protocols.vless_reality.users = ((.protocols.vless_reality.users // []) | cleanup_users) |
@@ -2986,7 +2359,7 @@ EOF
 validate_state() {
   local errors=""
   local ss_enabled vless_enabled hy2_enabled
-  local server_address server_address_ipv6 dual_stack outbound_ip_preference vless_server_name handshake_server vless_core
+  local server_address server_address_ipv6 dual_stack outbound_ip_preference vless_server_name handshake_server
   local vless_short_id
 
   ss_enabled="$(state_get '.protocols.shadowsocks.enabled')"
@@ -3019,7 +2392,6 @@ validate_state() {
   fi
 
   if [[ "$vless_enabled" == "true" ]]; then
-    vless_core="$(state_get '.protocols.vless_reality.core // "sing-box"')"
     vless_server_name="$(state_get '.protocols.vless_reality.server_name')"
     handshake_server="$(state_get '.protocols.vless_reality.handshake_server')"
     vless_short_id="$(state_get '.protocols.vless_reality.short_id')"
@@ -3031,7 +2403,6 @@ validate_state() {
     fi
     [[ -n "$vless_server_name" && "$vless_server_name" != "null" ]] || errors+=$'VLESS + Reality 的伪装域名不能为空。\n'
     [[ -n "$handshake_server" && "$handshake_server" != "null" ]] || errors+=$'VLESS + Reality 的握手站点不能为空。\n'
-    [[ "$vless_core" == "sing-box" || "$vless_core" == "xray" ]] || errors+=$'VLESS + Reality 内核必须是 sing-box 或 xray。\n'
     if [[ "$vless_server_name" == "$server_address" || "$handshake_server" == "$server_address" ]]; then
       errors+=$'VLESS + Reality 的伪装域名不能与节点对外地址相同，请填写第三方网站域名，例如 www.cloudflare.com。\n'
     fi
@@ -3057,13 +2428,10 @@ validate_state() {
 
 render_config() {
   jq --arg rule_set_cache_file "$RULE_SET_CACHE_FILE" '
-  def sing_box_vless_enabled:
-    .protocols.vless_reality.enabled
-    and ((.protocols.vless_reality.core // "sing-box") == "sing-box");
   def proxy_inbounds:
     [
       if .protocols.shadowsocks.enabled then "ss-in" else empty end,
-      if sing_box_vless_enabled then "vless-reality-in" else empty end,
+      if .protocols.vless_reality.enabled then "vless-reality-in" else empty end,
       if .protocols.hysteria2.enabled then "hy2-in" else empty end
     ];
   def block_cn_ip_enabled:
@@ -3136,7 +2504,7 @@ render_config() {
         end
       ),
       (
-        if sing_box_vless_enabled then
+        if .protocols.vless_reality.enabled then
           {
             type: "vless",
             tag: "vless-reality-in",
@@ -3239,131 +2607,8 @@ render_config() {
   }' "$STATE_FILE"
 }
 
-render_xray_config() {
-  jq '
-    def xray_log_level:
-      if .meta.log_level == "warn" then "warning"
-      elif .meta.log_level == "trace" then "debug"
-      else (.meta.log_level // "warning") end;
-    def xray_domain_strategy:
-      if .meta.outbound_ip_preference == "prefer_ipv4" then "UseIPv4v6"
-      elif .meta.outbound_ip_preference == "prefer_ipv6" then "UseIPv6v4"
-      elif .meta.outbound_ip_preference == "ipv4_only" then "ForceIPv4"
-      elif .meta.outbound_ip_preference == "ipv6_only" then "ForceIPv6"
-      else "AsIs" end;
-    {
-      log: {
-        loglevel: xray_log_level
-      },
-      inbounds: [
-        {
-          tag: "vless-reality-in",
-          listen: .protocols.vless_reality.listen,
-          port: .protocols.vless_reality.port,
-          protocol: "vless",
-          settings: {
-            clients: [
-              .protocols.vless_reality.users[] | {
-                id: .uuid,
-                email: .name,
-                flow: "xtls-rprx-vision"
-              }
-            ],
-            decryption: "none"
-          },
-          streamSettings: {
-            network: "raw",
-            security: "reality",
-            realitySettings: {
-              show: false,
-              target: (.protocols.vless_reality.handshake_server + ":" + (.protocols.vless_reality.handshake_port | tostring)),
-              xver: 0,
-              serverNames: [ .protocols.vless_reality.server_name ],
-              privateKey: .protocols.vless_reality.private_key,
-              shortIds: [ .protocols.vless_reality.short_id ]
-            }
-          }
-        }
-      ],
-      outbounds: [
-        {
-          tag: "direct",
-          protocol: "freedom",
-          settings: {
-            domainStrategy: xray_domain_strategy
-          }
-        },
-        {
-          tag: "block",
-          protocol: "blackhole",
-          settings: {}
-        }
-      ],
-      routing: {
-        domainStrategy: (if .routing.block_cn_ip == true then "IPOnDemand" else "IPIfNonMatch" end),
-        rules: [
-          {
-            type: "field",
-            inboundTag: ["vless-reality-in"],
-            ip: [
-              "10.0.0.0/8",
-              "100.64.0.0/10",
-              "127.0.0.0/8",
-              "169.254.0.0/16",
-              "172.16.0.0/12",
-              "192.168.0.0/16",
-              "::1/128",
-              "fc00::/7",
-              "fe80::/10",
-              "169.254.169.254/32",
-              "100.100.100.200/32",
-              "fd00:ec2::254/128"
-            ],
-            outboundTag: "block"
-          },
-          (
-            if .routing.block_cn_ip == true then
-              {
-                type: "field",
-                inboundTag: ["vless-reality-in"],
-                ip: ["geoip:cn"],
-                outboundTag: "block"
-              }
-            else empty end
-          )
-        ]
-      }
-    } + (
-      if .routing.block_cn_ip == true then
-        {
-          dns: {
-            servers: ["localhost"],
-            queryStrategy: (
-              if .meta.outbound_ip_preference == "ipv4_only" then "UseIPv4"
-              elif .meta.outbound_ip_preference == "ipv6_only" then "UseIPv6"
-              else "UseIP" end
-            )
-          }
-        }
-      else {} end
-    )
-  ' "$STATE_FILE"
-}
-
 enabled_protocol_count() {
   state_get '[.protocols[] | select(.enabled == true)] | length'
-}
-
-sing_box_protocol_count() {
-  state_get '[
-    .protocols.shadowsocks.enabled,
-    .protocols.hysteria2.enabled,
-    (.protocols.vless_reality.enabled and ((.protocols.vless_reality.core // "sing-box") == "sing-box"))
-  ] | map(select(. == true)) | length'
-}
-
-xray_protocol_enabled() {
-  [[ "$(state_get '.protocols.vless_reality.enabled and ((.protocols.vless_reality.core // "sing-box") == "xray")')" == "true" ]]
 }
 
 add_managed_iptables_rule() {
@@ -3591,12 +2836,12 @@ ensure_firewall_restore_service() {
   has_systemd || return 0
 
   mkdir -p "$(dirname "$FIREWALL_SYSTEMD_SERVICE_FILE")" \
-    "$SING_BOX_FIREWALL_DROPIN_DIR" "$XRAY_FIREWALL_DROPIN_DIR" "$REALM_FIREWALL_DROPIN_DIR"
+    "$SING_BOX_FIREWALL_DROPIN_DIR" "$REALM_FIREWALL_DROPIN_DIR"
   cat >"$FIREWALL_SYSTEMD_SERVICE_FILE" <<EOF
 [Unit]
 Description=Restore sbox managed firewall rules
 After=network-pre.target ufw.service firewalld.service
-Before=sing-box.service sbox-xray.service realm.service
+Before=sing-box.service realm.service
 Wants=network-pre.target
 
 [Service]
@@ -3609,12 +2854,6 @@ WantedBy=multi-user.target
 EOF
 
   cat >"$SING_BOX_FIREWALL_DROPIN_DIR/10-sbox-firewall.conf" <<'EOF'
-[Unit]
-Requires=sbox-firewall.service
-After=sbox-firewall.service
-EOF
-
-  cat >"$XRAY_FIREWALL_DROPIN_DIR/10-sbox-firewall.conf" <<'EOF'
 [Unit]
 Requires=sbox-firewall.service
 After=sbox-firewall.service
@@ -3657,9 +2896,8 @@ remove_firewall_restore_service() {
   systemctl disable --now sbox-firewall.service >/dev/null 2>&1 || true
   rm -f "$FIREWALL_SYSTEMD_SERVICE_FILE" \
     "$SING_BOX_FIREWALL_DROPIN_DIR/10-sbox-firewall.conf" \
-    "$XRAY_FIREWALL_DROPIN_DIR/10-sbox-firewall.conf" \
     "$REALM_FIREWALL_DROPIN_DIR/10-sbox-firewall.conf" 2>/dev/null || true
-  rmdir "$SING_BOX_FIREWALL_DROPIN_DIR" "$XRAY_FIREWALL_DROPIN_DIR" "$REALM_FIREWALL_DROPIN_DIR" 2>/dev/null || true
+  rmdir "$SING_BOX_FIREWALL_DROPIN_DIR" "$REALM_FIREWALL_DROPIN_DIR" 2>/dev/null || true
   systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
@@ -4125,22 +3363,13 @@ port_is_listening() {
 desired_sing_box_listeners() {
   jq -r '
     (if .protocols.shadowsocks.enabled then ["tcp", (.protocols.shadowsocks.port | tostring), "Shadowsocks"] | @tsv else empty end),
-    (if (.protocols.vless_reality.enabled and ((.protocols.vless_reality.core // "sing-box") == "sing-box")) then ["tcp", (.protocols.vless_reality.port | tostring), "VLESS + Reality (sing-box)"] | @tsv else empty end),
+    (if .protocols.vless_reality.enabled then ["tcp", (.protocols.vless_reality.port | tostring), "VLESS + Reality"] | @tsv else empty end),
     (if .protocols.hysteria2.enabled then ["udp", (.protocols.hysteria2.port | tostring), "Hysteria2"] | @tsv else empty end)
-  ' "$STATE_FILE"
-}
-
-desired_xray_listeners() {
-  jq -r '
-    if (.protocols.vless_reality.enabled and ((.protocols.vless_reality.core // "sing-box") == "xray")) then
-      ["tcp", (.protocols.vless_reality.port | tostring), "VLESS + Reality (Xray)"] | @tsv
-    else empty end
   ' "$STATE_FILE"
 }
 
 desired_managed_listeners() {
   desired_sing_box_listeners
-  desired_xray_listeners
 }
 
 validate_sing_box_listener_ports_available() {
@@ -4184,10 +3413,6 @@ verify_proxy_service_ready() {
     sleep 0.5
   done
   return 1
-}
-
-verify_xray_service_ready() {
-  verify_proxy_service_ready xray_service_exists xray_service_active desired_xray_listeners
 }
 
 verify_sing_box_service_ready() {
@@ -4323,7 +3548,6 @@ firewall_port_usage() {
         case "$owner" in
           sshd) printf 'SSH\n' ;;
           sing-box) printf 'sing-box\n' ;;
-          xray) printf 'Xray\n' ;;
           realm) printf 'Realm\n' ;;
           *) printf '进程 %s\n' "$owner" ;;
         esac
@@ -6017,7 +5241,6 @@ EOF
       cat >"$CLIENT_DIR/vless-reality/${name}.txt" <<EOF
 [VLESS + Reality]
 name = $display_name
-server_core = $(state_get '.protocols.vless_reality.core // "sing-box"')
 server = $server_address
 port = $vless_port
 uuid = $uuid
@@ -6066,58 +5289,35 @@ EOF
 
 }
 
-restore_managed_runtime_configs() {
-  local sing_snapshot=$1 sing_existed=$2 xray_snapshot=$3 xray_existed=$4
-  local sing_was_active=$5 xray_was_active=$6
+restore_managed_runtime_config() {
+  local snapshot=$1 config_existed=$2 service_was_active=$3
 
   stop_sing_box
-  stop_xray
-  if [[ "$sing_existed" == "true" ]]; then
-    install -o root -g "$RUNTIME_GROUP" -m 0640 "$sing_snapshot" "$CONFIG_FILE"
+  if [[ "$config_existed" == "true" ]]; then
+    install -o root -g "$RUNTIME_GROUP" -m 0640 "$snapshot" "$CONFIG_FILE"
   else
     rm -f "$CONFIG_FILE"
   fi
-  if [[ "$xray_existed" == "true" ]]; then
-    install -o root -g "$RUNTIME_GROUP" -m 0640 "$xray_snapshot" "$XRAY_CONFIG_FILE"
-  else
-    rm -f "$XRAY_CONFIG_FILE"
-  fi
-  if [[ "$sing_was_active" == "true" ]]; then
+  if [[ "$service_was_active" == "true" ]]; then
     restart_sing_box >/dev/null 2>&1 || warn "sing-box 原服务未能自动恢复，请查看日志。"
   fi
-  if [[ "$xray_was_active" == "true" ]]; then
-    restart_xray >/dev/null 2>&1 || warn "Xray 原服务未能自动恢复，请查看日志。"
-  fi
-}
-
-cleanup_apply_temp_configs() {
-  local sing_config=${1:-} xray_config=${2:-} xray_dir=${3:-}
-  [[ -z "$sing_config" ]] || rm -f "$sing_config"
-  [[ -z "$xray_config" ]] || rm -f "$xray_config"
-  [[ -z "$xray_dir" ]] || cleanup_xray_work_dir "$xray_dir"
 }
 
 apply_config() {
-  local enabled_count sing_count tmp_config="" tmp_xray_config="" tmp_xray_dir="" check_output success_text links_file check_bin port_error
-  local sing_snapshot xray_snapshot
-  local service_was_active=false xray_was_active=false sing_config_existed=false xray_config_existed=false
+  local enabled_count tmp_config="" check_output success_text links_file check_bin port_error
+  local config_snapshot service_was_active=false config_existed=false
 
-  sing_count="$(sing_box_protocol_count)"
-  if xray_protocol_enabled; then
-    install_xray_core
-    ensure_xray_service || {
-      ui_msg "Xray 服务准备失败，配置未应用。"
+  enabled_count="$(enabled_protocol_count)"
+  if [[ "$enabled_count" -gt 0 ]]; then
+    ensure_sing_box_service || {
+      ui_msg "sing-box 服务准备失败，配置未应用。"
       return 1
     }
-  fi
-  if [[ "$sing_count" -gt 0 ]]; then
-    ensure_sing_box_service
   fi
   ensure_rule_set_cache_dir || {
     ui_msg "无法准备远程规则集缓存目录，配置未应用。"
     return 1
   }
-  enabled_count="$(enabled_protocol_count)"
 
   if ! prepare_managed_firewall; then
     ui_msg "防火墙环境准备失败，配置未应用、现有服务未停止。请根据上方具体错误处理后重试。"
@@ -6126,16 +5326,14 @@ apply_config() {
 
   if [[ "$enabled_count" -eq 0 ]]; then
     stop_sing_box
-    stop_xray
     disable_sing_box_service
-    disable_xray_service
     write_client_exports
     if ! sync_managed_firewall_rules; then
       ui_msg "节点已停止，但清理防火墙规则失败，请进入端口管理重试。"
       return 1
     fi
-    rm -f "$CONFIG_FILE" "$XRAY_CONFIG_FILE"
-    ui_msg "当前没有启用任何协议，sing-box 与 Xray 服务已停止。"
+    rm -f "$CONFIG_FILE"
+    ui_msg "当前没有启用任何协议，sing-box 服务已停止。"
     return 0
   fi
 
@@ -6143,132 +5341,66 @@ apply_config() {
   normalize_protocol_listen_addresses
   validate_state || return 1
 
-  if [[ "$sing_count" -gt 0 ]]; then
-    tmp_config="$(mktemp "$TMP_DIR/singbox-config.XXXXXX")" || {
-      ui_msg "无法创建 sing-box 临时配置文件。"
-      return 1
-    }
-    render_config >"$tmp_config"
-    chown root:"$RUNTIME_GROUP" "$tmp_config"
-    chmod 0640 "$tmp_config"
-    check_bin="$(sing_box_check_bin 2>/dev/null || true)"
-    if [[ -z "$check_bin" ]]; then
-      rm -f "$tmp_config"
-      ui_msg "未找到可用的 sing-box 配置检查程序，已拒绝替换配置。"
-      return 1
-    fi
-    if ! check_output="$(run_as_runtime "$check_bin" check -c "$tmp_config" 2>&1)"; then
-      rm -f "$tmp_config"
-      ui_show_text "sing-box 配置检查失败" "$check_output"
-      return 1
-    fi
-  fi
-
-  if xray_protocol_enabled; then
-    tmp_xray_dir="$(mktemp -d "$TMP_DIR/sbox-xray.XXXXXX")" || {
-      rm -f "$tmp_config"
-      ui_msg "无法创建 Xray 临时配置目录。"
-      return 1
-    }
-    tmp_xray_config="$tmp_xray_dir/config.json"
-    render_xray_config >"$tmp_xray_config"
-    chown root:"$RUNTIME_GROUP" "$tmp_xray_dir"
-    chmod 0750 "$tmp_xray_dir"
-    chown root:"$RUNTIME_GROUP" "$tmp_xray_config"
-    chmod 0640 "$tmp_xray_config"
-    if ! check_output="$(run_as_runtime env XRAY_LOCATION_ASSET="$XRAY_ASSET_DIR" "$XRAY_BIN" run -test -config "$tmp_xray_config" 2>&1)"; then
-      cleanup_apply_temp_configs "$tmp_config" "$tmp_xray_config" "$tmp_xray_dir"
-      ui_show_text "Xray 配置检查失败" "$check_output"
-      return 1
-    fi
-  fi
-
-  sing_snapshot="$(mktemp "$TMP_DIR/singbox-config-backup.XXXXXX")" || {
-    cleanup_apply_temp_configs "$tmp_config" "$tmp_xray_config" "$tmp_xray_dir"
+  tmp_config="$(mktemp "$TMP_DIR/singbox-config.XXXXXX")" || {
+    ui_msg "无法创建 sing-box 临时配置文件。"
     return 1
   }
-  xray_snapshot="$(mktemp "$TMP_DIR/xray-config-backup.XXXXXX")" || {
-    cleanup_apply_temp_configs "$tmp_config" "$tmp_xray_config" "$tmp_xray_dir"
-    rm -f "$sing_snapshot"
+  render_config >"$tmp_config"
+  chown root:"$RUNTIME_GROUP" "$tmp_config"
+  chmod 0640 "$tmp_config"
+  check_bin="$(sing_box_check_bin 2>/dev/null || true)"
+  if [[ -z "$check_bin" ]]; then
+    rm -f "$tmp_config"
+    ui_msg "未找到可用的 sing-box 配置检查程序，已拒绝替换配置。"
+    return 1
+  fi
+  if ! check_output="$(run_as_runtime "$check_bin" check -c "$tmp_config" 2>&1)"; then
+    rm -f "$tmp_config"
+    ui_show_text "sing-box 配置检查失败" "$check_output"
+    return 1
+  fi
+
+  config_snapshot="$(mktemp "$TMP_DIR/singbox-config-backup.XXXXXX")" || {
+    rm -f "$tmp_config"
     return 1
   }
   if [[ -f "$CONFIG_FILE" ]]; then
-    install -m 0600 "$CONFIG_FILE" "$sing_snapshot"
-    sing_config_existed=true
+    install -m 0600 "$CONFIG_FILE" "$config_snapshot"
+    config_existed=true
   fi
-  if [[ -f "$XRAY_CONFIG_FILE" ]]; then
-    install -m 0600 "$XRAY_CONFIG_FILE" "$xray_snapshot"
-    xray_config_existed=true
-  fi
-
   if service_exists && [[ "$(sing_box_service_active 2>/dev/null || true)" == "active" ]]; then
     service_was_active=true
   fi
-  if xray_service_exists && [[ "$(xray_service_active 2>/dev/null || true)" == "active" ]]; then
-    xray_was_active=true
-  fi
+
   stop_sing_box
-  stop_xray
   if ! port_error="$(validate_sing_box_listener_ports_available)"; then
-    cleanup_apply_temp_configs "$tmp_config" "$tmp_xray_config" "$tmp_xray_dir"
-    restore_managed_runtime_configs "$sing_snapshot" "$sing_config_existed" "$xray_snapshot" "$xray_config_existed" "$service_was_active" "$xray_was_active"
-    rm -f "$sing_snapshot" "$xray_snapshot"
+    rm -f "$tmp_config"
+    restore_managed_runtime_config "$config_snapshot" "$config_existed" "$service_was_active"
+    rm -f "$config_snapshot"
     ui_msg "配置未应用，防火墙未修改。${port_error}"
     return 1
   fi
   if ! sync_managed_firewall_rules; then
-    cleanup_apply_temp_configs "$tmp_config" "$tmp_xray_config" "$tmp_xray_dir"
-    restore_managed_runtime_configs "$sing_snapshot" "$sing_config_existed" "$xray_snapshot" "$xray_config_existed" "$service_was_active" "$xray_was_active"
-    rm -f "$sing_snapshot" "$xray_snapshot"
+    rm -f "$tmp_config"
+    restore_managed_runtime_config "$config_snapshot" "$config_existed" "$service_was_active"
+    rm -f "$config_snapshot"
     ui_msg "防火墙规则同步失败；原配置和原服务状态已恢复。"
     return 1
   fi
 
-  if [[ "$sing_count" -gt 0 ]]; then
-    backup_config_if_exists
-    install -o root -g "$RUNTIME_GROUP" -m 0640 "$tmp_config" "$CONFIG_FILE"
-  fi
-  if xray_protocol_enabled; then
-    if [[ -f "$XRAY_CONFIG_FILE" ]]; then
-      install -m 0600 "$XRAY_CONFIG_FILE" "$BACKUP_DIR/xray-config-$(date +%Y%m%d-%H%M%S).json"
-    fi
-    install -o root -g "$RUNTIME_GROUP" -m 0640 "$tmp_xray_config" "$XRAY_CONFIG_FILE"
-  fi
-  cleanup_apply_temp_configs "$tmp_config" "$tmp_xray_config" "$tmp_xray_dir"
-
-  if [[ "$sing_count" -gt 0 ]]; then
-    if ! restart_sing_box || ! verify_sing_box_service_ready; then
-      restore_managed_runtime_configs "$sing_snapshot" "$sing_config_existed" "$xray_snapshot" "$xray_config_existed" "$service_was_active" "$xray_was_active"
-      rm -f "$sing_snapshot" "$xray_snapshot"
-      ui_show_text "sing-box 启动失败，原运行配置已恢复" "$(sing_box_recent_logs)"
-      return 1
-    fi
-  else
-    stop_sing_box
-    disable_sing_box_service
+  backup_config_if_exists
+  install -o root -g "$RUNTIME_GROUP" -m 0640 "$tmp_config" "$CONFIG_FILE"
+  rm -f "$tmp_config"
+  if ! restart_sing_box || ! verify_sing_box_service_ready; then
+    restore_managed_runtime_config "$config_snapshot" "$config_existed" "$service_was_active"
+    rm -f "$config_snapshot"
+    ui_show_text "sing-box 启动失败，原运行配置已恢复" "$(sing_box_recent_logs)"
+    return 1
   fi
 
-  if xray_protocol_enabled; then
-    if ! restart_xray || ! verify_xray_service_ready; then
-      restore_managed_runtime_configs "$sing_snapshot" "$sing_config_existed" "$xray_snapshot" "$xray_config_existed" "$service_was_active" "$xray_was_active"
-      rm -f "$sing_snapshot" "$xray_snapshot"
-      ui_show_text "Xray 启动失败，原运行配置已恢复" "$(xray_recent_logs)"
-      return 1
-    fi
-  else
-    stop_xray
-    disable_xray_service
-  fi
-
-  if [[ "$sing_count" -eq 0 ]]; then
-    rm -f "$CONFIG_FILE"
-  fi
-  if ! xray_protocol_enabled; then
-    rm -f "$XRAY_CONFIG_FILE"
-  fi
-  rm -f "$sing_snapshot" "$xray_snapshot"
+  rm -f "$config_snapshot"
   write_client_exports
-  if [[ "$sing_count" -gt 0 ]] && ! verify_sing_box_service_ready; then
+  if ! verify_sing_box_service_ready; then
     ui_show_text "sing-box 启动后未能建立全部监听端口" "$(sing_box_recent_logs)"
     return 1
   fi
@@ -6310,7 +5442,7 @@ repair_install() {
   manager_target="$MANAGER_SCRIPT_PATH"
   log "repair-install 将使用当前已安装脚本修复核心、权限、服务和配置；如需更新脚本，请在面板选择 [更新脚本]。"
 
-  if have_cmd sing-box || [[ "$(sing_box_protocol_count)" -gt 0 ]]; then
+  if have_cmd sing-box || [[ "$(enabled_protocol_count)" -gt 0 ]]; then
     sing_box_needed=true
     install_sing_box
   else
@@ -6324,7 +5456,7 @@ repair_install() {
     ui_msg "防火墙开机恢复服务安装失败，请修复 systemd 后重试。"
     return 1
   }
-  if [[ "$sing_box_needed" == true || -x "$XRAY_BIN" || "$(enabled_protocol_count)" -gt 0 ]]; then
+  if [[ "$sing_box_needed" == true || "$(enabled_protocol_count)" -gt 0 ]]; then
     proxy_runtime_present=true
     apply_config || return 1
   fi
@@ -6438,28 +5570,10 @@ select_reality_sni_default() {
 }
 
 configure_vless_reality() {
-  local core_choice core ss_port port selected_sni sni handshake_port keypair private_key public_key short_id listen_addr previous_state_file
+  local ss_port port selected_sni sni handshake_port keypair private_key public_key short_id listen_addr previous_state_file
   local default_port default_sni default_handshake_port vless_enabled
 
-  core_choice="$(ui_menu "VLESS + Reality 内核" "两种内核使用相同的端口、Reality 参数、客户端和分享链接。Xray 仅在首次选择时下载固定稳定版本，配置变更不会自动升级。" \
-    "1" "Xray-core（未安装则自动下载）" \
-    "2" "sing-box（未安装则询问安装）" \
-    "0" "返回")" || return 1
-  case "$core_choice" in
-    1)
-      core="xray"
-      install_xray_core
-      ;;
-    2)
-      core="sing-box"
-      ensure_sing_box_for_node "VLESS + Reality（sing-box 内核）" || return 1
-      ;;
-    0) return 0 ;;
-    *)
-      ui_msg "无效选项，请重新选择。"
-      return 1
-      ;;
-  esac
+  ensure_sing_box_for_node "VLESS + Reality" || return 1
 
   previous_state_file="$(snapshot_sing_box_state_file)" || {
     ui_msg "无法创建节点状态快照，未修改 VLESS + Reality。"
@@ -6500,16 +5614,15 @@ configure_vless_reality() {
   public_key="$(state_get '.protocols.vless_reality.public_key // ""')"
   short_id="$(state_get '.protocols.vless_reality.short_id // ""')"
   if [[ -z "$private_key" || -z "$public_key" || -z "$short_id" ]]; then
-    keypair="$(generate_reality_keypair "$core")"
+    keypair="$(generate_reality_keypair)"
     private_key="${keypair%%$'\t'*}"
     public_key="${keypair##*$'\t'}"
     short_id="$(generate_hex 8)"
   fi
   listen_addr="$(default_listen_address)"
 
-  state_jq --arg core "$core" --argjson port "$port" --arg sni "$sni" --arg handshake_server "$sni" --argjson handshake_port "$handshake_port" --arg private_key "$private_key" --arg public_key "$public_key" --arg short_id "$short_id" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
+  state_jq --argjson port "$port" --arg sni "$sni" --arg handshake_server "$sni" --argjson handshake_port "$handshake_port" --arg private_key "$private_key" --arg public_key "$public_key" --arg short_id "$short_id" --arg listen_addr "$listen_addr" --arg ts "$(utc_now)" '
     .protocols.vless_reality.enabled = true |
-    .protocols.vless_reality.core = $core |
     .protocols.vless_reality.listen = $listen_addr |
     .protocols.vless_reality.port = $port |
     .protocols.vless_reality.server_name = $sni |
@@ -6664,18 +5777,6 @@ configure_block_cn_ip() {
 }
 
 node_menu_text() {
-  local vless_enabled vless_core vless_status
-  vless_enabled="$(state_get '.protocols.vless_reality.enabled // false')"
-  vless_status="VLESS + Reality：${vless_enabled}"
-  if [[ "$vless_enabled" == "true" ]]; then
-    vless_core="$(state_get '.protocols.vless_reality.core // "sing-box"')"
-    case "$vless_core" in
-      xray|sing-box) ;;
-      *) vless_core="未知" ;;
-    esac
-    vless_status+=$'\n'"VLESS 核心类型：${vless_core}"
-  fi
-
   cat <<EOF
 节点地址：$(state_get '.meta.server_address // "-"')
 IPv6 地址：$(state_get 'if (.meta.dual_stack // false) then (.meta.server_address_ipv6 // "-") else "未启用" end')
@@ -6683,9 +5784,8 @@ IPv6 地址：$(state_get 'if (.meta.dual_stack // false) then (.meta.server_add
 出站访问：$(outbound_ip_preference_label)
 CN IP 出站限制：$(block_cn_ip_label)
 sing-box 核心：$(sing_box_install_status)（搭建相关节点时按需安装）
-Xray 核心：$(xray_install_status)
 Shadowsocks：$(state_get '.protocols.shadowsocks.enabled')
-${vless_status}
+VLESS + Reality：$(state_get '.protocols.vless_reality.enabled // false')
 Hysteria2：$(state_get '.protocols.hysteria2.enabled')
 
 请选择要执行的节点操作（输入 0 返回上一级，输入 00 退出脚本）
@@ -6805,7 +5905,6 @@ node_submenu() {
       "6" "更改节点地址" \
       "7" "设置出站 IPv4 / IPv6 策略" \
       "8" "设置禁止访问 CN IP" \
-      "9" "为当前内核补充 V2Ray API（不升级）" \
       "0" "返回上一级菜单" \
       "00" "退出脚本")" || continue
 
@@ -6833,9 +5932,6 @@ node_submenu() {
         ;;
       8)
         configure_block_cn_ip || true
-        ;;
-      9)
-        ensure_sing_box_v2ray_api || true
         ;;
       0)
         return 0
@@ -7890,19 +6986,6 @@ sing_box_install_status() {
   fi
 }
 
-xray_install_status() {
-  local version="版本未知"
-
-  if [[ -x "$XRAY_BIN" ]]; then
-    if have_cmd jq && [[ -s "$STATE_FILE" ]]; then
-      version="$(state_get '.runtime.xray.version // "版本未知"' 2>/dev/null || printf '版本未知')"
-    fi
-    printf '已安装（%s）\n' "$version"
-  else
-    printf '未安装（按需安装）\n'
-  fi
-}
-
 realm_install_status() {
   if [[ -x "$REALM_BIN" ]]; then
     if run_as_runtime "$REALM_BIN" --version >/dev/null 2>&1; then
@@ -7925,7 +7008,6 @@ main_menu_text() {
     fi
     cat <<EOF
 Sing-box 状态：$(sing_box_install_status)
-Xray 状态：$(xray_install_status)
 代理环境：未初始化
 Realm 状态：$(realm_install_status)
 Realm转发个数：${realm_forward_count} 个
@@ -7943,7 +7025,6 @@ EOF
 
   cat <<EOF
 Sing-box 状态：$(sing_box_install_status)
-Xray 状态：$(xray_install_status)
 节点个数：$(state_get '[.protocols[]?.users[]?] | length') 个
 Realm转发个数：${realm_forward_count} 个
 WireGuard隧道：${wireguard_tunnel_count} 个
@@ -8025,7 +7106,7 @@ show_subscription_links() {
 }
 
 show_overview() {
-  local server_address service_status xray_status ss_users vless_users hy2_users overview node_name links_file
+  local server_address service_status ss_users vless_users hy2_users overview node_name links_file
   server_address="$(state_get '.meta.server_address' 2>/dev/null || true)"
   node_name="$(state_get '.meta.node_name' 2>/dev/null || true)"
 
@@ -8034,12 +7115,6 @@ show_overview() {
   else
     service_status="unknown"
   fi
-  if xray_service_exists; then
-    xray_status="$(xray_service_active 2>/dev/null || printf 'unknown\n')"
-  else
-    xray_status="未安装"
-  fi
-
   ss_users="$(jq -r '.protocols.shadowsocks.users | map(.name) | if length == 0 then "-" else join(", ") end' "$STATE_FILE" 2>/dev/null || printf -- '-\n')"
   vless_users="$(jq -r '.protocols.vless_reality.users | map(.name) | if length == 0 then "-" else join(", ") end' "$STATE_FILE" 2>/dev/null || printf -- '-\n')"
   hy2_users="$(jq -r '.protocols.hysteria2.users | map(.name) | if length == 0 then "-" else join(", ") end' "$STATE_FILE" 2>/dev/null || printf -- '-\n')"
@@ -8055,7 +7130,6 @@ IPv6 地址: $(state_get 'if (.meta.dual_stack // false) then (.meta.server_addr
 出站访问: $(outbound_ip_preference_label 2>/dev/null || printf '未知')
 CN IP 出站限制: $(block_cn_ip_label)
 sing-box 状态: $service_status
-Xray 状态: $xray_status
 配置文件: $CONFIG_FILE
 客户端导出目录: $CLIENT_DIR
 导入链接文件: ${links_file}
@@ -8067,7 +7141,6 @@ users = $ss_users
 
 [VLESS + Reality]
 enabled = $(state_get '.protocols.vless_reality.enabled')
-core = $(state_get '.protocols.vless_reality.core // "sing-box"')
 port = $(state_get '.protocols.vless_reality.port')
 sni = $(state_get '.protocols.vless_reality.server_name')
 public_key = $(state_get '.protocols.vless_reality.public_key')
@@ -8120,48 +7193,25 @@ show_service_status() {
     fi
   fi
 
-  text+="\n\n[Xray]\n"
-  if [[ -x "$XRAY_BIN" ]]; then
-    version_output="$(xray_version_text 2>/dev/null || true)"
-    text+="Xray version: ${version_output:-读取失败}\n"
-    text+="managed binary: ${XRAY_BIN}\n"
-    text+="recorded SHA-256: $(state_get '.runtime.xray.binary_sha256 // "未记录"' 2>/dev/null || printf '未记录')\n"
-  else
-    text+="Xray version: 未安装\n"
-  fi
-  if xray_service_exists; then
-    active_status="$(xray_service_active 2>/dev/null || printf 'unknown\n')"
-    enabled_status="$(xray_service_enabled 2>/dev/null || printf 'unknown\n')"
-    recent_logs="$(xray_recent_logs 2>/dev/null || printf '无法读取最近日志。\n')"
-    text+="service active: ${active_status}\n"
-    text+="service enabled: ${enabled_status}\n"
-    text+="\n最近日志:\n${recent_logs}"
-  fi
-
   ui_show_text "服务状态" "$(printf '%b' "$text")" || true
   return 0
 }
 
 uninstall_sbox() {
-  local uninstall_text xray_managed=false
-  uninstall_text=$'这将执行以下操作：\n- 停止并禁用 sing-box 与脚本托管的 Xray\n- 停止并禁用 Realm 及脚本托管的 sbwg* WireGuard 隧道\n- 卸载 sing-box 软件包（如果存在）\n- 删除脚本托管的 Xray 二进制、节点、Realm、WireGuard 密钥和状态\n- 删除 sbox 与 realm 命令\n\n不会删除系统中其他 xray.service、/usr/local/bin/xray 或非 sbwg* 的用户 WireGuard 配置。是否继续？'
+  local uninstall_text
+  uninstall_text=$'这将执行以下操作：\n- 停止并禁用 sing-box\n- 停止并禁用 Realm 及脚本托管的 sbwg* WireGuard 隧道\n- 卸载 sing-box 软件包（如果存在）\n- 删除节点、Realm、WireGuard 密钥和状态\n- 删除 sbox 与 realm 命令\n\n不会删除非 sbwg* 的用户 WireGuard 配置。是否继续？'
 
   ui_yesno "$uninstall_text" || return 0
-  xray_managed="$(state_get '.runtime.xray.managed // false' 2>/dev/null || printf 'false\n')"
 
   if have_cmd systemctl; then
     systemctl stop sing-box >/dev/null 2>&1 || true
     systemctl disable sing-box >/dev/null 2>&1 || true
-    systemctl stop sbox-xray >/dev/null 2>&1 || true
-    systemctl disable sbox-xray >/dev/null 2>&1 || true
     systemctl stop realm >/dev/null 2>&1 || true
     systemctl disable realm >/dev/null 2>&1 || true
   fi
   if has_openrc; then
     rc-service sing-box stop >/dev/null 2>&1 || true
     rc-update del sing-box default >/dev/null 2>&1 || true
-    rc-service sbox-xray stop >/dev/null 2>&1 || true
-    rc-update del sbox-xray default >/dev/null 2>&1 || true
     rc-service realm stop >/dev/null 2>&1 || true
     rc-update del realm default >/dev/null 2>&1 || true
   fi
@@ -8202,23 +7252,11 @@ uninstall_sbox() {
   esac
 
   rm -f /etc/systemd/system/sing-box.service /lib/systemd/system/sing-box.service /usr/lib/systemd/system/sing-box.service /etc/systemd/system/multi-user.target.wants/sing-box.service 2>/dev/null || true
-  rm -f "$XRAY_SYSTEMD_SERVICE_FILE" /etc/systemd/system/multi-user.target.wants/sbox-xray.service 2>/dev/null || true
-  rm -f "$XRAY_OPENRC_SERVICE_FILE" "$XRAY_OPENRC_LOG_FILE" 2>/dev/null || true
   rm -f "$SING_BOX_OPENRC_SERVICE_FILE" "$SING_BOX_OPENRC_LOG_FILE" 2>/dev/null || true
   rm -f "$REALM_SERVICE_FILE" /lib/systemd/system/realm.service /usr/lib/systemd/system/realm.service /etc/systemd/system/multi-user.target.wants/realm.service 2>/dev/null || true
   rm -f "$REALM_OPENRC_SERVICE_FILE" "$REALM_OPENRC_LOG_FILE" 2>/dev/null || true
   rm -f "$SING_BOX_HARDENING_DROPIN_FILE" 2>/dev/null || true
-  rmdir "$SING_BOX_FIREWALL_DROPIN_DIR" "$XRAY_FIREWALL_DROPIN_DIR" "$REALM_FIREWALL_DROPIN_DIR" 2>/dev/null || true
-  if [[ "$xray_managed" == "true" || -f "$XRAY_MANAGED_MARKER" ]]; then
-    case "$XRAY_INSTALL_DIR" in
-      /usr/local/lib/sbox-xray|/usr/local/lib/sbox-xray/*)
-        rm -rf -- "$XRAY_INSTALL_DIR"
-        ;;
-      *)
-        warn "Xray 安装目录不在脚本允许的卸载范围内，已保留：$XRAY_INSTALL_DIR"
-        ;;
-    esac
-  fi
+  rmdir "$SING_BOX_FIREWALL_DROPIN_DIR" "$REALM_FIREWALL_DROPIN_DIR" 2>/dev/null || true
   rm -rf /etc/sing-box "$REALM_DIR" "$STATE_DIR" 2>/dev/null || true
   rm -rf "$PROJECT_INSTALL_DIR" 2>/dev/null || true
   rm -f /usr/local/bin/sbox /usr/local/bin/singbox-manager "$REALM_BIN" 2>/dev/null || true
@@ -8239,7 +7277,6 @@ uninstall_sbox() {
   if have_cmd systemctl; then
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl reset-failed sing-box >/dev/null 2>&1 || true
-    systemctl reset-failed sbox-xray >/dev/null 2>&1 || true
     systemctl reset-failed realm >/dev/null 2>&1 || true
   fi
 
@@ -8327,8 +7364,6 @@ usage() {
 用法:
   $SCRIPT_NAME                打开管理面板
   $SCRIPT_NAME quick-install  初始化管理环境（不安装代理核心）
-  $SCRIPT_NAME enable-v2ray-api
-                          本机重编译当前内核，补充 V2Ray API（不升级）
   $SCRIPT_NAME node           打开代理节点管理菜单
   $SCRIPT_NAME ports          打开端口管理菜单
   $SCRIPT_NAME tools          打开一键常用脚本菜单
@@ -8342,15 +7377,15 @@ usage() {
   $SCRIPT_NAME show           查看客户端信息
   $SCRIPT_NAME overview       查看当前概览
   $SCRIPT_NAME status         查看服务状态
-  $SCRIPT_NAME uninstall      卸载 sing-box、脚本托管的 Xray 和 sbox
+  $SCRIPT_NAME uninstall      卸载 sing-box 和 sbox
   $SCRIPT_NAME --version      查看脚本版本
 
 说明:
   1. 面板使用纯命令行数字输入，不依赖方向键。
   2. Hysteria2 默认使用自签名证书。
-  3. 初始化环境不会安装代理核心；搭建节点时再按所选协议安装 sing-box 或经 SHA-256 校验的 Xray-core。
+  3. 初始化环境不会安装代理核心；搭建节点时再按所选协议安装 sing-box。
   4. 新建 Shadowsocks 节点仅提供 SS2022，节点端口由端口管理统一控制。
-  5. repair-install 会按现有配置修复所需核心、Realm 二进制兼容性、权限和服务；纯 Realm 环境不会安装 sing-box，也不会删除状态文件、客户端或隐式升级 Xray。
+  5. repair-install 会按现有配置修复 sing-box、Realm 二进制兼容性、权限和服务；纯 Realm 环境不会安装 sing-box，也不会删除状态文件或客户端。
   6. 节点名称、出口地址和所需代理核心均在新建节点时按需配置。
 EOF
 }
@@ -8376,10 +7411,6 @@ main() {
   case "${1:-panel}" in
     quick-install)
       quick_install
-      ;;
-    enable-v2ray-api)
-      prepare_root_command
-      ensure_sing_box_v2ray_api
       ;;
     apply)
       prepare_state_command
